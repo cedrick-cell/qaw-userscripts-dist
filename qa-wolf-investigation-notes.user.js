@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         QA Wolf Investigation Notes
 // @namespace    http://tampermonkey.net/
-// @version      1.459
+// @version      1.460
 // @description  Per-file investigation notes: quick links (new-tab opens, PoC textarea, client-wide notes), client/env chips, instant tooltips, run timing, shift sync, work mode, export, search. data-e2e investigation-* hooks.
 // @author       You
 // @match        https://app.qawolf.com/*
@@ -97,6 +97,9 @@
         shiftEndingCountdownInterval: null,
         /** Set by gutter "Add note" to auto-enter edit mode on the next render of that card. */
         pendingEditEntry: null,
+        /** Background panel renders deferred while a note editor is active. */
+        pendingProtectedPanelRenderKey: null,
+        pendingProtectedPanelRenderReason: "",
         /** In-memory LLM conversations keyed by bullet id. Lost on tab close. */
         llmConversations: /* @__PURE__ */ new Map(),
         /** Bullet ids with an LLM request currently in flight. */
@@ -2137,6 +2140,8 @@
       state.panelEl.remove();
       state.panelEl = null;
     }
+    state.pendingProtectedPanelRenderKey = null;
+    state.pendingProtectedPanelRenderReason = "";
     state.prevFollowActiveKey = null;
   }
   function readRunChimeMetrics() {
@@ -2379,7 +2384,7 @@
       } catch (e) {
       }
       try {
-        if ("1.459") return "1.459";
+        if ("1.460") return "1.460";
       } catch (e2) {
       }
       return "unknown";
@@ -16052,6 +16057,51 @@ This won't delete the actual file.`)) return;
     }
   });
 
+  // src/notes/39-editor-protection.ts
+  function shouldDeferPanelRenderForActiveEditor(targetEditKey, hasActiveEditor) {
+    return !!(targetEditKey && hasActiveEditor);
+  }
+  function panelHasActiveEditor() {
+    if (!state.panelEl) return false;
+    if (state.panelEl.querySelector("[data-qaw-single-note-edit]")) return true;
+    var ae = document.activeElement;
+    if (!ae || !state.panelEl.contains(ae)) return false;
+    var el = ae;
+    if (el.isContentEditable) return true;
+    var tag = String(el.tagName || "").toLowerCase();
+    if (tag === "textarea" || tag === "select") return true;
+    if (tag === "input") {
+      var t = String(el.type || "").toLowerCase();
+      return t === "text" || t === "search" || t === "url" || t === "email" || t === "password" || t === "tel" || t === "number" || t === "";
+    }
+    return false;
+  }
+  function shouldDeferPanelRender(editKey) {
+    return shouldDeferPanelRenderForActiveEditor(editKey, panelHasActiveEditor());
+  }
+  function queueProtectedPanelRender(editKey, reason) {
+    if (!editKey) return;
+    state.pendingProtectedPanelRenderKey = editKey;
+    state.pendingProtectedPanelRenderReason = reason || "";
+    if (state.panelEl) state.panelEl.setAttribute("data-qaw-protected-render-pending", "1");
+  }
+  function flushProtectedPanelRenderIfReady(renderFn) {
+    if (!state.pendingProtectedPanelRenderKey) return false;
+    if (panelHasActiveEditor()) return false;
+    var editKey = state.pendingProtectedPanelRenderKey;
+    state.pendingProtectedPanelRenderKey = null;
+    state.pendingProtectedPanelRenderReason = "";
+    if (state.panelEl) state.panelEl.removeAttribute("data-qaw-protected-render-pending");
+    renderFn(editKey);
+    return true;
+  }
+  var init_editor_protection = __esm({
+    "src/notes/39-editor-protection.ts"() {
+      "use strict";
+      init_state();
+    }
+  });
+
   // src/notes/38-panel-bootstrap.ts
   function panelBootstrapMode(ctx, fileName, hostname) {
     if (ctx && fileName) return "ready";
@@ -16738,17 +16788,7 @@ This won't delete the actual file.`)) return;
     }
   }
   function hasActiveCardEdit() {
-    if (!state.panelEl) return false;
-    if (state.panelEl.querySelector("[data-qaw-single-note-edit]")) return true;
-    var ae = document.activeElement;
-    if (!ae || !state.panelEl.contains(ae)) return false;
-    if (ae instanceof HTMLTextAreaElement) return true;
-    if (ae instanceof HTMLSelectElement) return true;
-    if (ae instanceof HTMLInputElement) {
-      var t = (ae.type || "").toLowerCase();
-      return t === "text" || t === "search" || t === "url" || t === "email" || t === "password" || t === "tel" || t === "number" || t === "";
-    }
-    return false;
+    return panelHasActiveEditor();
   }
   function wireFlowPassedObserver() {
     if (state.flowPassedObserver) return;
@@ -16783,7 +16823,11 @@ This won't delete the actual file.`)) return;
     var isMetaKey = e.key === META_STORAGE_KEY;
     var isNoteKey = !!e.key && e.key.startsWith(NOTE_LS_KEY_PREFIX);
     if (!isMetaKey && !isNoteKey) return;
-    if (hasActiveCardEdit()) return;
+    if (hasActiveCardEdit()) {
+      var activeEk = state.panelEl.getAttribute("data-qaw-edit-key");
+      if (activeEk) queueProtectedPanelRender(activeEk, "storage");
+      return;
+    }
     applyStoreFromDiskMergedNotes();
     var ek = state.panelEl.getAttribute("data-qaw-edit-key");
     if (ek && state.store.notes[ek]) renderPanelForKey(ek);
@@ -16858,6 +16902,10 @@ This won't delete the actual file.`)) return;
     }
     if (!state.panelEl) return;
     tryUpgradePanelFromBootstrap();
+    flushProtectedPanelRenderIfReady(function(pendingKey) {
+      applyStoreFromDiskMergedNotes();
+      renderPanelForKey(pendingKey, { force: true, reason: "protected-flush" });
+    });
     if (syncShiftBridgeIntoStore()) {
       refreshInvestigationShiftBar();
       refreshDrawerFooter();
@@ -16869,7 +16917,7 @@ This won't delete the actual file.`)) return;
     updateShiftTimeRemaining();
     var ek = state.panelEl.getAttribute("data-qaw-edit-key");
     var activeK = getActiveNoteKey();
-    if (ek && activeK && state.prevFollowActiveKey != null && activeK !== state.prevFollowActiveKey) {
+    if (ek && activeK && state.prevFollowActiveKey != null && activeK !== state.prevFollowActiveKey && !hasActiveCardEdit()) {
       renderPanelForKey(activeK);
     }
     state.prevFollowActiveKey = activeK;
@@ -16909,6 +16957,7 @@ This won't delete the actual file.`)) return;
       init_render_panel();
       init_discover();
       init_panel_bootstrap();
+      init_editor_protection();
       init_bug_logic();
       init_maintenance_logic();
       init_context();
@@ -16968,8 +17017,17 @@ This won't delete the actual file.`)) return;
       el.style.bottom = (p.bottom != null ? p.bottom : 24) + "px";
     }
   }
-  function renderPanelForKey(editKey) {
+  function renderPanelForKey(editKey, opts) {
     if (!state.panelEl) return;
+    if (!(opts && opts.force) && shouldDeferPanelRender(editKey)) {
+      queueProtectedPanelRender(editKey, opts && opts.reason);
+      return;
+    }
+    if (state.pendingProtectedPanelRenderKey === editKey) {
+      state.pendingProtectedPanelRenderKey = null;
+      state.pendingProtectedPanelRenderReason = "";
+      state.panelEl.removeAttribute("data-qaw-protected-render-pending");
+    }
     ensureNotesOccChipDelegation();
     ensureNotesLineNavDelegation();
     var meta = parseNoteKey(editKey);
@@ -17499,6 +17557,7 @@ This won't delete the actual file.`)) return;
       init_context();
       init_slack_self_dm();
       init_discover();
+      init_editor_protection();
       init_discover();
       state.renderPanelForKeyFn = renderPanelForKey;
     }
@@ -21028,7 +21087,7 @@ This won't delete the actual file.`)) return;
     } catch (_) {
     }
     try {
-      if ("1.459") return "1.459";
+      if ("1.460") return "1.460";
     } catch (_) {
     }
     return "unknown";
