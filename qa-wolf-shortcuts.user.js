@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         QA Wolf Shortcuts
 // @namespace    http://tampermonkey.net/
-// @version      4.142
+// @version      4.143
 // @description  Keyboard shortcut hints for app.qawolf.com. Header nav shortcuts live in JSON key __global__ (editable). File tabs: Shift+right-click = Close other tabs. Violet badges = Meta chord. task-wolf.com: Select All button for Bug Revalidation Tasks.
 // @author       You
 // @match        https://app.qawolf.com/*
@@ -20,7 +20,6 @@
   var STORAGE_KEY_FOLLOW = "_qaWolfFollowMode";
   var STORAGE_KEY_LINE_COUNTS = "_qaWolfLineCounts";
   var STORAGE_KEY_OPEN_TABS = "_qawOpenTabs";
-  var STORAGE_KEY_SCROLL_DEBUG = "_qawScrollDebug_";
   var STORAGE_KEY_FILE_INDEX = "_qawFileIndex";
   var STORAGE_KEY_LIVE_LINE = "_qawLiveLine";
   var GLOBAL_PAGE_KEY = "__global__";
@@ -51,12 +50,8 @@
   var shortcutsDrawer = null;
   var helpDrawer = null;
   var lastOverlaySig = "";
-  var _lineChip = null;
-  var _lineMenu = null;
   var _followMode = localStorage.getItem(STORAGE_KEY_FOLLOW) !== "0";
-  var _followInterval = null;
   var _isPartialRun = false;
-  var _scrollingToLine = false;
   var _originalTitle = null;
   var _lastProgressPct = null;
   var _lastExecutingLine = null;
@@ -70,12 +65,8 @@
   var _lastRunPassed = null;
   var _prevHeartbeatIsRunning = false;
   var _lastIndexedModelKey = null;
-  var _monacoScrollListener = null;
   var _runMaxLine = 0;
   var _lastHiddenScrollNudgeAt = 0;
-  var _hiddenFollowDeepScanInFlight = false;
-  var _lastHiddenFollowDeepScanAt = 0;
-  var _decoClassesLogged = false;
   var _fileTotalLines = function() {
     try {
       return JSON.parse(localStorage.getItem(STORAGE_KEY_LINE_COUNTS) || "{}");
@@ -1982,11 +1973,6 @@
     if (_lastExecutingLine != null) return _lastExecutingLine;
     return null;
   }
-  function _sleep(ms) {
-    return new Promise(function(resolve) {
-      setTimeout(resolve, ms);
-    });
-  }
   function _glyphFromDecorations(ed, isRunning) {
     var model = null;
     try {
@@ -2036,74 +2022,6 @@
     var lh = domNode ? getEditorLineHeight(ed, domNode) : 19;
     var absTop = Math.max(0, (bestLine - 1) * lh);
     return { line: bestLine, absTop, cls: bestCls };
-  }
-  function _latestGlyphInView(ed, isRunning) {
-    var statusLine = null;
-    if (isRunning) {
-      if (_qawCanUseRunGlyphs(ed)) {
-        statusLine = _qawLineFromStatusIcons(["icon-Loader"]);
-      }
-    } else {
-      statusLine = _qawLineFromStatusIcons(["icon-XCircle", "icon-PriorityUrgent", "icon-CheckCircleSm"]);
-    }
-    if (statusLine != null) {
-      var domNode0 = null;
-      try {
-        domNode0 = ed.getDomNode && ed.getDomNode();
-      } catch (e0) {
-        domNode0 = null;
-      }
-      var lh0 = domNode0 ? getEditorLineHeight(ed, domNode0) : 19;
-      return { line: statusLine, absTop: Math.max(0, (statusLine - 1) * lh0) };
-    }
-    var decoHit = _glyphFromDecorations(ed, isRunning);
-    if (decoHit) return { line: decoHit.line, absTop: decoHit.absTop };
-    var domNode = null;
-    try {
-      domNode = ed.getDomNode && ed.getDomNode();
-    } catch (e) {
-      return null;
-    }
-    if (!domNode) return null;
-    var overlayContainer = domNode.querySelector(".overlayWidgets");
-    if (!overlayContainer) return null;
-    var lineHeight = getEditorLineHeight(ed, domNode);
-    var editorRectTop = domNode.getBoundingClientRect().top;
-    var scrollTop = 0;
-    try {
-      scrollTop = Math.max(0, ed.getScrollTop());
-    } catch (e) {
-      scrollTop = 0;
-    }
-    var glyphs = [];
-    if (isRunning) {
-      glyphs = Array.prototype.slice.call(
-        overlayContainer.querySelectorAll(
-          '[class*="ProgressGlyphs"], [class*="progressglyph"], [class*="progress"], [class*="loading"]'
-        )
-      );
-    } else {
-      var all = Array.prototype.slice.call(
-        overlayContainer.querySelectorAll('[class*="Glyph"], [class*="glyph"], [class*="codicon"]')
-      );
-      glyphs = all.filter(function(g) {
-        var cls = String(g.className || "").toLowerCase();
-        if (!cls) return false;
-        if (cls.indexOf("lightbulb") !== -1 || cls.indexOf("suggest") !== -1) return false;
-        if (cls.indexOf("progressglyphs") !== -1) return false;
-        return cls.indexOf("check") !== -1 || cls.indexOf("pass") !== -1 || cls.indexOf("success") !== -1 || cls.indexOf("error") !== -1 || cls.indexOf("fail") !== -1 || cls.indexOf("close") !== -1 || cls.indexOf("warning") !== -1;
-      });
-    }
-    if (!glyphs.length) return null;
-    var bestRelTop = -Infinity;
-    for (var i = 0; i < glyphs.length; i++) {
-      var relTop = glyphTopPx(glyphs[i], editorRectTop);
-      if (relTop == null) continue;
-      if (relTop > bestRelTop) bestRelTop = relTop;
-    }
-    if (!Number.isFinite(bestRelTop)) return null;
-    var line = Math.max(1, Math.round(bestRelTop / lineHeight) + 1);
-    return { line, absTop: scrollTop + bestRelTop };
   }
   function _installGlyphLocatorProbe() {
     window.__QAWProbeGlyphLocators = function() {
@@ -2173,139 +2091,6 @@
       console.log("[QAW glyph probe] decoration pick", pick);
     };
   }
-  function _scrollNearGlyph(ed, found) {
-    var domNode = null;
-    try {
-      domNode = ed.getDomNode && ed.getDomNode();
-    } catch (e) {
-      domNode = null;
-    }
-    var viewport = domNode ? Math.max(160, domNode.clientHeight || 0) : 320;
-    var targetScrollTop = Math.max(0, Math.round(found.absTop - viewport * 0.45));
-    var beforeTop = 0;
-    var afterTop = 0;
-    try {
-      beforeTop = Math.max(0, Number(ed.getScrollTop()) || 0);
-    } catch (_e0) {
-      beforeTop = 0;
-    }
-    try {
-      ed.setScrollTop(targetScrollTop);
-    } catch (e) {
-    }
-    try {
-      afterTop = Math.max(0, Number(ed.getScrollTop()) || 0);
-    } catch (_e1) {
-      afterTop = 0;
-    }
-    try {
-      var k = STORAGE_KEY_SCROLL_DEBUG + (window.name || "unknown");
-      var arr = JSON.parse(localStorage.getItem(k) || "[]");
-      if (!Array.isArray(arr)) arr = [];
-      arr.push({
-        ts: Date.now(),
-        event: "follow_apply",
-        line: found.line,
-        before: beforeTop,
-        target: targetScrollTop,
-        after: afterTop,
-        hidden: document.hidden ? 1 : 0
-      });
-      if (arr.length > 50) arr = arr.slice(arr.length - 50);
-      localStorage.setItem(k, JSON.stringify(arr));
-    } catch (_e2) {
-    }
-    _lastExecutingLine = found.line;
-    _lastExecutingLineSeenAt = Date.now();
-    try {
-      var _llMap = JSON.parse(localStorage.getItem(STORAGE_KEY_LIVE_LINE) || "{}");
-      _llMap[window.name || ""] = { line: found.line, ts: Date.now() };
-      localStorage.setItem(STORAGE_KEY_LIVE_LINE, JSON.stringify(_llMap));
-    } catch (_llE) {
-    }
-    var key = _getModelKey(ed);
-    var total = key ? _fileTotalLines[key] : null;
-    if (total) {
-      var pct = Math.min(100, Math.round(found.line / total * 100));
-      _lastProgressPct = pct;
-    }
-  }
-  async function findCurrentGlyphByScrolling(ed) {
-    var isRunning = !!document.querySelector('[data-e2e="stop-run-button"]');
-    var immediate = _latestGlyphInView(ed, isRunning);
-    if (immediate) return immediate;
-    var domNode = null;
-    try {
-      domNode = ed.getDomNode && ed.getDomNode();
-    } catch (e) {
-      return null;
-    }
-    if (!domNode) return null;
-    var startScrollTop = 0;
-    try {
-      startScrollTop = Math.max(0, ed.getScrollTop());
-    } catch (e) {
-      startScrollTop = 0;
-    }
-    var viewport = Math.max(160, domNode.clientHeight || 0);
-    var stepPx = Math.max(120, Math.floor(viewport * 0.8));
-    var maxLoops = 28;
-    var best = null;
-    for (var i = 0; i < maxLoops; i++) {
-      var scrollTop = 0;
-      var scrollHeight = 0;
-      try {
-        scrollTop = Math.max(0, ed.getScrollTop());
-        scrollHeight = Math.max(0, ed.getScrollHeight());
-      } catch (e) {
-        break;
-      }
-      var foundHere = _latestGlyphInView(ed, isRunning);
-      if (foundHere && (!best || foundHere.absTop > best.absTop)) best = foundHere;
-      var maxTop = Math.max(0, scrollHeight - viewport);
-      if (scrollTop >= maxTop) break;
-      var nextTop = Math.min(maxTop, scrollTop + stepPx);
-      if (nextTop <= scrollTop) break;
-      try {
-        ed.setScrollTop(nextTop);
-      } catch (e) {
-        break;
-      }
-      await _sleep(35);
-    }
-    if (best == null) {
-      try {
-        ed.setScrollTop(startScrollTop);
-      } catch (e) {
-      }
-    }
-    return best;
-  }
-  function scrollToCurrentLine() {
-    if (_scrollingToLine) return;
-    _scrollingToLine = true;
-    _updateLineChip();
-    (async function run() {
-      var ed = getMonacoEditor();
-      if (!ed) {
-        _scrollingToLine = false;
-        _updateLineChip();
-        return;
-      }
-      var found = await findCurrentGlyphByScrolling(ed);
-      if (!found) {
-        _scrollingToLine = false;
-        _updateLineChip();
-        return;
-      }
-      _scrollNearGlyph(ed, found);
-      _scrollingToLine = false;
-      _updateLineChip();
-    })().catch(function() {
-      _scrollingToLine = false;
-      _updateLineChip();
-    });
-  }
   function _clearStaleProgressGlyphs() {
   }
   document.addEventListener("click", function(e) {
@@ -2317,120 +2102,6 @@
       if (!_isPartialRun) _clearStaleProgressGlyphs();
     }
   }, true);
-  function _attachMonacoScrollTracker() {
-    var ed = getMonacoEditor();
-    if (!ed) {
-      if (_monacoScrollListener) {
-        try {
-          _monacoScrollListener.dispose();
-        } catch (e) {
-        }
-        _monacoScrollListener = null;
-      }
-      return;
-    }
-    if (_monacoScrollListener) return;
-    try {
-      _monacoScrollListener = ed.onDidScrollChange(function() {
-        var scrollTop = ed.getScrollTop();
-        var scrollHeight = ed.getScrollHeight();
-        var domNode = null;
-        try {
-          domNode = ed.getDomNode();
-        } catch (e) {
-          return;
-        }
-        if (!domNode) return;
-        var clientH = domNode.clientHeight;
-        var lineHeight = 19;
-        try {
-          lineHeight = ed.getOption(66) || 19;
-        } catch (e) {
-        }
-        if (scrollHeight - (scrollTop + clientH) < lineHeight * 3) {
-          var key = _getModelKey(ed);
-          if (!key) return;
-          var total = ed.getModel().getLineCount();
-          if (_fileTotalLines[key] !== total) {
-            _fileTotalLines[key] = total;
-            try {
-              localStorage.setItem(STORAGE_KEY_LINE_COUNTS, JSON.stringify(_fileTotalLines));
-            } catch (e) {
-            }
-            console.log("[qaw-line-count]", key.split("/").pop(), total + " lines");
-          }
-        }
-      });
-    } catch (e) {
-    }
-  }
-  function _startFollowObserver() {
-    if (_followInterval) return;
-    _followInterval = setInterval(function() {
-      var ed = getMonacoEditor();
-      if (ed && _isFollowEligibleFile(ed)) {
-        var isRunning = !!document.querySelector('[data-e2e="stop-run-button"]');
-        var line = getExecutingLine(ed);
-        if (!_decoClassesLogged) {
-          try {
-            var _m = ed.getModel && ed.getModel();
-            if (_m && typeof _m.getAllDecorations === "function") {
-              var _decos = _m.getAllDecorations() || [];
-              var _clsSet = {};
-              for (var _di = 0; _di < _decos.length; _di++) {
-                var _o = _decos[_di] && _decos[_di].options;
-                if (!_o) continue;
-                var _cls = [_o.glyphMarginClassName || "", _o.linesDecorationsClassName || "", _o.className || "", _o.inlineClassName || ""].join(" ").trim();
-                if (_cls) _clsSet[_cls] = (_clsSet[_cls] || 0) + 1;
-              }
-              if (Object.keys(_clsSet).length) {
-                console.log("[qaw-deco-classes]", _clsSet);
-                _decoClassesLogged = true;
-              }
-            }
-          } catch (_e) {
-          }
-        }
-        if (line != null) {
-          if (document.hidden && isRunning && _lastExecutingLine != null && line < _lastExecutingLine) line = _lastExecutingLine;
-          var domNode = null;
-          try {
-            domNode = ed.getDomNode && ed.getDomNode();
-          } catch (e) {
-            domNode = null;
-          }
-          var lineHeight = domNode ? getEditorLineHeight(ed, domNode) : 19;
-          var absTop = Math.max(0, (line - 1) * lineHeight);
-          var canApplyQuickFollow = true;
-          if (document.hidden && isRunning && _lastExecutingLine != null && line <= _lastExecutingLine) {
-            canApplyQuickFollow = false;
-          }
-          if (canApplyQuickFollow) {
-            _scrollNearGlyph(ed, { line, absTop });
-          }
-        }
-        if (document.hidden && isRunning && !_hiddenFollowDeepScanInFlight) {
-          var nowScan = Date.now();
-          if (nowScan - _lastHiddenFollowDeepScanAt > 2600) {
-            _lastHiddenFollowDeepScanAt = nowScan;
-            _hiddenFollowDeepScanInFlight = true;
-            (async function() {
-              try {
-                var deepFound = await findCurrentGlyphByScrolling(ed);
-                if (deepFound && (!_lastExecutingLine || deepFound.line > _lastExecutingLine)) {
-                  _scrollNearGlyph(ed, deepFound);
-                }
-              } catch (_scanErr) {
-              }
-              _hiddenFollowDeepScanInFlight = false;
-            })();
-          }
-        }
-      }
-      _updateLineChip();
-      _applyTitleProgress();
-    }, 150);
-  }
   document.addEventListener("visibilitychange", function() {
     if (document.hidden || !_followMode) return;
     var ed = getMonacoEditor();
@@ -2446,27 +2117,6 @@
     } catch (e) {
     }
   });
-  function _captureLinecountThenFollow() {
-    var ed = getMonacoEditor();
-    if (ed && !_isFollowEligibleFile(ed)) return;
-    var key = ed ? _getModelKey(ed) : null;
-    if (!ed || !key || _fileTotalLines[key]) {
-      _startFollowObserver();
-      return;
-    }
-    try {
-      var total = ed.getModel().getLineCount();
-      if (total > 0) {
-        _fileTotalLines[key] = total;
-        try {
-          localStorage.setItem(STORAGE_KEY_LINE_COUNTS, JSON.stringify(_fileTotalLines));
-        } catch (e2) {
-        }
-      }
-    } catch (e) {
-    }
-    _startFollowObserver();
-  }
   function _applyTitleProgress() {
     if (_lastProgressPct == null) return;
     var base = document.title.replace(/^\d+%\s*\u2014\s*/, "");
@@ -2474,217 +2124,11 @@
     var want = _lastProgressPct + "% \u2014 " + _originalTitle;
     if (document.title !== want) document.title = want;
   }
-  function _stopFollowObserver() {
-    if (_followInterval) {
-      clearInterval(_followInterval);
-      _followInterval = null;
-    }
-    if (_originalTitle != null) {
-      document.title = _originalTitle;
-      _originalTitle = null;
-    }
-    _lastProgressPct = null;
-  }
-  function _closeLineMenu() {
-    if (_lineMenu) {
-      _lineMenu.remove();
-      _lineMenu = null;
-    }
-  }
-  function _goToLine(line) {
-    var ed = getMonacoEditor();
-    if (!ed) return;
-    try {
-      ed.revealLineInCenter(line);
-      ed.setPosition({ lineNumber: line, column: 1 });
-    } catch (e) {
-    }
-  }
-  function _openLineMenu() {
-    _closeLineMenu();
-    if (!_lineChip) return;
-    var r = _lineChip.getBoundingClientRect();
-    _lineMenu = document.createElement("div");
-    _lineMenu.setAttribute("data-qaw-overlay", "1");
-    _lineMenu.style.cssText = [
-      "position:fixed",
-      "bottom:" + (window.innerHeight - r.top + 4) + "px",
-      "left:" + r.left + "px",
-      "background:#1e293b",
-      "border:1px solid #475569",
-      "border-radius:6px",
-      "font-family:monospace",
-      "font-size:12px",
-      "z-index:2147483647",
-      "box-shadow:0 4px 12px rgba(0,0,0,0.4)",
-      "overflow:hidden",
-      "white-space:nowrap",
-      "min-width:200px"
-    ].join(";");
-    function makeItem(text, onClick, checked) {
-      var el = document.createElement("div");
-      el.style.cssText = "padding:8px 14px;cursor:pointer;color:#f1f5f9;display:flex;align-items:center;gap:8px;";
-      if (checked != null) {
-        var mark = document.createElement("span");
-        mark.textContent = checked ? "\u2713" : " ";
-        mark.style.cssText = "width:12px;flex-shrink:0;color:#34d399;";
-        el.appendChild(mark);
-      }
-      var lbl = document.createElement("span");
-      lbl.textContent = text;
-      el.appendChild(lbl);
-      el.addEventListener("mouseenter", function() {
-        el.style.background = "#334155";
-      });
-      el.addEventListener("mouseleave", function() {
-        el.style.background = "";
-      });
-      el.addEventListener("click", function(ev) {
-        ev.stopPropagation();
-        _closeLineMenu();
-        onClick();
-      });
-      return el;
-    }
-    function makeSep() {
-      var s = document.createElement("div");
-      s.style.cssText = "height:1px;background:#334155;margin:4px 0;";
-      return s;
-    }
-    var chips = window.__QAW_NOTE_LINE_CHIPS__ || [];
-    chips.forEach(function(chip) {
-      var preview = chip.text ? " \u2014 " + chip.text.slice(0, 35) + (chip.text.length > 35 ? "\u2026" : "") : "";
-      _lineMenu.appendChild(makeItem("Go to L" + chip.line + preview, function() {
-        _goToLine(chip.line);
-      }));
-    });
-    if (chips.length) _lineMenu.appendChild(makeSep());
-    _lineMenu.appendChild(makeItem("Follow Current Line", function() {
-      _followMode = !_followMode;
-      localStorage.setItem(STORAGE_KEY_FOLLOW, _followMode ? "1" : "0");
-      if (_followMode) _startFollowObserver();
-      else _stopFollowObserver();
-      _updateLineChip();
-    }, _followMode));
-    document.body.appendChild(_lineMenu);
-    var onClose = function(e) {
-      if (_lineMenu && !_lineMenu.contains(e.target)) {
-        _closeLineMenu();
-        document.removeEventListener("click", onClose, true);
-      }
-    };
-    setTimeout(function() {
-      document.addEventListener("click", onClose, true);
-    }, 0);
-  }
-  function _updateLineChip() {
-    if (!_lineChip) return;
-    var ed = getMonacoEditor();
-    var hasGlyph = ed ? getCurrentTargetLine(ed) != null : false;
-    var jumpPart = _lineChip.querySelector("[data-qaw-jump]");
-    var menuPart = _lineChip.querySelector("[data-qaw-menu]");
-    if (jumpPart) {
-      jumpPart.style.opacity = hasGlyph ? "1" : "0.4";
-      jumpPart.style.cursor = hasGlyph ? "pointer" : "default";
-      jumpPart.style.pointerEvents = hasGlyph ? "" : "none";
-    }
-    if (menuPart) {
-      menuPart.style.color = _followMode ? "#34d399" : "#94a3b8";
-      menuPart.title = _followMode ? "Following current line" : "Follow options";
-    }
-  }
-  function _repositionLineChip() {
-    if (!_lineChip) return;
-    var runBtn = document.querySelector('[data-e2e="stop-run-button"], [data-e2e="run-code-button"]');
-    if (!runBtn) return;
-    var r = runBtn.getBoundingClientRect();
-    var chipH = _lineChip.offsetHeight || 32;
-    _lineChip.style.left = Math.round(r.right + 12 + window.scrollX) + "px";
-    _lineChip.style.top = Math.round(r.top + (r.height - chipH) / 2 + window.scrollY) + "px";
-  }
-  function injectLineChip() {
-    var runBtn = document.querySelector('[data-e2e="stop-run-button"], [data-e2e="run-code-button"]');
-    if (!runBtn) {
-      if (_lineChip) {
-        _lineChip.remove();
-        _lineChip = null;
-      }
-      _stopFollowObserver();
-      _closeLineMenu();
-      return;
-    }
-    if (!_lineChip || !document.body.contains(_lineChip)) {
-      if (_lineChip) _lineChip.remove();
-      _lineChip = document.createElement("div");
-      _lineChip.setAttribute("data-qaw-overlay", "1");
-      _lineChip.style.cssText = [
-        "position:absolute",
-        "display:inline-flex",
-        "align-items:stretch",
-        "background:#1e293b",
-        "color:#f1f5f9",
-        "border:1px solid #475569",
-        "border-radius:6px",
-        "font-family:monospace",
-        "font-size:13px",
-        "z-index:2147483646",
-        "box-shadow:0 2px 6px rgba(0,0,0,0.35)",
-        "overflow:hidden"
-      ].join(";");
-      var jumpPart = document.createElement("span");
-      jumpPart.setAttribute("data-qaw-jump", "1");
-      jumpPart.textContent = "Current";
-      jumpPart.style.cssText = "padding:6px 12px;display:flex;align-items:center;cursor:pointer;";
-      jumpPart.title = "Scroll to executing line";
-      jumpPart.addEventListener("click", function(e) {
-        e.stopPropagation();
-        _closeLineMenu();
-        scrollToCurrentLine();
-      });
-      jumpPart.addEventListener("mouseenter", function() {
-        jumpPart.style.background = "#334155";
-      });
-      jumpPart.addEventListener("mouseleave", function() {
-        jumpPart.style.background = "";
-      });
-      var sep = document.createElement("span");
-      sep.style.cssText = "width:1px;background:#475569;flex-shrink:0;";
-      var menuPart = document.createElement("span");
-      menuPart.setAttribute("data-qaw-menu", "1");
-      menuPart.textContent = "\u25BE";
-      menuPart.style.cssText = "padding:6px 8px;display:flex;align-items:center;cursor:pointer;color:#94a3b8;font-size:14px;";
-      menuPart.title = "Follow options";
-      menuPart.addEventListener("click", function(e) {
-        e.stopPropagation();
-        _openLineMenu();
-      });
-      menuPart.addEventListener("mouseenter", function() {
-        menuPart.style.background = "#334155";
-      });
-      menuPart.addEventListener("mouseleave", function() {
-        menuPart.style.background = "";
-      });
-      _lineChip.appendChild(jumpPart);
-      _lineChip.appendChild(sep);
-      _lineChip.appendChild(menuPart);
-      document.body.appendChild(_lineChip);
-    }
-    _updateLineChip();
-    _repositionLineChip();
-    _attachMonacoScrollTracker();
-    var isFlowFile = !!(getMonacoEditor() && _isFollowEligibleFile(getMonacoEditor()));
-    var isRunning = runBtn.getAttribute("data-e2e") === "stop-run-button";
-    if (!isRunning) _isPartialRun = false;
-    if (!isFlowFile && _followInterval) _stopFollowObserver();
-    if (_followMode && isFlowFile && isRunning && !_followInterval && !_isPartialRun) _captureLinecountThenFollow();
-    if (_followMode && !isRunning && _followInterval) _stopFollowObserver();
-  }
   function startPolling() {
     if (pollTimer) return;
     _installGlyphLocatorProbe();
     pollTimer = setInterval(function() {
       injectToggleBtn();
-      injectLineChip();
       writeTabHeartbeat();
       if (active && !editMode) {
         var sig = computeOverlaySig();

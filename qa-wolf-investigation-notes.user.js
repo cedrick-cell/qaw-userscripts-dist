@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         QA Wolf Investigation Notes
 // @namespace    http://tampermonkey.net/
-// @version      1.460
+// @version      1.461
 // @description  Per-file investigation notes: quick links (new-tab opens, PoC textarea, client-wide notes), client/env chips, instant tooltips, run timing, shift sync, work mode, export, search. data-e2e investigation-* hooks.
 // @author       You
 // @match        https://app.qawolf.com/*
@@ -113,7 +113,7 @@
   });
 
   // src/notes/01-constants.ts
-  var STORAGE_KEY, NOTE_LS_KEY_PREFIX, META_STORAGE_KEY, DEBOUNCE_MS, POLL_MS, SHIFT_BRIDGE_GM_KEY, TASK_WOLF_SHIFT_DOM_BRIDGE_DISABLED, SETTINGS_GM_KEY, TASK_WOLF_HQ_URL, RUN_CHIME_METRICS_KEY, CLIENT_SCOPE_ENV, CLIENT_NOTES_FILE, NOTES_SYNTAX_TOOLTIP, RUN_METRICS_TOOLTIP, RAW_LINE, RAW_CHAR_TO_TAG, RAW_TAG_TO_CHAR, FACET_OPTIONS, FACET_DEFINITIONS, TEAM_DEFAULT_SLACK_IMAGE_CHANNEL, TEAM_DEFAULT_CLOUDINARY_CLOUD_NAME, TEAM_DEFAULT_CLOUDINARY_UPLOAD_PRESET, Z_INV_DRAWER, Z_INV_MODAL, STATUS_OPTIONS, STATUS_CHIP_STYLE, WORK_MODE_OPTIONS;
+  var STORAGE_KEY, NOTE_LS_KEY_PREFIX, META_STORAGE_KEY, DEBOUNCE_MS, POLL_MS, SHIFT_BRIDGE_GM_KEY, TASK_WOLF_SHIFT_DOM_BRIDGE_DISABLED, SETTINGS_GM_KEY, TASK_WOLF_HQ_URL, RUN_CHIME_METRICS_KEY, DAILY_CLIENT_WORK_KEY, CLIENT_SCOPE_ENV, CLIENT_NOTES_FILE, NOTES_SYNTAX_TOOLTIP, RUN_METRICS_TOOLTIP, RAW_LINE, RAW_CHAR_TO_TAG, RAW_TAG_TO_CHAR, FACET_OPTIONS, FACET_DEFINITIONS, TEAM_DEFAULT_SLACK_IMAGE_CHANNEL, TEAM_DEFAULT_CLOUDINARY_CLOUD_NAME, TEAM_DEFAULT_CLOUDINARY_UPLOAD_PRESET, Z_INV_DRAWER, Z_INV_MODAL, STATUS_OPTIONS, STATUS_CHIP_STYLE, WORK_MODE_OPTIONS;
   var init_constants = __esm({
     "src/notes/01-constants.ts"() {
       "use strict";
@@ -127,6 +127,7 @@
       SETTINGS_GM_KEY = "_qawInvNotesSettings_v1";
       TASK_WOLF_HQ_URL = "https://www.task-wolf.com/hq";
       RUN_CHIME_METRICS_KEY = "_qawRunChimeMetrics";
+      DAILY_CLIENT_WORK_KEY = "_qawDailyClientWork";
       CLIENT_SCOPE_ENV = "__client_scope__";
       CLIENT_NOTES_FILE = "__client_notes__";
       NOTES_SYNTAX_TOOLTIP = "Line prefixes: /f flake, /l locator, /h helper, /u unknown, /n note, /b bug, /m maintenance, /- untagged. For /h use an optional name then line + body, e.g. /h waitFor 138 x2 flaky. Add a line number after the tag (e.g. /u 138) and optional x4 for occurrences. In card edit mode, add root-cause facets as #tokens (e.g. #env #auth #image). Notes are cards; tag chip opens a dropdown, context chip cycles, time chip stamps (Alt+click clear). Line chip jumps in Monaco (active tab only). In the body, type line295 (word line + digits) for extra line chips inline. Per-note edit saves on blur when valid.";
@@ -2384,7 +2385,7 @@
       } catch (e) {
       }
       try {
-        if ("1.460") return "1.460";
+        if ("1.461") return "1.461";
       } catch (e2) {
       }
       return "unknown";
@@ -16102,6 +16103,240 @@ This won't delete the actual file.`)) return;
     }
   });
 
+  // src/notes/40-daily-work.ts
+  function dailyWorkDayKey(ms) {
+    var d = new Date(ms);
+    return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+  }
+  function dailyWorkBlockIndex(ms) {
+    var d = new Date(ms);
+    return d.getHours() * 4 + Math.floor(d.getMinutes() / 15);
+  }
+  function normalizeDailyWorkBlocks(raw) {
+    if (!Array.isArray(raw)) return [];
+    var seen = {};
+    raw.forEach(function(v) {
+      var n = Math.floor(Number(v));
+      if (!Number.isFinite(n) || n < 0 || n > 95) return;
+      seen[n] = true;
+    });
+    return Object.keys(seen).map(function(k) {
+      return Number(k);
+    }).sort(function(a, b) {
+      return a - b;
+    });
+  }
+  function formatClock(block) {
+    var minutes = Math.max(0, Math.min(96, block)) * 15;
+    var h24 = Math.floor(minutes / 60) % 24;
+    var min = minutes % 60;
+    var suffix = h24 >= 12 ? "PM" : "AM";
+    var h12 = h24 % 12;
+    if (h12 === 0) h12 = 12;
+    return h12 + ":" + String(min).padStart(2, "0") + " " + suffix;
+  }
+  function formatDailyWorkRange(startBlock, endBlock) {
+    return formatClock(startBlock) + " - " + formatClock(endBlock);
+  }
+  function formatDailyWorkMinutes(minutes) {
+    var m = Math.max(0, Math.floor(minutes));
+    var h = Math.floor(m / 60);
+    var rem = m % 60;
+    if (h && rem) return h + "h " + rem + "m";
+    if (h) return h + "h";
+    return rem + "m";
+  }
+  function dailyWorkRangesForBlocks(blocksRaw) {
+    var blocks = normalizeDailyWorkBlocks(blocksRaw);
+    var out = [];
+    if (!blocks.length) return out;
+    var start = blocks[0];
+    var prev = blocks[0];
+    for (var i = 1; i < blocks.length; i++) {
+      var b = blocks[i];
+      if (b === prev + 1) {
+        prev = b;
+        continue;
+      }
+      out.push({ startBlock: start, endBlock: prev + 1, label: formatDailyWorkRange(start, prev + 1) });
+      start = b;
+      prev = b;
+    }
+    out.push({ startBlock: start, endBlock: prev + 1, label: formatDailyWorkRange(start, prev + 1) });
+    return out;
+  }
+  function summarizeDailyClientWork(dayData, displayNameForClient) {
+    var data = dayData || {};
+    return Object.keys(data).map(function(client) {
+      var blocks = normalizeDailyWorkBlocks(data[client]);
+      var totalMinutes = blocks.length * 15;
+      return {
+        client,
+        displayName: displayNameForClient(client),
+        blocks,
+        totalMinutes,
+        totalLabel: formatDailyWorkMinutes(totalMinutes),
+        ranges: dailyWorkRangesForBlocks(blocks)
+      };
+    }).filter(function(row2) {
+      return row2.blocks.length > 0;
+    }).sort(function(a, b) {
+      if (b.totalMinutes !== a.totalMinutes) return b.totalMinutes - a.totalMinutes;
+      return a.displayName.localeCompare(b.displayName);
+    });
+  }
+  function loadDailyWorkStore() {
+    try {
+      var raw = localStorage.getItem(DAILY_CLIENT_WORK_KEY);
+      var parsed = raw ? JSON.parse(raw) : {};
+      return parsed && typeof parsed === "object" ? parsed : {};
+    } catch (e) {
+      return {};
+    }
+  }
+  function saveDailyWorkStore(data) {
+    try {
+      localStorage.setItem(DAILY_CLIENT_WORK_KEY, JSON.stringify(data));
+    } catch (e) {
+    }
+  }
+  function pruneDailyWorkStore(data, nowMs) {
+    var cutoff = nowMs - DAILY_WORK_RETENTION_DAYS * 864e5;
+    Object.keys(data).forEach(function(day) {
+      var d = /* @__PURE__ */ new Date(day + "T00:00:00");
+      if (d.getTime() < cutoff) delete data[day];
+    });
+  }
+  function recordDailyClientWorkBlock(client, nowMs) {
+    var c = String(client || "").trim();
+    if (!c) return false;
+    var day = dailyWorkDayKey(nowMs);
+    var block = dailyWorkBlockIndex(nowMs);
+    var data = loadDailyWorkStore();
+    pruneDailyWorkStore(data, nowMs);
+    if (!data[day]) data[day] = {};
+    var blocks = normalizeDailyWorkBlocks(data[day][c]);
+    if (blocks.indexOf(block) !== -1) return false;
+    blocks.push(block);
+    blocks.sort(function(a, b) {
+      return a - b;
+    });
+    data[day][c] = blocks;
+    saveDailyWorkStore(data);
+    return true;
+  }
+  function markCurrentClient() {
+    if (document.visibilityState !== "visible") return false;
+    if (typeof document.hasFocus === "function" && !document.hasFocus()) return false;
+    var ctx = parseContext();
+    if (!ctx || !ctx.client) return false;
+    return recordDailyClientWorkBlock(ctx.client, Date.now());
+  }
+  function initDailyClientWorkTracker() {
+    markCurrentClient();
+    setInterval(markCurrentClient, DAILY_WORK_POLL_MS);
+    window.addEventListener("focus", function() {
+      markCurrentClient();
+    });
+    document.addEventListener("visibilitychange", function() {
+      markCurrentClient();
+    });
+  }
+  function todaySummaries() {
+    var data = loadDailyWorkStore();
+    var today = dailyWorkDayKey(Date.now());
+    return summarizeDailyClientWork(data[today], getClientDisplayName);
+  }
+  function summaryToText(rows) {
+    if (!rows.length) return "";
+    return rows.map(function(row2) {
+      var lines = [row2.displayName + " - " + row2.totalLabel];
+      row2.ranges.forEach(function(r) {
+        lines.push(r.label);
+      });
+      return lines.join("\n");
+    }).join("\n\n");
+  }
+  function mountDailyWorkView(container) {
+    container.innerHTML = "";
+    container.style.cssText = "display:flex;flex-direction:column;gap:10px;padding:8px;color:#e2e8f0;font-family:monospace;font-size:11px;";
+    var header = document.createElement("div");
+    header.style.cssText = "display:flex;align-items:center;gap:8px;";
+    var title = document.createElement("div");
+    title.textContent = "Daily Work";
+    title.style.cssText = "font-size:13px;font-weight:700;color:#f8fafc;flex:1;";
+    var copyBtn = document.createElement("button");
+    copyBtn.type = "button";
+    copyBtn.textContent = "Copy";
+    copyBtn.style.cssText = "font-size:10px;padding:4px 10px;border-radius:999px;border:1px solid #475569;background:#1e293b;color:#cbd5e1;cursor:pointer;font-family:monospace;";
+    header.appendChild(title);
+    header.appendChild(copyBtn);
+    container.appendChild(header);
+    var hint = document.createElement("div");
+    hint.textContent = "Tracks each focused QA Wolf client once per 15-minute local-time block. Overlap is allowed.";
+    hint.style.cssText = "font-size:10px;color:#94a3b8;line-height:1.4;";
+    container.appendChild(hint);
+    var rows = todaySummaries();
+    if (!rows.length) {
+      var empty = document.createElement("div");
+      empty.textContent = "No client blocks tracked for today yet.";
+      empty.style.cssText = "border:1px dashed #334155;border-radius:8px;padding:14px;color:#64748b;text-align:center;";
+      container.appendChild(empty);
+    } else {
+      rows.forEach(function(row2) {
+        var card = document.createElement("div");
+        card.style.cssText = "border:1px solid #334155;border-radius:8px;background:#0f172a;padding:10px;display:flex;flex-direction:column;gap:6px;";
+        var name = document.createElement("div");
+        name.innerHTML = '<strong style="color:#f8fafc;">' + esc2(row2.displayName) + '</strong> <span style="color:#94a3b8;">' + esc2(row2.totalLabel) + "</span>";
+        card.appendChild(name);
+        row2.ranges.forEach(function(r) {
+          var line = document.createElement("div");
+          line.textContent = r.label;
+          line.style.cssText = "color:#cbd5e1;";
+          card.appendChild(line);
+        });
+        container.appendChild(card);
+      });
+    }
+    copyBtn.addEventListener("click", function() {
+      var text = summaryToText(rows);
+      if (!text) {
+        copyBtn.textContent = "Nothing";
+        setTimeout(function() {
+          copyBtn.textContent = "Copy";
+        }, 1200);
+        return;
+      }
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(function() {
+          copyBtn.textContent = "Copied";
+          setTimeout(function() {
+            copyBtn.textContent = "Copy";
+          }, 1200);
+        }).catch(function() {
+          prompt("Copy daily work:", text);
+        });
+      } else {
+        prompt("Copy daily work:", text);
+      }
+    });
+  }
+  function esc2(s) {
+    var d = document.createElement("div");
+    d.textContent = s;
+    return d.innerHTML;
+  }
+  var DAILY_WORK_RETENTION_DAYS, DAILY_WORK_POLL_MS;
+  var init_daily_work = __esm({
+    "src/notes/40-daily-work.ts"() {
+      "use strict";
+      init_constants();
+      init_context();
+      DAILY_WORK_RETENTION_DAYS = 31;
+      DAILY_WORK_POLL_MS = 3e4;
+    }
+  });
+
   // src/notes/38-panel-bootstrap.ts
   function panelBootstrapMode(ctx, fileName, hostname) {
     if (ctx && fileName) return "ready";
@@ -16182,11 +16417,11 @@ This won't delete the actual file.`)) return;
     var clients = Object.keys(byClient).sort();
     clients.forEach(function(cl) {
       var envs = byClient[cl];
-      clientBlocks += '<div data-e2e="investigation-export-client-block" data-investigation-export-client="' + escAttr(cl) + '" style="margin-bottom:12px;border:1px solid #475569;border-radius:6px;padding:10px;background:#0f172a;"><label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:bold;margin-bottom:8px;color:#f8fafc;"><input type="checkbox" data-qaw-exp-client="' + escAttr(cl) + '" data-e2e="investigation-export-client-checkbox" style="' + chkStyle + '" /> ' + esc2(getClientDisplayName(cl)) + ' <span style="color:#94a3b8;font-weight:normal;">(' + esc2(cl) + ")</span></label>";
+      clientBlocks += '<div data-e2e="investigation-export-client-block" data-investigation-export-client="' + escAttr(cl) + '" style="margin-bottom:12px;border:1px solid #475569;border-radius:6px;padding:10px;background:#0f172a;"><label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:bold;margin-bottom:8px;color:#f8fafc;"><input type="checkbox" data-qaw-exp-client="' + escAttr(cl) + '" data-e2e="investigation-export-client-checkbox" style="' + chkStyle + '" /> ' + esc3(getClientDisplayName(cl)) + ' <span style="color:#94a3b8;font-weight:normal;">(' + esc3(cl) + ")</span></label>";
       envs.forEach(function(envId) {
         var pk = cl + "" + envId;
         var envChecked = activePair && pk === activePair;
-        clientBlocks += '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-left:20px;margin-top:6px;font-size:12px;color:#e2e8f0;"><input type="checkbox" data-qaw-exp-env="' + escAttr(pk) + '" data-e2e="investigation-export-env-checkbox"' + (envChecked ? " checked" : "") + ' style="' + chkStyle + '" /> ' + esc2(getEnvDisplayName(envId)) + "</label>";
+        clientBlocks += '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-left:20px;margin-top:6px;font-size:12px;color:#e2e8f0;"><input type="checkbox" data-qaw-exp-env="' + escAttr(pk) + '" data-e2e="investigation-export-env-checkbox"' + (envChecked ? " checked" : "") + ' style="' + chkStyle + '" /> ' + esc3(getEnvDisplayName(envId)) + "</label>";
       });
       clientBlocks += "</div>";
     });
@@ -16338,7 +16573,7 @@ This won't delete the actual file.`)) return;
           row2.style.cssText = "border:1px solid " + (isSelected ? "#3b82f6" : "#334155") + ";border-radius:6px;padding:8px 10px;background:" + (isSelected ? "#0c1e3d" : "#0f172a") + ";";
           var rowHeader = document.createElement("div");
           rowHeader.style.cssText = "display:flex;align-items:center;gap:8px;cursor:pointer;";
-          rowHeader.innerHTML = '<div style="width:12px;height:12px;border-radius:50%;border:2px solid ' + (isSelected ? "#3b82f6" : "#475569") + ";background:" + (isSelected ? "#3b82f6" : "transparent") + ';flex-shrink:0;"></div><span style="font-size:12px;font-weight:600;color:#f8fafc;flex:1;">' + esc2(v.name) + "</span>";
+          rowHeader.innerHTML = '<div style="width:12px;height:12px;border-radius:50%;border:2px solid ' + (isSelected ? "#3b82f6" : "#475569") + ";background:" + (isSelected ? "#3b82f6" : "transparent") + ';flex-shrink:0;"></div><span style="font-size:12px;font-weight:600;color:#f8fafc;flex:1;">' + esc3(v.name) + "</span>";
           var editBtn = document.createElement("button");
           editBtn.type = "button";
           editBtn.textContent = isEditing ? "Cancel" : "Edit";
@@ -16636,11 +16871,11 @@ This won't delete the actual file.`)) return;
     var ctxHeadBlock = "";
     if (ctx) {
       ensureEnvMetadata(ctx.client, ctx.envId);
-      var clientLabel = esc2(getClientDisplayName(ctx.client));
-      var envLabel = esc2(getEnvDisplayName(ctx.envId));
+      var clientLabel = esc3(getClientDisplayName(ctx.client));
+      var envLabel = esc3(getEnvDisplayName(ctx.envId));
       ctxHeadBlock = '<div data-e2e="investigation-panel-bootstrap-context" style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:9px;"><span style="display:inline-block;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:monospace;font-size:11px;font-weight:600;padding:5px 12px;border-radius:999px;border:1px solid #475569;background:#334155;color:#e2e8f0;vertical-align:middle;">' + clientLabel + '</span><span style="display:inline-block;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:monospace;font-size:11px;font-weight:600;padding:5px 12px;border-radius:999px;border:1px solid #475569;background:#334155;color:#e2e8f0;vertical-align:middle;">' + envLabel + "</span></div>";
     }
-    head.innerHTML = '<style>@keyframes qaw-bootstrap-pulse{0%,100%{opacity:.35;transform:scale(.9)}50%{opacity:1;transform:scale(1)}}</style><div data-e2e="investigation-no-context-message" style="color:' + headlineColor + ';font-size:13px;font-weight:600;line-height:1.4;">' + pulse + esc2(panelBootstrapHeadline(mode)) + '</div><div data-e2e="investigation-no-context-hint" style="color:#94a3b8;font-size:11px;line-height:1.45;margin-top:8px;">' + esc2(panelBootstrapHint(mode)) + "</div>" + ctxHeadBlock;
+    head.innerHTML = '<style>@keyframes qaw-bootstrap-pulse{0%,100%{opacity:.35;transform:scale(.9)}50%{opacity:1;transform:scale(1)}}</style><div data-e2e="investigation-no-context-message" style="color:' + headlineColor + ';font-size:13px;font-weight:600;line-height:1.4;">' + pulse + esc3(panelBootstrapHeadline(mode)) + '</div><div data-e2e="investigation-no-context-hint" style="color:#94a3b8;font-size:11px;line-height:1.45;margin-top:8px;">' + esc3(panelBootstrapHint(mode)) + "</div>" + ctxHeadBlock;
     body.innerHTML = '<div style="display:flex;align-items:center;gap:8px;margin-top:2px;"><span data-e2e="investigation-status" style="font-family:monospace;font-size:12px;font-weight:600;padding:6px 14px;border-radius:999px;border:1px solid #475569;background:#334155;color:#e2e8f0;">Empty</span><button type="button" data-qaw-search2 data-e2e="investigation-no-context-discover" style="' + BOOTSTRAP_BTN_STYLE + '">Discover</button><button type="button" data-qaw-export2 data-e2e="investigation-no-context-export" style="' + BOOTSTRAP_BTN_STYLE + '">Export\u2026</button><button type="button" data-qaw-extras-toggle data-e2e="investigation-extras-toggle" style="margin-left:auto;background:none;border:1px solid #334155;border-radius:4px;color:#64748b;cursor:pointer;font-size:11px;padding:4px 8px;font-family:monospace;line-height:1;">\u25BE</button></div><div data-qaw-extras-section style="margin-top:10px;display:flex;flex-direction:column;flex:1;min-height:0;"><div data-qaw-quick-links-host></div><div data-e2e="investigation-no-file-divider" style="height:1px;background:#334155;margin:14px 0 0;"></div><div data-e2e="investigation-no-file-empty-art" style="display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;color:#64748b;padding:18px 12px 6px;flex:1;min-height:160px;"><svg aria-hidden="true" viewBox="0 0 160 96" width="132" height="80" style="display:block;margin-bottom:10px;opacity:.72;"><rect x="40" y="16" width="74" height="58" rx="8" fill="#0f172a" stroke="#334155" stroke-width="3"/><path d="M92 16v18h22" fill="none" stroke="#334155" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><rect x="52" y="44" width="42" height="4" rx="2" fill="#334155"/><rect x="52" y="56" width="30" height="4" rx="2" fill="#334155"/><path d="M103 60l18 8-9 4 7 12-7 4-7-12-8 7 6-23z" fill="#1e293b" stroke="#64748b" stroke-width="3" stroke-linejoin="round"/></svg><div style="font-size:12px;font-weight:600;color:#94a3b8;margin-bottom:4px;">No file selected</div><div style="font-size:11px;line-height:1.45;max-width:260px;">Open a file tab to start file-specific notes.</div></div></div>';
     wireBootstrapPanelActions(body);
     var linksHost = body.querySelector("[data-qaw-quick-links-host]");
@@ -16978,7 +17213,7 @@ This won't delete the actual file.`)) return;
   __export(render_panel_exports, {
     applyDialPosition: () => applyDialPosition,
     closeExportModal: () => closeExportModal,
-    esc: () => esc2,
+    esc: () => esc3,
     escAttr: () => escAttr,
     openDiscoverModal: () => openDiscoverModal,
     openSearchModal: () => openSearchModal,
@@ -17084,7 +17319,7 @@ This won't delete the actual file.`)) return;
             var _a;
             var br = b.bugReport;
             var label = br.number || ((_a = br.url.split("/").pop()) == null ? void 0 : _a.slice(0, 8)) || "bug";
-            return '<a href="' + br.url + '" target="_blank" class="qaw-bug-chip" data-qaw-jump-bullet="' + b.id + '" style="cursor:pointer;" title="' + escAttr(br.title || "Click to open bug, or use history to find bullet") + '">' + esc2(label) + "</a>";
+            return '<a href="' + br.url + '" target="_blank" class="qaw-bug-chip" data-qaw-jump-bullet="' + b.id + '" style="cursor:pointer;" title="' + escAttr(br.title || "Click to open bug, or use history to find bullet") + '">' + esc3(label) + "</a>";
           }).join("") + "</div>";
         }
         if (closedBugs.length > 0) {
@@ -17092,7 +17327,7 @@ This won't delete the actual file.`)) return;
             var _a;
             var br = b.bugReport;
             var label = br.number || ((_a = br.url.split("/").pop()) == null ? void 0 : _a.slice(0, 8)) || "bug";
-            return '<a href="' + br.url + '" target="_blank" class="qaw-bug-chip closed" data-qaw-jump-bullet="' + b.id + '" style="cursor:pointer;" title="' + escAttr(br.title || "Click to open bug, or use history to find bullet") + '">' + esc2(label) + "</a>";
+            return '<a href="' + br.url + '" target="_blank" class="qaw-bug-chip closed" data-qaw-jump-bullet="' + b.id + '" style="cursor:pointer;" title="' + escAttr(br.title || "Click to open bug, or use history to find bullet") + '">' + esc3(label) + "</a>";
           }).join("") + "</div>";
         }
         html += "</div>";
@@ -17180,7 +17415,7 @@ This won't delete the actual file.`)) return;
             var _a;
             var mr = b.maintenanceReport;
             var label = mr.number || ((_a = mr.url.split("/").pop()) == null ? void 0 : _a.slice(0, 8)) || "maint";
-            return '<a href="' + mr.url + '" target="_blank" class="qaw-bug-chip" data-qaw-jump-bullet="' + b.id + '" style="cursor:pointer;border-color:#164e63;color:#67e8f9;" title="' + escAttr(mr.title || "Click to open maintenance report") + '">' + esc2(label) + "</a>";
+            return '<a href="' + mr.url + '" target="_blank" class="qaw-bug-chip" data-qaw-jump-bullet="' + b.id + '" style="cursor:pointer;border-color:#164e63;color:#67e8f9;" title="' + escAttr(mr.title || "Click to open maintenance report") + '">' + esc3(label) + "</a>";
           }).join("") + "</div>";
         }
         if (closedMaints.length > 0) {
@@ -17188,7 +17423,7 @@ This won't delete the actual file.`)) return;
             var _a;
             var mr = b.maintenanceReport;
             var label = mr.number || ((_a = mr.url.split("/").pop()) == null ? void 0 : _a.slice(0, 8)) || "maint";
-            return '<a href="' + mr.url + '" target="_blank" class="qaw-bug-chip closed" data-qaw-jump-bullet="' + b.id + '" style="cursor:pointer;" title="' + escAttr(mr.title || "Click to open maintenance report") + '">' + esc2(label) + "</a>";
+            return '<a href="' + mr.url + '" target="_blank" class="qaw-bug-chip closed" data-qaw-jump-bullet="' + b.id + '" style="cursor:pointer;" title="' + escAttr(mr.title || "Click to open maintenance report") + '">' + esc3(label) + "</a>";
           }).join("") + "</div>";
         }
         html += "</div>";
@@ -17208,7 +17443,7 @@ This won't delete the actual file.`)) return;
     var WATCH_BTN_STYLE = "display:none;font-size:10px;padding:2px 9px;border-radius:999px;border:1px solid #6d28d9;background:transparent;color:#a78bfa;cursor:pointer;font-family:monospace;white-space:nowrap;margin-left:auto;";
     var TAB_ACTIVE_STYLE = "font-family:monospace;font-size:11px;font-weight:600;padding:4px 10px;background:none;border:none;border-bottom:2px solid #38bdf8;color:#e2e8f0;cursor:pointer;margin-bottom:-1px;";
     var TAB_INACTIVE_STYLE = "font-family:monospace;font-size:11px;font-weight:600;padding:4px 10px;background:none;border:none;border-bottom:2px solid transparent;color:#64748b;cursor:pointer;margin-bottom:-1px;";
-    var notesSectionHtml = '<div data-qaw-notes-section style="margin-top:14px;border-top:1px solid #334155;padding-top:12px;display:flex;flex-direction:column;gap:6px;flex:1;min-height:0;"><div style="display:flex;align-items:center;gap:0;border-bottom:1px solid #1e293b;margin-bottom:2px;flex-shrink:0;overflow-x:auto;scrollbar-width:none;-ms-overflow-style:none;"><button type="button" data-qaw-tab-btn="notes" data-e2e="investigation-panel-tab-notes" style="' + TAB_ACTIVE_STYLE + '">Notes</button><button type="button" data-qaw-tab-btn="history" data-e2e="investigation-panel-tab-history" style="' + TAB_INACTIVE_STYLE + '">History</button><button type="button" data-qaw-tab-btn="settings" data-e2e="investigation-panel-tab-settings" style="' + TAB_INACTIVE_STYLE + '">Settings</button><button type="button" data-qaw-tab-btn="cases" style="' + TAB_INACTIVE_STYLE + '">Cases</button><button type="button" data-qaw-tab-btn="bugs" style="' + TAB_INACTIVE_STYLE + '">Bugs</button><button type="button" data-qaw-tab-btn="maintenance" style="' + TAB_INACTIVE_STYLE + '">Maint</button><button type="button" data-qaw-tab-btn="map" style="' + TAB_INACTIVE_STYLE + '">Helpers</button><button type="button" data-qaw-tab-btn="ai" style="' + TAB_INACTIVE_STYLE + '">AI</button><button type="button" data-qaw-tab-btn="cleaning" style="' + TAB_INACTIVE_STYLE + '">Clean</button></div><div data-qaw-tab-content="notes" style="flex:1;min-height:0;display:flex;flex-direction:column;gap:6px;"><div style="display:flex;align-items:center;gap:6px;"><span data-qaw-notes-syntax-info-wrap></span><button type="button" data-qaw-filter-favs data-e2e="investigation-filter-favs" style="' + FAV_BTN_STYLE + '">\u2606 Pinned</button><button type="button" data-qaw-watch-count-btn style="' + WATCH_BTN_STYLE + '">\u26A1 0 tracked</button></div><div data-qaw-notes-view-wrap data-e2e="investigation-notes-region" style="position:relative;flex:1;min-height:0;display:flex;flex-direction:column;"><div data-qaw-notes-viewer data-e2e="investigation-notes-viewer" tabindex="0" style="display:flex;flex-direction:column;flex:1;min-height:180px;overflow-y:auto;box-sizing:border-box;background:#0f172a;border:1px solid #475569;border-radius:8px;padding:10px 8px;cursor:text;outline:none;"></div><textarea data-qaw-raw data-e2e="investigation-notes-editor" wrap="soft" spellcheck="false" style="display:none;width:100%;flex:1;min-height:180px;resize:vertical;box-sizing:border-box;background:#0f172a;color:#e2e8f0;border:1px solid #475569;border-radius:8px;padding:8px;font-family:monospace;font-size:11px;line-height:1.45;white-space:pre-wrap;word-break:break-word;overflow-x:hidden;"></textarea></div><div data-qaw-raw-status data-e2e="investigation-notes-parse-status" style="font-size:10px;min-height:14px;line-height:1.3;flex-shrink:0;"></div></div><div data-qaw-tab-content="history" style="flex:1;min-height:0;overflow-y:auto;display:none;"><div data-qaw-history-toolbar style="padding:8px 8px 4px;display:flex;justify-content:flex-end;"></div><div data-qaw-history-list></div></div><div data-qaw-tab-content="settings" data-qaw-settings-view style="display:none;flex:1;min-height:0;"></div><div data-qaw-tab-content="cases" style="display:none;flex:1;min-height:0;overflow-y:auto;"></div><div data-qaw-tab-content="bugs" style="display:none;flex:1;min-height:0;overflow-y:auto;"></div><div data-qaw-tab-content="maintenance" style="display:none;flex:1;min-height:0;overflow-y:auto;"></div><div data-qaw-tab-content="map" style="display:none;flex:1;min-height:0;overflow-y:auto;flex-direction:column;padding:4px 0;"></div><div data-qaw-tab-content="ai" style="display:none;flex:1;min-height:0;overflow-y:auto;padding:12px 8px;"></div><div data-qaw-tab-content="cleaning" style="display:none;flex:1;min-height:0;overflow-y:auto;padding:4px 0;"></div></div>';
+    var notesSectionHtml = '<div data-qaw-notes-section style="margin-top:14px;border-top:1px solid #334155;padding-top:12px;display:flex;flex-direction:column;gap:6px;flex:1;min-height:0;"><div style="display:flex;align-items:center;gap:0;border-bottom:1px solid #1e293b;margin-bottom:2px;flex-shrink:0;overflow-x:auto;scrollbar-width:none;-ms-overflow-style:none;"><button type="button" data-qaw-tab-btn="notes" data-e2e="investigation-panel-tab-notes" style="' + TAB_ACTIVE_STYLE + '">Notes</button><button type="button" data-qaw-tab-btn="history" data-e2e="investigation-panel-tab-history" style="' + TAB_INACTIVE_STYLE + '">History</button><button type="button" data-qaw-tab-btn="settings" data-e2e="investigation-panel-tab-settings" style="' + TAB_INACTIVE_STYLE + '">Settings</button><button type="button" data-qaw-tab-btn="cases" style="' + TAB_INACTIVE_STYLE + '">Cases</button><button type="button" data-qaw-tab-btn="bugs" style="' + TAB_INACTIVE_STYLE + '">Bugs</button><button type="button" data-qaw-tab-btn="maintenance" style="' + TAB_INACTIVE_STYLE + '">Maint</button><button type="button" data-qaw-tab-btn="work" style="' + TAB_INACTIVE_STYLE + '">Work</button><button type="button" data-qaw-tab-btn="map" style="' + TAB_INACTIVE_STYLE + '">Helpers</button><button type="button" data-qaw-tab-btn="ai" style="' + TAB_INACTIVE_STYLE + '">AI</button><button type="button" data-qaw-tab-btn="cleaning" style="' + TAB_INACTIVE_STYLE + '">Clean</button></div><div data-qaw-tab-content="notes" style="flex:1;min-height:0;display:flex;flex-direction:column;gap:6px;"><div style="display:flex;align-items:center;gap:6px;"><span data-qaw-notes-syntax-info-wrap></span><button type="button" data-qaw-filter-favs data-e2e="investigation-filter-favs" style="' + FAV_BTN_STYLE + '">\u2606 Pinned</button><button type="button" data-qaw-watch-count-btn style="' + WATCH_BTN_STYLE + '">\u26A1 0 tracked</button></div><div data-qaw-notes-view-wrap data-e2e="investigation-notes-region" style="position:relative;flex:1;min-height:0;display:flex;flex-direction:column;"><div data-qaw-notes-viewer data-e2e="investigation-notes-viewer" tabindex="0" style="display:flex;flex-direction:column;flex:1;min-height:180px;overflow-y:auto;box-sizing:border-box;background:#0f172a;border:1px solid #475569;border-radius:8px;padding:10px 8px;cursor:text;outline:none;"></div><textarea data-qaw-raw data-e2e="investigation-notes-editor" wrap="soft" spellcheck="false" style="display:none;width:100%;flex:1;min-height:180px;resize:vertical;box-sizing:border-box;background:#0f172a;color:#e2e8f0;border:1px solid #475569;border-radius:8px;padding:8px;font-family:monospace;font-size:11px;line-height:1.45;white-space:pre-wrap;word-break:break-word;overflow-x:hidden;"></textarea></div><div data-qaw-raw-status data-e2e="investigation-notes-parse-status" style="font-size:10px;min-height:14px;line-height:1.3;flex-shrink:0;"></div></div><div data-qaw-tab-content="history" style="flex:1;min-height:0;overflow-y:auto;display:none;"><div data-qaw-history-toolbar style="padding:8px 8px 4px;display:flex;justify-content:flex-end;"></div><div data-qaw-history-list></div></div><div data-qaw-tab-content="settings" data-qaw-settings-view style="display:none;flex:1;min-height:0;"></div><div data-qaw-tab-content="cases" style="display:none;flex:1;min-height:0;overflow-y:auto;"></div><div data-qaw-tab-content="bugs" style="display:none;flex:1;min-height:0;overflow-y:auto;"></div><div data-qaw-tab-content="maintenance" style="display:none;flex:1;min-height:0;overflow-y:auto;"></div><div data-qaw-tab-content="work" style="display:none;flex:1;min-height:0;overflow-y:auto;"></div><div data-qaw-tab-content="map" style="display:none;flex:1;min-height:0;overflow-y:auto;flex-direction:column;padding:4px 0;"></div><div data-qaw-tab-content="ai" style="display:none;flex:1;min-height:0;overflow-y:auto;padding:12px 8px;"></div><div data-qaw-tab-content="cleaning" style="display:none;flex:1;min-height:0;overflow-y:auto;padding:4px 0;"></div></div>';
     var notesSectionHtmlClient = '<div data-qaw-notes-section style="margin-top:14px;border-top:1px solid #334155;padding-top:12px;display:flex;flex-direction:column;gap:6px;"><label data-e2e="investigation-notes-section-label" style="font-size:11px;color:#94a3b8;margin:0;">Notes (plain, this client)</label><div data-qaw-notes-view-wrap data-e2e="investigation-notes-region" style="position:relative;min-height:200px;"><textarea data-qaw-raw data-e2e="investigation-notes-editor" wrap="soft" spellcheck="false" style="display:block;width:100%;min-height:240px;max-height:65vh;resize:vertical;box-sizing:border-box;background:#0f172a;color:#e2e8f0;border:1px solid #475569;border-radius:8px;padding:8px;font-family:monospace;font-size:11px;line-height:1.45;white-space:pre-wrap;word-break:break-word;overflow-x:hidden;"></textarea></div></div>';
     if (state.rawSaveTimer) {
       clearTimeout(state.rawSaveTimer);
@@ -17224,6 +17459,7 @@ This won't delete the actual file.`)) return;
         if (tabCasesContent) tabCasesContent.style.display = tab === "cases" ? "block" : "none";
         if (tabBugsContent) tabBugsContent.style.display = tab === "bugs" ? "block" : "none";
         if (tabMaintenanceContent) tabMaintenanceContent.style.display = tab === "maintenance" ? "block" : "none";
+        if (tabWorkContent) tabWorkContent.style.display = tab === "work" ? "block" : "none";
         if (tabMapContent) tabMapContent.style.display = tab === "map" ? "flex" : "none";
         if (tabAiContent) tabAiContent.style.display = tab === "ai" ? "block" : "none";
         if (tabCleaningContent) tabCleaningContent.style.display = tab === "cleaning" ? "flex" : "none";
@@ -17233,6 +17469,7 @@ This won't delete the actual file.`)) return;
         if (tabCasesBtn2) tabCasesBtn2.style.cssText = tab === "cases" ? TAB_ACTIVE_STYLE : TAB_INACTIVE_STYLE;
         if (tabBugsBtn2) tabBugsBtn2.style.cssText = tab === "bugs" ? TAB_ACTIVE_STYLE : TAB_INACTIVE_STYLE;
         if (tabMaintenanceBtn2) tabMaintenanceBtn2.style.cssText = tab === "maintenance" ? TAB_ACTIVE_STYLE : TAB_INACTIVE_STYLE;
+        if (tabWorkBtn2) tabWorkBtn2.style.cssText = tab === "work" ? TAB_ACTIVE_STYLE : TAB_INACTIVE_STYLE;
         if (tabMapBtn2) tabMapBtn2.style.cssText = tab === "map" ? TAB_ACTIVE_STYLE : TAB_INACTIVE_STYLE;
         if (tabAiBtn2) tabAiBtn2.style.cssText = tab === "ai" ? TAB_ACTIVE_STYLE : TAB_INACTIVE_STYLE;
         if (tabCleaningBtn2) tabCleaningBtn2.style.cssText = tab === "cleaning" ? TAB_ACTIVE_STYLE : TAB_INACTIVE_STYLE;
@@ -17279,6 +17516,7 @@ This won't delete the actual file.`)) return;
         if (tab === "cases" && tabCasesContent) mountCasesView(tabCasesContent, editKey);
         if (tab === "bugs" && tabBugsContent) mountBugsView(tabBugsContent);
         if (tab === "maintenance" && tabMaintenanceContent) mountMaintenanceView(tabMaintenanceContent);
+        if (tab === "work" && tabWorkContent) mountDailyWorkView(tabWorkContent);
         if (tab === "map" && tabMapContent) mountMapView(tabMapContent);
         if (tab === "ai" && tabAiContent && !tabAiContent.hasAttribute("data-qaw-ai-mounted")) mountAiTab(tabAiContent, editKey);
         if (tab === "cleaning" && tabCleaningContent) mountHouseCleaningView(tabCleaningContent);
@@ -17290,6 +17528,7 @@ This won't delete the actual file.`)) return;
       var tabCasesBtn2 = body.querySelector('[data-qaw-tab-btn="cases"]');
       var tabBugsBtn2 = body.querySelector('[data-qaw-tab-btn="bugs"]');
       var tabMaintenanceBtn2 = body.querySelector('[data-qaw-tab-btn="maintenance"]');
+      var tabWorkBtn2 = body.querySelector('[data-qaw-tab-btn="work"]');
       var tabMapBtn2 = body.querySelector('[data-qaw-tab-btn="map"]');
       var tabAiBtn2 = body.querySelector('[data-qaw-tab-btn="ai"]');
       var tabCleaningBtn2 = body.querySelector('[data-qaw-tab-btn="cleaning"]');
@@ -17299,6 +17538,7 @@ This won't delete the actual file.`)) return;
       var tabCasesContent = body.querySelector('[data-qaw-tab-content="cases"]');
       var tabBugsContent = body.querySelector('[data-qaw-tab-content="bugs"]');
       var tabMaintenanceContent = body.querySelector('[data-qaw-tab-content="maintenance"]');
+      var tabWorkContent = body.querySelector('[data-qaw-tab-content="work"]');
       var tabMapContent = body.querySelector('[data-qaw-tab-content="map"]');
       var tabAiContent = body.querySelector('[data-qaw-tab-content="ai"]');
       var tabCleaningContent = body.querySelector('[data-qaw-tab-content="cleaning"]');
@@ -17319,6 +17559,9 @@ This won't delete the actual file.`)) return;
       });
       if (tabMaintenanceBtn2) tabMaintenanceBtn2.addEventListener("click", function() {
         switchTab2("maintenance");
+      });
+      if (tabWorkBtn2) tabWorkBtn2.addEventListener("click", function() {
+        switchTab2("work");
       });
       if (tabMapBtn2) tabMapBtn2.addEventListener("click", function() {
         switchTab2("map");
@@ -17516,7 +17759,7 @@ This won't delete the actual file.`)) return;
     refreshInvestigationShiftBar();
     refreshDrawerFooter();
   }
-  function esc2(s) {
+  function esc3(s) {
     var d = document.createElement("div");
     d.textContent = s;
     return d.innerHTML;
@@ -17558,6 +17801,7 @@ This won't delete the actual file.`)) return;
       init_slack_self_dm();
       init_discover();
       init_editor_protection();
+      init_daily_work();
       init_discover();
       state.renderPanelForKeyFn = renderPanelForKey;
     }
@@ -18673,7 +18917,7 @@ This won't delete the actual file.`)) return;
     });
     return out;
   }
-  function esc3(s) {
+  function esc4(s) {
     var d = document.createElement("div");
     d.textContent = s;
     return d.innerHTML;
@@ -18749,7 +18993,7 @@ This won't delete the actual file.`)) return;
     backdrop.style.cssText = "position:fixed;inset:0;background:rgba(15,23,42,0.72);z-index:" + Z_INV_MODAL + ";display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box;";
     var modal = document.createElement("div");
     modal.style.cssText = "background:#1e293b;border:1px solid #64748b;border-radius:8px;max-width:380px;width:100%;display:flex;flex-direction:column;box-shadow:0 8px 32px rgba(0,0,0,0.4);color:#e2e8f0;font-family:monospace;font-size:12px;";
-    modal.innerHTML = '<div style="padding:10px 14px;border-bottom:1px solid #475569;font-weight:bold;color:#f8fafc;">' + esc3(title) + '</div><div style="padding:12px 14px;">' + bodyHtml + '</div><div style="padding:10px 14px;border-top:1px solid #334155;display:flex;gap:8px;justify-content:flex-end;"><button type="button" data-qaw-ql-cancel style="background:#334155;color:#e2e8f0;border:none;border-radius:4px;padding:6px 12px;cursor:pointer;font-family:monospace;">Cancel</button><button type="button" data-qaw-ql-save style="background:#1e40af;color:#bfdbfe;border:none;border-radius:4px;padding:6px 12px;cursor:pointer;font-family:monospace;">Save</button></div>';
+    modal.innerHTML = '<div style="padding:10px 14px;border-bottom:1px solid #475569;font-weight:bold;color:#f8fafc;">' + esc4(title) + '</div><div style="padding:12px 14px;">' + bodyHtml + '</div><div style="padding:10px 14px;border-top:1px solid #334155;display:flex;gap:8px;justify-content:flex-end;"><button type="button" data-qaw-ql-cancel style="background:#334155;color:#e2e8f0;border:none;border-radius:4px;padding:6px 12px;cursor:pointer;font-family:monospace;">Cancel</button><button type="button" data-qaw-ql-save style="background:#1e40af;color:#bfdbfe;border:none;border-radius:4px;padding:6px 12px;cursor:pointer;font-family:monospace;">Save</button></div>';
     modal.querySelector("[data-qaw-ql-cancel]").addEventListener("click", closeQuickLinksModal);
     modal.querySelector("[data-qaw-ql-save]").addEventListener("click", function() {
       applyStoreFromDiskMergedNotes();
@@ -18806,7 +19050,7 @@ This won't delete the actual file.`)) return;
     }
     openMiniModal(
       "Channel links (this client)",
-      '<p style="font-size:10px;color:#64748b;margin:0 0 10px;line-height:1.45;">External and Internal channel links are saved per client (<span style="color:#93c5fd;">' + esc3(slug) + '</span>), not globally. Paste a Slack or Teams URL.</p><label style="display:block;font-size:11px;color:#94a3b8;margin-bottom:4px;">External channel URL</label><input type="url" data-qaw-ql="externalChat" placeholder="https://\u2026" style="width:100%;box-sizing:border-box;background:#0f172a;color:#f1f5f9;border:1px solid #64748b;border-radius:4px;padding:8px;font-family:monospace;font-size:11px;margin-bottom:12px;" /><label style="display:block;font-size:11px;color:#94a3b8;margin-bottom:4px;">Internal chat URL</label><input type="url" data-qaw-ql="internalChat" placeholder="https://\u2026" style="width:100%;box-sizing:border-box;background:#0f172a;color:#f1f5f9;border:1px solid #64748b;border-radius:4px;padding:8px;font-family:monospace;font-size:11px;" />',
+      '<p style="font-size:10px;color:#64748b;margin:0 0 10px;line-height:1.45;">External and Internal channel links are saved per client (<span style="color:#93c5fd;">' + esc4(slug) + '</span>), not globally. Paste a Slack or Teams URL.</p><label style="display:block;font-size:11px;color:#94a3b8;margin-bottom:4px;">External channel URL</label><input type="url" data-qaw-ql="externalChat" placeholder="https://\u2026" style="width:100%;box-sizing:border-box;background:#0f172a;color:#f1f5f9;border:1px solid #64748b;border-radius:4px;padding:8px;font-family:monospace;font-size:11px;margin-bottom:12px;" /><label style="display:block;font-size:11px;color:#94a3b8;margin-bottom:4px;">Internal chat URL</label><input type="url" data-qaw-ql="internalChat" placeholder="https://\u2026" style="width:100%;box-sizing:border-box;background:#0f172a;color:#f1f5f9;border:1px solid #64748b;border-radius:4px;padding:8px;font-family:monospace;font-size:11px;" />',
       ["externalChat", "internalChat"],
       null,
       slug
@@ -21087,7 +21331,7 @@ This won't delete the actual file.`)) return;
     } catch (_) {
     }
     try {
-      if ("1.460") return "1.460";
+      if ("1.461") return "1.461";
     } catch (_) {
     }
     return "unknown";
@@ -21328,6 +21572,7 @@ This won't delete the actual file.`)) return;
 
   // src/notes/13-init.ts
   init_discover();
+  init_daily_work();
   function init() {
     if (window.top !== window) return;
     if (/task-wolf\.com$/i.test(location.hostname)) {
@@ -21369,6 +21614,7 @@ This won't delete the actual file.`)) return;
     }, POLL_MS);
     wireFlowPassedObserver();
     initFlowTouch();
+    initDailyClientWorkTracker();
     initFileTreeBadges();
     initPublishIntercept();
     initCommitContext();
