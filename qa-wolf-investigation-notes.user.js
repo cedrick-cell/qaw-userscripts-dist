@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         QA Wolf Investigation Notes
 // @namespace    http://tampermonkey.net/
-// @version      1.461
+// @version      1.464
 // @description  Per-file investigation notes: quick links (new-tab opens, PoC textarea, client-wide notes), client/env chips, instant tooltips, run timing, shift sync, work mode, export, search. data-e2e investigation-* hooks.
 // @author       You
 // @match        https://app.qawolf.com/*
@@ -2385,7 +2385,7 @@
       } catch (e) {
       }
       try {
-        if ("1.461") return "1.461";
+        if ("1.464") return "1.464";
       } catch (e2) {
       }
       return "unknown";
@@ -6509,6 +6509,183 @@
     }
   });
 
+  // src/notes/41-floating-panel.ts
+  function ensureTray() {
+    if (trayEl && document.body.contains(trayEl)) return trayEl;
+    trayEl = document.createElement("div");
+    trayEl.setAttribute("data-qaw-floating-tray", "1");
+    trayEl.style.cssText = "position:fixed;right:16px;bottom:16px;z-index:" + (Z_INV_MODAL + 80) + ";display:flex;align-items:center;gap:6px;flex-wrap:wrap;max-width:50vw;font-family:monospace;pointer-events:none;";
+    document.body.appendChild(trayEl);
+    return trayEl;
+  }
+  function updateTrayVisibility() {
+    if (!trayEl) return;
+    trayEl.style.display = trayEl.children.length ? "flex" : "none";
+  }
+  function clampPanel(panel) {
+    var rect = panel.getBoundingClientRect();
+    var left = Math.max(8, Math.min(rect.left, window.innerWidth - Math.min(80, rect.width)));
+    var top = Math.max(8, Math.min(rect.top, window.innerHeight - Math.min(48, rect.height)));
+    panel.style.left = Math.round(left) + "px";
+    panel.style.top = Math.round(top) + "px";
+  }
+  function makeButton(label, title) {
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = label;
+    btn.title = title;
+    btn.style.cssText = "font-size:11px;background:none;color:#94a3b8;border:1px solid #334155;border-radius:5px;padding:3px 8px;cursor:pointer;font-family:monospace;line-height:1.3;";
+    btn.addEventListener("mouseenter", function() {
+      btn.style.color = "#e2e8f0";
+      btn.style.borderColor = "#64748b";
+      btn.style.background = "#1e293b";
+    });
+    btn.addEventListener("mouseleave", function() {
+      btn.style.color = "#94a3b8";
+      btn.style.borderColor = "#334155";
+      btn.style.background = "none";
+    });
+    return btn;
+  }
+  function restoreFloatingPanel(id) {
+    var panel = activePanels[id];
+    if (!panel) return false;
+    panel.restore();
+    return true;
+  }
+  function createFloatingPanel(opts) {
+    if (activePanels[opts.id]) {
+      activePanels[opts.id].restore();
+      return activePanels[opts.id];
+    }
+    var width = opts.width || 720;
+    var height = opts.height || 560;
+    var zIndex = opts.zIndex || Z_INV_MODAL + 50;
+    var root = document.createElement("div");
+    root.setAttribute("data-qaw-floating-panel-root", opts.id);
+    root.setAttribute("data-qaw-overlay", "1");
+    root.style.cssText = "position:fixed;inset:0;z-index:" + zIndex + ";pointer-events:none;";
+    var panel = document.createElement("div");
+    panel.setAttribute("data-qaw-floating-panel", opts.id);
+    panel.style.cssText = "position:fixed;left:" + Math.max(16, Math.round((window.innerWidth - width) / 2)) + "px;top:" + Math.max(16, Math.round((window.innerHeight - height) / 2)) + "px;width:min(" + width + "px,calc(100vw - 32px));height:min(" + height + "px,calc(100vh - 32px));min-width:" + (opts.minWidth || 320) + "px;min-height:" + (opts.minHeight || 220) + "px;background:#0f172a;border:1px solid #475569;border-radius:10px;color:#e2e8f0;box-shadow:0 18px 56px rgba(0,0,0,0.62);display:flex;flex-direction:column;overflow:hidden;resize:both;pointer-events:auto;font-family:monospace;";
+    var header = document.createElement("div");
+    header.setAttribute("data-qaw-floating-panel-header", "1");
+    header.style.cssText = "display:flex;align-items:center;gap:8px;padding:9px 12px;border-bottom:1px solid #334155;background:#1e293b;cursor:move;user-select:none;flex-shrink:0;";
+    var titleEl = document.createElement("div");
+    titleEl.textContent = opts.title;
+    titleEl.style.cssText = "flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;font-weight:700;color:#f8fafc;";
+    header.appendChild(titleEl);
+    var actions = document.createElement("div");
+    actions.style.cssText = "display:flex;align-items:center;gap:6px;flex-shrink:0;";
+    var minBtn = makeButton("\u2013", "Minimize");
+    var closeBtn = makeButton("\xD7", "Close");
+    actions.appendChild(minBtn);
+    actions.appendChild(closeBtn);
+    header.appendChild(actions);
+    var body = document.createElement("div");
+    body.setAttribute("data-qaw-floating-panel-body", "1");
+    body.style.cssText = "flex:1;min-height:0;display:flex;flex-direction:column;background:#0f172a;";
+    panel.appendChild(header);
+    panel.appendChild(body);
+    root.appendChild(panel);
+    document.body.appendChild(root);
+    var chip = null;
+    var handle;
+    function makeChip() {
+      var tray = ensureTray();
+      var c = document.createElement("button");
+      c.type = "button";
+      c.setAttribute("data-qaw-floating-chip", opts.id);
+      c.textContent = opts.title;
+      c.style.cssText = "pointer-events:auto;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;font-weight:700;color:#dbeafe;background:#1e3a8a;border:1px solid #3b82f6;border-radius:999px;padding:6px 10px;cursor:pointer;font-family:monospace;box-shadow:0 6px 20px rgba(0,0,0,0.45);";
+      c.addEventListener("click", function() {
+        handle.restore();
+      });
+      tray.appendChild(c);
+      updateTrayVisibility();
+      return c;
+    }
+    function close() {
+      if (chip) {
+        chip.remove();
+        chip = null;
+        updateTrayVisibility();
+      }
+      document.removeEventListener("mousemove", onMouseMove);
+      document.removeEventListener("mouseup", onMouseUp);
+      window.removeEventListener("resize", onResize);
+      delete activePanels[opts.id];
+      root.remove();
+      if (opts.onClose) opts.onClose();
+    }
+    function minimize() {
+      root.style.display = "none";
+      if (!chip) chip = makeChip();
+    }
+    function restore() {
+      root.style.display = "";
+      if (chip) {
+        chip.remove();
+        chip = null;
+        updateTrayVisibility();
+      }
+      clampPanel(panel);
+      try {
+        panel.focus();
+      } catch (e) {
+      }
+    }
+    handle = { root, panel, header, titleEl, body, actions, close, minimize, restore };
+    activePanels[opts.id] = handle;
+    minBtn.addEventListener("click", function(e) {
+      e.stopPropagation();
+      minimize();
+    });
+    closeBtn.addEventListener("click", function(e) {
+      e.stopPropagation();
+      close();
+    });
+    var dragging = false;
+    var dragDx = 0;
+    var dragDy = 0;
+    function onMouseMove(e) {
+      if (!dragging) return;
+      panel.style.left = Math.round(e.clientX - dragDx) + "px";
+      panel.style.top = Math.round(e.clientY - dragDy) + "px";
+      panel.style.right = "auto";
+      panel.style.bottom = "auto";
+    }
+    function onMouseUp() {
+      if (!dragging) return;
+      dragging = false;
+      clampPanel(panel);
+    }
+    function onResize() {
+      clampPanel(panel);
+    }
+    header.addEventListener("mousedown", function(e) {
+      if (e.target.closest("button")) return;
+      dragging = true;
+      var rect = panel.getBoundingClientRect();
+      dragDx = e.clientX - rect.left;
+      dragDy = e.clientY - rect.top;
+      e.preventDefault();
+    });
+    document.addEventListener("mousemove", onMouseMove);
+    document.addEventListener("mouseup", onMouseUp);
+    window.addEventListener("resize", onResize);
+    return handle;
+  }
+  var activePanels, trayEl;
+  var init_floating_panel = __esm({
+    "src/notes/41-floating-panel.ts"() {
+      "use strict";
+      init_constants();
+      activePanels = {};
+      trayEl = null;
+    }
+  });
+
   // src/notes/29-note-llm-chat.ts
   function nlcSsKey(bulletId) {
     return NLC_SS_PREFIX + bulletId;
@@ -6815,34 +6992,46 @@
     return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/```[\w]*\n?([\s\S]*?)```/g, '<pre style="background:#020617;border:1px solid #334155;border-radius:4px;padding:8px 10px;overflow-x:auto;font-size:10.5px;line-height:1.6;margin:6px 0;white-space:pre-wrap;word-break:break-word;">$1</pre>').replace(/`([^`]+)`/g, '<code style="background:#1e293b;border-radius:3px;padding:1px 4px;font-size:10.5px;">$1</code>').replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>").replace(/\n/g, "<br>");
   }
   function openNoteLlmChat(b, n, onClose) {
-    if (document.querySelector("[data-qaw-note-chat]")) return;
+    if (document.querySelector("[data-qaw-note-chat]")) {
+      restoreFloatingPanel("note-llm");
+      return;
+    }
     var bulletText = String(b.text || "");
     var images = extractImages(bulletText, Array.isArray(b.comparisons) ? b.comparisons : []);
     var fileContent = nlcGetFileContent();
     var bulletId = String(b.id || "");
     var savedConv = bulletId ? state.llmConversations.get(bulletId) : void 0;
     var conversation = savedConv ? savedConv : [];
-    var overlay = document.createElement("div");
-    overlay.setAttribute("data-qaw-note-chat", "1");
-    overlay.style.cssText = "position:fixed;inset:0;z-index:2147483050;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.6);";
-    var panel = document.createElement("div");
-    panel.style.cssText = "width:92%;max-width:780px;height:78vh;background:#0f172a;border:1px solid #334155;border-radius:10px;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,0.7);overflow:hidden;";
-    var hdr = document.createElement("div");
-    hdr.style.cssText = "display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid #1e293b;flex-shrink:0;";
-    var spark = document.createElement("span");
-    spark.textContent = "\u2728";
-    spark.style.cssText = "font-size:14px;";
-    hdr.appendChild(spark);
-    var titleEl = document.createElement("span");
-    titleEl.style.cssText = "font-size:12px;font-weight:700;color:#f8fafc;font-family:monospace;flex:1;";
     var preview = stripTokens(bulletText).slice(0, 60);
-    titleEl.textContent = "Ask LLM" + (preview ? " \u2014 " + preview : "");
-    hdr.appendChild(titleEl);
+    function persistConversationOnClose() {
+      if (bulletId) {
+        if (conversation.length > 0) {
+          state.llmConversations.set(bulletId, conversation);
+          nlcPersistConv(bulletId, conversation);
+        } else {
+          state.llmConversations.delete(bulletId);
+          nlcClearConv(bulletId);
+        }
+      }
+      if (onClose) onClose();
+    }
+    var shell = createFloatingPanel({
+      id: "note-llm",
+      title: "Ask LLM" + (preview ? " \u2014 " + preview : ""),
+      width: 780,
+      height: Math.min(620, Math.max(420, window.innerHeight - 96)),
+      minWidth: 420,
+      minHeight: 320,
+      onClose: persistConversationOnClose
+    });
+    shell.root.setAttribute("data-qaw-note-chat", "1");
+    var panel = shell.body;
+    panel.style.cssText = "flex:1;min-height:0;display:flex;flex-direction:column;background:#0f172a;";
     var s = loadSettings();
     var modelBadge = document.createElement("span");
     modelBadge.style.cssText = "font-size:10px;color:#475569;font-family:monospace;";
     modelBadge.textContent = nlcSmartModel(s.llmProvider) || s.llmProvider || "";
-    hdr.appendChild(modelBadge);
+    shell.header.insertBefore(modelBadge, shell.actions);
     function buildConversationMd() {
       var modelName = nlcSmartModel(s.llmProvider) || s.llmProvider || "LLM";
       var noteClean2 = stripTokens(bulletText);
@@ -6922,27 +7111,7 @@
     });
     exportWrap.appendChild(exportBtn);
     exportWrap.appendChild(exportMenu);
-    hdr.appendChild(exportWrap);
-    var closeBtn = document.createElement("button");
-    closeBtn.type = "button";
-    closeBtn.textContent = "\u2715";
-    closeBtn.style.cssText = "font-size:11px;background:none;color:#64748b;border:1px solid #334155;border-radius:5px;padding:4px 8px;cursor:pointer;";
-    function closeModal() {
-      if (bulletId) {
-        if (conversation.length > 0) {
-          state.llmConversations.set(bulletId, conversation);
-          nlcPersistConv(bulletId, conversation);
-        } else {
-          state.llmConversations.delete(bulletId);
-          nlcClearConv(bulletId);
-        }
-      }
-      overlay.remove();
-      if (onClose) onClose();
-    }
-    closeBtn.addEventListener("click", closeModal);
-    hdr.appendChild(closeBtn);
-    panel.appendChild(hdr);
+    shell.header.insertBefore(exportWrap, shell.actions);
     var msgList = document.createElement("div");
     msgList.style.cssText = "flex:1;overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:12px;";
     panel.appendChild(msgList);
@@ -6977,11 +7146,6 @@
     inputArea.appendChild(replyInput);
     inputArea.appendChild(sendBtn);
     panel.appendChild(inputArea);
-    overlay.appendChild(panel);
-    overlay.addEventListener("mousedown", function(e) {
-      if (e.target === overlay) closeModal();
-    });
-    document.body.appendChild(overlay);
     function addMessage(role, text) {
       var wrap = document.createElement("div");
       wrap.style.cssText = role === "user" ? "align-self:flex-end;max-width:85%;background:#1e293b;border:1px solid #334155;border-radius:8px;padding:9px 12px;" : "align-self:flex-start;max-width:90%;background:#0c1a2e;border:1px solid #1e3a5f;border-radius:8px;padding:9px 12px;";
@@ -7094,6 +7258,7 @@
       init_store();
       init_store();
       init_context();
+      init_floating_panel();
       NLC_LOG = "[QAW NoteChat]";
       NLC_SS_PREFIX = "qaw_nlc_";
       NLC_SMART_MODELS = {
@@ -15661,7 +15826,7 @@ This won't delete the actual file.`)) return;
     else cell.textContent = status.toUpperCase();
     return cell;
   }
-  function makeNoteChip(hit, backdrop) {
+  function makeNoteChip(hit) {
     var b = hit.bullet;
     var tag = b.tag ? String(b.tag) : "note";
     var chip = document.createElement("button");
@@ -15772,7 +15937,7 @@ This won't delete the actual file.`)) return;
       }, 50);
     }, 0);
   }
-  function wireFilenameMerge(modal, backdrop) {
+  function wireFilenameMerge(modal, closePanel2) {
     var details = modal.querySelector("[data-qaw-discover-advanced]");
     var fnInp = modal.querySelector('[data-e2e="investigation-discover-filename"]');
     var openMergeBtn = modal.querySelector("[data-qaw-discover-open-merge]");
@@ -15806,7 +15971,7 @@ This won't delete the actual file.`)) return;
       if (sourceKey && sourceKey !== newKey && state.store.notes[newKey]) {
         if (!confirm("A note already exists for \u201C" + rawFn + "\u201D. Merge the current note into it and remove the duplicate entry?")) return;
       }
-      backdrop.remove();
+      closePanel2();
       relocateOrMergeToFileKey(sourceKey || null, newKey);
     });
     if (advancedDetails) {
@@ -15820,21 +15985,27 @@ This won't delete the actual file.`)) return;
   }
   function openDiscoverModal() {
     hideInvTooltip();
+    if (restoreFloatingPanel("discover")) return;
     var dayRange = "7d";
     var selectedStatuses = ["open"];
     var query = "";
     var ctx = parseContext();
     var currentClient = ctx ? ctx.client : null;
     var collapsedClients = {};
-    var backdrop = document.createElement("div");
-    backdrop.setAttribute("data-qaw-overlay", "1");
-    backdrop.setAttribute("data-e2e", "investigation-discover-backdrop");
-    backdrop.setAttribute("data-qaw-inv-notes", "1");
-    backdrop.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:" + Z_INV_MODAL + ";display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box;";
-    var modal = document.createElement("div");
+    var shell = createFloatingPanel({
+      id: "discover",
+      title: "Discover notes",
+      width: 720,
+      height: Math.min(620, Math.max(420, window.innerHeight - 96)),
+      minWidth: 420,
+      minHeight: 320,
+      onClose: closeNotePreview
+    });
+    shell.root.setAttribute("data-e2e", "investigation-discover-floating-root");
+    var modal = shell.body;
     modal.setAttribute("data-e2e", "investigation-discover-modal");
-    modal.style.cssText = "background:#1e293b;border:1px solid #64748b;border-radius:8px;max-width:680px;width:100%;max-height:82vh;display:flex;flex-direction:column;box-shadow:0 8px 32px rgba(0,0,0,0.4);color:#e2e8f0;font-family:monospace;";
-    modal.innerHTML = '<div data-e2e="investigation-discover-title" style="padding:10px 14px;border-bottom:1px solid #475569;font-weight:bold;color:#f8fafc;font-size:13px;">Discover notes</div><div style="padding:8px 14px 6px;border-bottom:1px solid #334155;"><input type="search" data-e2e="investigation-discover-input" placeholder="Narrow by note text, facets, cases, reports\u2026" style="width:100%;box-sizing:border-box;background:#0f172a;color:#f1f5f9;border:1px solid #64748b;border-radius:5px;padding:6px 8px;font-family:monospace;font-size:11px;" /><div data-qaw-discover-day-row style="display:flex;flex-wrap:wrap;gap:5px;margin-top:6px;"></div><div style="font-size:9px;color:#64748b;margin-top:6px;margin-bottom:3px;letter-spacing:0.04em;text-transform:uppercase;">File status</div><div data-qaw-discover-status-row style="display:flex;flex-wrap:wrap;gap:5px;"></div></div><div data-qaw-discover-list data-e2e="investigation-discover-results" style="overflow-y:auto;flex:1;min-height:160px;padding:4px 0;"></div><details data-qaw-discover-advanced style="border-top:1px solid #334155;padding:0 14px;"><summary style="cursor:pointer;padding:6px 0;color:#94a3b8;font-size:10px;user-select:none;">Advanced: open / merge by file name</summary><div style="padding:0 0 8px;font-size:10px;color:#94a3b8;line-height:1.4;margin-bottom:6px;">Open the current note under another file name for this client/environment.</div><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;"><input type="text" data-e2e="investigation-discover-filename" placeholder="Editor tab file name" style="flex:1;min-width:140px;box-sizing:border-box;background:#0f172a;color:#f1f5f9;border:1px solid #64748b;border-radius:4px;padding:6px;font-family:monospace;font-size:11px;" /><button type="button" data-qaw-discover-open-merge data-e2e="investigation-discover-open-merge" style="background:#1e40af;color:#bfdbfe;border:none;border-radius:4px;padding:6px 10px;cursor:pointer;font-family:monospace;font-size:10px;">Open / merge</button></div></details><div style="padding:8px 14px;border-top:1px solid #334155;"><button type="button" data-qaw-discover-close data-e2e="investigation-discover-close" style="background:#334155;color:#e2e8f0;border:none;border-radius:4px;padding:5px 11px;cursor:pointer;font-family:monospace;font-size:11px;">Close</button></div>';
+    modal.style.cssText = "display:flex;flex-direction:column;color:#e2e8f0;font-family:monospace;min-height:0;flex:1;";
+    modal.innerHTML = '<div style="padding:8px 14px 6px;border-bottom:1px solid #334155;"><input type="search" data-e2e="investigation-discover-input" placeholder="Narrow by note text, facets, cases, reports\u2026" style="width:100%;box-sizing:border-box;background:#0f172a;color:#f1f5f9;border:1px solid #64748b;border-radius:5px;padding:6px 8px;font-family:monospace;font-size:11px;" /><div data-qaw-discover-day-row style="display:flex;flex-wrap:wrap;gap:5px;margin-top:6px;"></div><div style="font-size:9px;color:#64748b;margin-top:6px;margin-bottom:3px;letter-spacing:0.04em;text-transform:uppercase;">File status</div><div data-qaw-discover-status-row style="display:flex;flex-wrap:wrap;gap:5px;"></div></div><div data-qaw-discover-list data-e2e="investigation-discover-results" style="overflow-y:auto;flex:1;min-height:160px;padding:4px 0;"></div><details data-qaw-discover-advanced style="border-top:1px solid #334155;padding:0 14px;"><summary style="cursor:pointer;padding:6px 0;color:#94a3b8;font-size:10px;user-select:none;">Advanced: open / merge by file name</summary><div style="padding:0 0 8px;font-size:10px;color:#94a3b8;line-height:1.4;margin-bottom:6px;">Open the current note under another file name for this client/environment.</div><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;"><input type="text" data-e2e="investigation-discover-filename" placeholder="Editor tab file name" style="flex:1;min-width:140px;box-sizing:border-box;background:#0f172a;color:#f1f5f9;border:1px solid #64748b;border-radius:4px;padding:6px;font-family:monospace;font-size:11px;" /><button type="button" data-qaw-discover-open-merge data-e2e="investigation-discover-open-merge" style="background:#1e40af;color:#bfdbfe;border:none;border-radius:4px;padding:6px 10px;cursor:pointer;font-family:monospace;font-size:10px;">Open / merge</button></div></details><div style="padding:8px 14px;border-top:1px solid #334155;"><button type="button" data-qaw-discover-close data-e2e="investigation-discover-close" style="background:#334155;color:#e2e8f0;border:none;border-radius:4px;padding:5px 11px;cursor:pointer;font-family:monospace;font-size:11px;">Close</button></div>';
     var inp = modal.querySelector('[data-e2e="investigation-discover-input"]');
     var dayRow = modal.querySelector("[data-qaw-discover-day-row]");
     var statusRow = modal.querySelector("[data-qaw-discover-status-row]");
@@ -15900,7 +16071,7 @@ This won't delete the actual file.`)) return;
       var chipsWrap = document.createElement("span");
       chipsWrap.style.cssText = "display:inline-flex;flex-wrap:wrap;align-items:center;";
       file.bullets.forEach(function(hit) {
-        chipsWrap.appendChild(makeNoteChip(hit, backdrop));
+        chipsWrap.appendChild(makeNoteChip(hit));
       });
       main.appendChild(chipsWrap);
       row2.appendChild(main);
@@ -15951,20 +16122,11 @@ This won't delete the actual file.`)) return;
         rebuildList();
       });
     }
-    wireFilenameMerge(modal, backdrop);
+    wireFilenameMerge(modal, shell.close);
     var closeBtn = modal.querySelector("[data-qaw-discover-close]");
     if (closeBtn) closeBtn.addEventListener("click", function() {
-      closeNotePreview();
-      backdrop.remove();
+      shell.close();
     });
-    backdrop.addEventListener("click", function(e) {
-      if (e.target === backdrop) {
-        closeNotePreview();
-        backdrop.remove();
-      }
-    });
-    backdrop.appendChild(modal);
-    document.body.appendChild(backdrop);
     if (inp) inp.focus();
   }
   function processPendingDiscoverOpen() {
@@ -16029,6 +16191,7 @@ This won't delete the actual file.`)) return;
       init_panel_shell();
       init_facet_hashtag();
       init_cards();
+      init_floating_panel();
       HASHTAG_TOKEN_RE2 = /(^|[\s(])#([a-z][a-z0-9-]*)\b/gi;
       DISCOVER_PENDING_OPEN_KEY = "_qawDiscoverPendingOpen_v1";
       MAX_BULLETS_SCAN = 5e3;
@@ -16107,6 +16270,31 @@ This won't delete the actual file.`)) return;
   function dailyWorkDayKey(ms) {
     var d = new Date(ms);
     return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+  }
+  function parseDailyWorkDayKey(dayKey) {
+    var m = String(dayKey || "").match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!m) return null;
+    var d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+    if (!Number.isFinite(d.getTime())) return null;
+    return d;
+  }
+  function shiftDailyWorkDayKey(dayKey, deltaDays) {
+    var d = parseDailyWorkDayKey(dayKey) || /* @__PURE__ */ new Date();
+    d.setDate(d.getDate() + deltaDays);
+    return dailyWorkDayKey(d.getTime());
+  }
+  function formatDailyWorkDayLabel(dayKey, todayKey) {
+    var today = todayKey || dailyWorkDayKey(Date.now());
+    if (dayKey === today) return "Today";
+    if (dayKey === shiftDailyWorkDayKey(today, -1)) return "Yesterday";
+    var d = parseDailyWorkDayKey(dayKey);
+    if (!d) return dayKey;
+    return d.toLocaleDateString(void 0, { weekday: "short", month: "short", day: "numeric" });
+  }
+  function formatDailyWorkDateText(dayKey) {
+    var d = parseDailyWorkDayKey(dayKey);
+    if (!d) return dayKey;
+    return d.toLocaleDateString(void 0, { weekday: "short", month: "short", day: "numeric", year: "numeric" });
   }
   function dailyWorkBlockIndex(ms) {
     var d = new Date(ms);
@@ -16242,22 +16430,12 @@ This won't delete the actual file.`)) return;
       markCurrentClient();
     });
   }
-  function todaySummaries() {
+  function summariesForDay(dayKey) {
     var data = loadDailyWorkStore();
-    var today = dailyWorkDayKey(Date.now());
-    return summarizeDailyClientWork(data[today], getClientDisplayName);
-  }
-  function summaryToText(rows) {
-    if (!rows.length) return "";
-    return rows.map(function(row2) {
-      var lines = [row2.displayName + " - " + row2.totalLabel];
-      row2.ranges.forEach(function(r) {
-        lines.push(r.label);
-      });
-      return lines.join("\n");
-    }).join("\n\n");
+    return summarizeDailyClientWork(data[dayKey], getClientDisplayName);
   }
   function mountDailyWorkView(container) {
+    var selectedDay = dailyWorkDayKey(Date.now());
     container.innerHTML = "";
     container.style.cssText = "display:flex;flex-direction:column;gap:10px;padding:8px;color:#e2e8f0;font-family:monospace;font-size:11px;";
     var header = document.createElement("div");
@@ -16265,24 +16443,48 @@ This won't delete the actual file.`)) return;
     var title = document.createElement("div");
     title.textContent = "Daily Work";
     title.style.cssText = "font-size:13px;font-weight:700;color:#f8fafc;flex:1;";
-    var copyBtn = document.createElement("button");
-    copyBtn.type = "button";
-    copyBtn.textContent = "Copy";
-    copyBtn.style.cssText = "font-size:10px;padding:4px 10px;border-radius:999px;border:1px solid #475569;background:#1e293b;color:#cbd5e1;cursor:pointer;font-family:monospace;";
     header.appendChild(title);
-    header.appendChild(copyBtn);
     container.appendChild(header);
+    var dateRow = document.createElement("div");
+    dateRow.style.cssText = "display:flex;align-items:center;gap:8px;flex-wrap:wrap;";
+    var dateText = document.createElement("div");
+    dateText.style.cssText = "font-size:12px;font-weight:700;color:#f8fafc;min-width:0;";
+    var pickerWrap = document.createElement("label");
+    pickerWrap.title = "Choose day";
+    pickerWrap.style.cssText = "position:relative;width:32px;height:28px;border-radius:8px;border:1px solid #64748b;background:#0f172a;color:#cbd5e1;display:inline-flex;align-items:center;justify-content:center;cursor:pointer;overflow:hidden;flex-shrink:0;";
+    pickerWrap.innerHTML = '<svg aria-hidden="true" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"></rect><path d="M16 2v4M8 2v4M3 10h18"></path></svg>';
+    var dateInput = document.createElement("input");
+    dateInput.type = "date";
+    dateInput.value = selectedDay;
+    dateInput.max = selectedDay;
+    dateInput.style.cssText = "position:absolute;inset:0;opacity:0;cursor:pointer;width:100%;height:100%;";
+    pickerWrap.appendChild(dateInput);
+    dateRow.appendChild(dateText);
+    dateRow.appendChild(pickerWrap);
+    container.appendChild(dateRow);
     var hint = document.createElement("div");
-    hint.textContent = "Tracks each focused QA Wolf client once per 15-minute local-time block. Overlap is allowed.";
+    hint.textContent = "Shows all clients tracked for the selected local day. Each focused QA Wolf client earns one 15-minute block; overlap is allowed.";
     hint.style.cssText = "font-size:10px;color:#94a3b8;line-height:1.4;";
     container.appendChild(hint);
-    var rows = todaySummaries();
-    if (!rows.length) {
-      var empty = document.createElement("div");
-      empty.textContent = "No client blocks tracked for today yet.";
-      empty.style.cssText = "border:1px dashed #334155;border-radius:8px;padding:14px;color:#64748b;text-align:center;";
-      container.appendChild(empty);
-    } else {
+    var results = document.createElement("div");
+    results.style.cssText = "display:flex;flex-direction:column;gap:8px;min-height:0;";
+    container.appendChild(results);
+    var rows = [];
+    function renderSelectedDay() {
+      var todayKey = dailyWorkDayKey(Date.now());
+      if (selectedDay > todayKey) selectedDay = todayKey;
+      dateInput.value = selectedDay;
+      dateInput.max = todayKey;
+      dateText.textContent = formatDailyWorkDateText(selectedDay);
+      rows = summariesForDay(selectedDay);
+      results.innerHTML = "";
+      if (!rows.length) {
+        var empty = document.createElement("div");
+        empty.textContent = "No client blocks tracked for " + formatDailyWorkDayLabel(selectedDay).toLowerCase() + ".";
+        empty.style.cssText = "border:1px dashed #334155;border-radius:8px;padding:14px;color:#64748b;text-align:center;";
+        results.appendChild(empty);
+        return;
+      }
       rows.forEach(function(row2) {
         var card = document.createElement("div");
         card.style.cssText = "border:1px solid #334155;border-radius:8px;background:#0f172a;padding:10px;display:flex;flex-direction:column;gap:6px;";
@@ -16295,31 +16497,14 @@ This won't delete the actual file.`)) return;
           line.style.cssText = "color:#cbd5e1;";
           card.appendChild(line);
         });
-        container.appendChild(card);
+        results.appendChild(card);
       });
     }
-    copyBtn.addEventListener("click", function() {
-      var text = summaryToText(rows);
-      if (!text) {
-        copyBtn.textContent = "Nothing";
-        setTimeout(function() {
-          copyBtn.textContent = "Copy";
-        }, 1200);
-        return;
-      }
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(text).then(function() {
-          copyBtn.textContent = "Copied";
-          setTimeout(function() {
-            copyBtn.textContent = "Copy";
-          }, 1200);
-        }).catch(function() {
-          prompt("Copy daily work:", text);
-        });
-      } else {
-        prompt("Copy daily work:", text);
-      }
+    dateInput.addEventListener("change", function() {
+      if (dateInput.value) selectedDay = dateInput.value;
+      renderSelectedDay();
     });
+    renderSelectedDay();
   }
   function esc2(s) {
     var d = document.createElement("div");
@@ -21331,7 +21516,7 @@ This won't delete the actual file.`)) return;
     } catch (_) {
     }
     try {
-      if ("1.461") return "1.461";
+      if ("1.464") return "1.464";
     } catch (_) {
     }
     return "unknown";
