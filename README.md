@@ -2,6 +2,8 @@
 
 Public install channel for QA Wolf Tampermonkey userscripts.
 
+See [CHANGELOG.md](./CHANGELOG.md) for recent updates and things to try after installing.
+
 ## Installing The Investigation Notes Panel
 
 ### 1. Install Tampermonkey
