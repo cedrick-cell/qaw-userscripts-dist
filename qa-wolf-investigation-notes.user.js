@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         QA Wolf Investigation Notes
 // @namespace    http://tampermonkey.net/
-// @version      1.464
+// @version      1.465
 // @description  Per-file investigation notes: quick links (new-tab opens, PoC textarea, client-wide notes), client/env chips, instant tooltips, run timing, shift sync, work mode, export, search. data-e2e investigation-* hooks.
 // @author       You
 // @match        https://app.qawolf.com/*
@@ -2385,7 +2385,7 @@
       } catch (e) {
       }
       try {
-        if ("1.464") return "1.464";
+        if ("1.465") return "1.465";
       } catch (e2) {
       }
       return "unknown";
@@ -21283,6 +21283,45 @@ This won't delete the actual file.`)) return;
       locators
     };
   }
+  function extractStrictModeAkaLocators(text) {
+    var out = [];
+    var re = /\baka\s+([\s\S]*?)(?=\s+\d+\)\s+|\s+Call log:\s|$)/gi;
+    var m;
+    while (m = re.exec(text)) {
+      var locator = String(m[1] || "").trim();
+      if (locator) out.push(locator);
+    }
+    return out;
+  }
+  function parseLocatorStrictModeViolation(text) {
+    var s = String(text || "").replace(/\r/g, "");
+    var m = s.match(/locator\.click:\s*Error:\s*strict mode violation:\s*([\s\S]+?)\s+resolved to\s+(\d+)\s+elements/i);
+    if (!m) return null;
+    var target = String(m[1] || "").trim();
+    var locators = [];
+    var targetRef = target ? addLocatorRef(locators, target) : null;
+    var clipParts = ["#strict"];
+    var noteParts = ["#strict"];
+    if (targetRef) clipParts.push("Target: " + targetRef.clip);
+    if (targetRef) noteParts.push("Target: " + targetRef.note);
+    var akaLocators = extractStrictModeAkaLocators(s);
+    if (akaLocators.length) {
+      var clipMatches = [];
+      var noteMatches = [];
+      for (var i = 0; i < akaLocators.length; i++) {
+        var ref = addLocatorRef(locators, akaLocators[i]);
+        clipMatches.push(ref.clip);
+        noteMatches.push(ref.note);
+      }
+      clipParts.push("Matches: " + clipMatches.join(" "));
+      noteParts.push("Matches: " + noteMatches.join(" "));
+    }
+    return {
+      clipboardText: clipParts.join(" "),
+      noteText: noteParts.join(" "),
+      locators: locators.length ? locators : void 0
+    };
+  }
   var RUN_LOG_PARSERS = [
     {
       id: "expected-received",
@@ -21308,6 +21347,13 @@ This won't delete the actual file.`)) return;
       example: "expect(locator).toBeVisible() failed",
       resultExample: "Element not visible (30s) + locator chip",
       parse: parseLocatorVisibleFailed
+    },
+    {
+      id: "locator-strict-mode-violation",
+      label: "Locator strict mode violation",
+      example: "locator.click: Error: strict mode violation: locator(...) resolved to 3 elements",
+      resultExample: "#strict Target: {{locator}} Matches: {{locator}} {{locator}}",
+      parse: parseLocatorStrictModeViolation
     },
     {
       id: "locator-click-timeout",
@@ -21516,7 +21562,7 @@ This won't delete the actual file.`)) return;
     } catch (_) {
     }
     try {
-      if ("1.464") return "1.464";
+      if ("1.465") return "1.465";
     } catch (_) {
     }
     return "unknown";
