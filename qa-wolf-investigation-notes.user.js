@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         QA Wolf Investigation Notes
 // @namespace    http://tampermonkey.net/
-// @version      1.478
+// @version      1.479
 // @description  Per-file investigation notes: quick links (new-tab opens, PoC textarea, client-wide notes), client/env chips, instant tooltips, run timing, shift sync, work mode, export, search. data-e2e investigation-* hooks.
 // @author       You
 // @match        https://app.qawolf.com/*
@@ -2389,7 +2389,7 @@
       } catch (e) {
       }
       try {
-        if ("1.478") return "1.478";
+        if ("1.479") return "1.479";
       } catch (e2) {
       }
       return "unknown";
@@ -7852,6 +7852,22 @@
     var m = s.match(new RegExp("\\bLocator:\\s*([\\s\\S]+?)" + LOCATOR_FIELD_STOP, "i"));
     return m && m[1] ? m[1].trim() : null;
   }
+  function cleanTextAssertionSide(v) {
+    return String(v || "").replace(/\s+(?:Timeout:\s[\s\S]*|Call log:[\s\S]*|Call Log:[\s\S]*|Locator:[\s\S]*|Error:[\s\S]*|at\s+\S+:\d+:\d+[\s\S]*)$/i, "").trim().replace(/^['"`]|['"`]$/g, "");
+  }
+  function extractExpectedTextAssertionValue(text) {
+    var s = String(text || "").replace(/\r/g, "");
+    var m = s.match(new RegExp("\\bExpected(?:\\s+substring)?\\s*:\\s*([\\s\\S]+?)" + TEXT_EXPECTED_FIELD_STOP, "i"));
+    if (!m || !m[1]) return null;
+    var expected = cleanTextAssertionSide(m[1]);
+    return expected || null;
+  }
+  function extractUnexpectedTextAssertionValue(text) {
+    var s = String(text || "").replace(/\r/g, "");
+    var m = s.match(/-\s*unexpected value\s+["']([^"']*)["']/i);
+    if (!m || m[1] == null) return null;
+    return cleanTextAssertionSide(m[1]);
+  }
   function addLocatorRef(locators, full, detailOverride) {
     var id = uid();
     var parts = splitLocatorDetails(full);
@@ -8051,11 +8067,29 @@
     else if (/toContainText/i.test(s)) assertion = "toContainText";
     else return null;
     var comp = extractExpectedActual(s);
-    if (!comp) return null;
+    if (!comp) {
+      var expected = extractExpectedTextAssertionValue(s);
+      var unexpected = extractUnexpectedTextAssertionValue(s);
+      if (expected && unexpected) comp = { expected, actual: unexpected };
+    }
     var locator = extractLocatorField(s) || extractWaitingForLocator(s);
     var timeoutM = s.match(/\bTimeout:\s*(\d+)ms/i) || s.match(/\btimeout\s+(\d+)ms/i);
     var ms = timeoutM ? parseInt(timeoutM[1], 10) : null;
     var badge = actionBadge(assertion, ms);
+    if (!comp) {
+      var expectedOnly = extractExpectedTextAssertionValue(s);
+      if (!expectedOnly) return null;
+      var detail = "Expected text: " + expectedOnly;
+      if (/element\(s\) not found/i.test(s)) detail += "\nElement(s) not found.";
+      if (!locator) return { clipboardText: badge + " [expected]", noteText: badge + " [expected]" };
+      var expectedLocators = [];
+      var expectedRef = addLocatorRef(expectedLocators, locator, detail);
+      return {
+        clipboardText: expectedRef.clip + " " + badge + " [expected]",
+        noteText: expectedRef.note + " " + badge + " [expected]",
+        locators: expectedLocators
+      };
+    }
     if (!locator) {
       return {
         clipboardText: badge + " <<" + comp.expected + "|" + comp.actual + ">>",
@@ -8069,6 +8103,18 @@
       clipboardText: ref.clip + " " + badge + " <<" + comp.expected + "|" + comp.actual + ">>",
       noteText: ref.note + " " + badge + " [[cmp]]",
       comparison: comp,
+      locators
+    };
+  }
+  function parseSetValueElementNotFound(text) {
+    var s = String(text || "").replace(/\r/g, "");
+    var m = s.match(/Can't call setValue on element with selector\s+(["'])([\s\S]+?)\1\s+because element wasn'?t found/i);
+    if (!m || !m[2]) return null;
+    var locators = [];
+    var ref = addLocatorRef(locators, m[2], "Element was not found.");
+    return {
+      clipboardText: ref.clip + " [setValue] [not found]",
+      noteText: ref.note + " [setValue] [not found]",
       locators
     };
   }
@@ -8104,13 +8150,14 @@
     var raw = String(text || "").trim();
     return { clipboardText: raw, noteText: raw, matched: false };
   }
-  var EXPECTED_ACTUAL_TAIL_STOP, LOCATOR_FIELD_STOP, RUN_LOG_PARSERS;
+  var EXPECTED_ACTUAL_TAIL_STOP, LOCATOR_FIELD_STOP, TEXT_EXPECTED_FIELD_STOP, RUN_LOG_PARSERS;
   var init_run_log_parsers = __esm({
     "src/notes/run-log-parsers.ts"() {
       "use strict";
       init_store();
       EXPECTED_ACTUAL_TAIL_STOP = "(?=\\s+Timeout:\\s|\\s+Call log:\\s|\\s+Call Log:\\s|\\s+Locator:\\s|\\s+Error:\\s|$)";
-      LOCATOR_FIELD_STOP = "(?=\\s+Expected:\\s|\\s+Timeout:\\s|\\s+Error:\\s|\\s+Call log:\\s|\\s+Call Log:\\s|$)";
+      LOCATOR_FIELD_STOP = "(?=\\s+Expected(?:\\s+substring)?:\\s|\\s+Timeout:\\s|\\s+Error:\\s|\\s+Call log:\\s|\\s+Call Log:\\s|$)";
+      TEXT_EXPECTED_FIELD_STOP = "(?=\\s+Received:\\s|\\s+Timeout:\\s|\\s+Error:\\s|\\s+Call log:\\s|\\s+Call Log:\\s|$)";
       RUN_LOG_PARSERS = [
         {
           id: "text-assertion-failed",
@@ -8129,6 +8176,13 @@
             if (!comp) return null;
             return { comparison: comp };
           }
+        },
+        {
+          id: "set-value-not-found",
+          label: "setValue element not found",
+          example: "Can't call setValue on element with selector ... because element wasn't found",
+          resultExample: "{{locator}} [setValue] [not found]",
+          parse: parseSetValueElementNotFound
         },
         {
           id: "image-mismatch",
@@ -13507,6 +13561,20 @@
           parserId: "text-assertion-failed",
           raw: `13:54:51.479[ Server ] expect(locator).toHaveText(expected) failed Locator: locator('tbody [aria-colindex="2"]') Expected: "QXPW1T" Received: "597P317G5CBLPBPRC" Timeout: 30000ms Call log: - Expect "to.have.text"`,
           styleTarget: "{{locator}} [toHaveText 30s] <<QXPW1T|597P317G5CBLPBPRC>>"
+        },
+        {
+          id: "text-assertion-substring",
+          label: "Text assertion substring mismatch",
+          parserId: "text-assertion-failed",
+          raw: `19:42:20.966[ Server ] expect(locator).toContainText(expected) failed Locator: locator('#dealSummaryTrades') Expected substring: "2007 Buick Lucerne" Timeout: 30000ms Error: element(s) not found Call log: - Expect "to.have.text" with timeout 30000ms - waiting for locator('#dealSummaryTrades') 14 \xD7 locator resolved to <div>\u2026</div> - unexpected value " Trades - 2018 Mazda Mazda3 4-Door Sport "`,
+          styleTarget: "{{locator}} [toContainText 30s] <<2007 Buick Lucerne|Trades - 2018 Mazda Mazda3 4-Door Sport>>"
+        },
+        {
+          id: "set-value-not-found",
+          label: "setValue element not found",
+          parserId: "set-value-not-found",
+          raw: `13:36:19.384[ Server ] Can't call setValue on element with selector "//*[@resource-id='P01_Email']" because element wasn't found`,
+          styleTarget: "{{locator}} [setValue] [not found]"
         },
         {
           id: "image-pixel-only",
@@ -22637,7 +22705,7 @@ This won't delete the actual file.`)) return;
     } catch (_) {
     }
     try {
-      if ("1.478") return "1.478";
+      if ("1.479") return "1.479";
     } catch (_) {
     }
     return "unknown";
