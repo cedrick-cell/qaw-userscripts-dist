@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         QA Wolf Investigation Notes
 // @namespace    http://tampermonkey.net/
-// @version      1.465
+// @version      1.478
 // @description  Per-file investigation notes: quick links (new-tab opens, PoC textarea, client-wide notes), client/env chips, instant tooltips, run timing, shift sync, work mode, export, search. data-e2e investigation-* hooks.
 // @author       You
 // @match        https://app.qawolf.com/*
@@ -1632,6 +1632,10 @@
     pruneHistoryObject(data);
   }
   function recordHistoryEvent(editKey, event) {
+    if (!state.store.notes[editKey]) {
+      console.warn("[QAW History] stale note key; skipped history event:", editKey, event.type);
+      return;
+    }
     var data = _hLoad();
     _hPrune(data);
     if (!data[editKey]) data[editKey] = [];
@@ -2385,7 +2389,7 @@
       } catch (e) {
       }
       try {
-        if ("1.465") return "1.465";
+        if ("1.478") return "1.478";
       } catch (e2) {
       }
       return "unknown";
@@ -2795,12 +2799,12 @@
         var menu = document.createElement("div");
         menu.setAttribute("data-qaw-shift-chip-menu", "1");
         menu.style.cssText = "position:fixed;z-index:2147483020;background:#0f172a;border:1px solid #475569;border-radius:6px;padding:3px;min-width:220px;box-shadow:0 4px 14px rgba(0,0,0,0.6);";
-        var btnStyle = "display:block;width:100%;text-align:left;padding:6px 9px;color:#e2e8f0;background:none;border:0;font-family:monospace;font-size:11px;cursor:pointer;border-radius:4px;";
+        var btnStyle2 = "display:block;width:100%;text-align:left;padding:6px 9px;color:#e2e8f0;background:none;border:0;font-family:monospace;font-size:11px;cursor:pointer;border-radius:4px;";
         function appendMenuButton(label, e2e, onPick) {
           var b = document.createElement("button");
           b.type = "button";
           b.setAttribute("data-e2e", e2e);
-          b.style.cssText = btnStyle;
+          b.style.cssText = btnStyle2;
           b.textContent = label;
           b.addEventListener("mouseenter", function() {
             b.style.background = "#1e293b";
@@ -4241,6 +4245,599 @@
       init_shift();
       AI_PROMPT_PREFS_GM_KEY = "_qawAiPromptPrefs_v1";
       AI_PROMPT_IDS = ["sameFixSweep", "flowOverview", "weeklyRetro"];
+    }
+  });
+
+  // src/notes/41-floating-panel.ts
+  function ensureTray() {
+    if (trayEl && document.body.contains(trayEl)) return trayEl;
+    trayEl = document.createElement("div");
+    trayEl.setAttribute("data-qaw-floating-tray", "1");
+    trayEl.style.cssText = "position:fixed;right:16px;bottom:16px;z-index:" + (Z_INV_MODAL + 80) + ";display:flex;align-items:center;gap:6px;flex-wrap:wrap;max-width:50vw;font-family:monospace;pointer-events:none;";
+    document.body.appendChild(trayEl);
+    return trayEl;
+  }
+  function updateTrayVisibility() {
+    if (!trayEl) return;
+    trayEl.style.display = trayEl.children.length ? "flex" : "none";
+  }
+  function clampPanel(panel) {
+    var rect = panel.getBoundingClientRect();
+    var left = Math.max(8, Math.min(rect.left, window.innerWidth - Math.min(80, rect.width)));
+    var top = Math.max(8, Math.min(rect.top, window.innerHeight - Math.min(48, rect.height)));
+    panel.style.left = Math.round(left) + "px";
+    panel.style.top = Math.round(top) + "px";
+  }
+  function makeButton(label, title) {
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = label;
+    btn.title = title;
+    btn.style.cssText = "font-size:11px;background:none;color:#94a3b8;border:1px solid #334155;border-radius:5px;padding:3px 8px;cursor:pointer;font-family:monospace;line-height:1.3;";
+    btn.addEventListener("mouseenter", function() {
+      btn.style.color = "#e2e8f0";
+      btn.style.borderColor = "#64748b";
+      btn.style.background = "#1e293b";
+    });
+    btn.addEventListener("mouseleave", function() {
+      btn.style.color = "#94a3b8";
+      btn.style.borderColor = "#334155";
+      btn.style.background = "none";
+    });
+    return btn;
+  }
+  function restoreFloatingPanel(id) {
+    var panel = activePanels[id];
+    if (!panel) return false;
+    panel.restore();
+    return true;
+  }
+  function createFloatingPanel(opts) {
+    if (activePanels[opts.id]) {
+      activePanels[opts.id].restore();
+      return activePanels[opts.id];
+    }
+    var width = opts.width || 720;
+    var height = opts.height || 560;
+    var zIndex = opts.zIndex || Z_INV_MODAL + 50;
+    var root = document.createElement("div");
+    root.setAttribute("data-qaw-floating-panel-root", opts.id);
+    root.setAttribute("data-qaw-overlay", "1");
+    root.style.cssText = "position:fixed;inset:0;z-index:" + zIndex + ";pointer-events:none;";
+    var panel = document.createElement("div");
+    panel.setAttribute("data-qaw-floating-panel", opts.id);
+    panel.style.cssText = "position:fixed;left:" + Math.max(16, Math.round((window.innerWidth - width) / 2)) + "px;top:" + Math.max(16, Math.round((window.innerHeight - height) / 2)) + "px;width:min(" + width + "px,calc(100vw - 32px));height:min(" + height + "px,calc(100vh - 32px));min-width:" + (opts.minWidth || 320) + "px;min-height:" + (opts.minHeight || 220) + "px;background:#0f172a;border:1px solid #475569;border-radius:10px;color:#e2e8f0;box-shadow:0 18px 56px rgba(0,0,0,0.62);display:flex;flex-direction:column;overflow:hidden;resize:both;pointer-events:auto;font-family:monospace;";
+    var header = document.createElement("div");
+    header.setAttribute("data-qaw-floating-panel-header", "1");
+    header.style.cssText = "display:flex;align-items:center;gap:8px;padding:9px 12px;border-bottom:1px solid #334155;background:#1e293b;cursor:move;user-select:none;flex-shrink:0;";
+    var titleEl = document.createElement("div");
+    titleEl.textContent = opts.title;
+    titleEl.style.cssText = "flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;font-weight:700;color:#f8fafc;";
+    header.appendChild(titleEl);
+    var actions = document.createElement("div");
+    actions.style.cssText = "display:flex;align-items:center;gap:6px;flex-shrink:0;";
+    var minBtn = makeButton("\u2013", "Minimize");
+    var closeBtn = makeButton("\xD7", "Close");
+    actions.appendChild(minBtn);
+    actions.appendChild(closeBtn);
+    header.appendChild(actions);
+    var body = document.createElement("div");
+    body.setAttribute("data-qaw-floating-panel-body", "1");
+    body.style.cssText = "flex:1;min-height:0;display:flex;flex-direction:column;background:#0f172a;";
+    panel.appendChild(header);
+    panel.appendChild(body);
+    root.appendChild(panel);
+    document.body.appendChild(root);
+    var chip = null;
+    var handle;
+    function makeChip() {
+      var tray = ensureTray();
+      var c = document.createElement("button");
+      c.type = "button";
+      c.setAttribute("data-qaw-floating-chip", opts.id);
+      c.textContent = opts.title;
+      c.style.cssText = "pointer-events:auto;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;font-weight:700;color:#dbeafe;background:#1e3a8a;border:1px solid #3b82f6;border-radius:999px;padding:6px 10px;cursor:pointer;font-family:monospace;box-shadow:0 6px 20px rgba(0,0,0,0.45);";
+      c.addEventListener("click", function() {
+        handle.restore();
+      });
+      tray.appendChild(c);
+      updateTrayVisibility();
+      return c;
+    }
+    var closed = false;
+    function cleanupListeners() {
+      document.removeEventListener("mousemove", onMouseMove);
+      document.removeEventListener("mouseup", onMouseUp);
+      window.removeEventListener("resize", onResize);
+      window.removeEventListener("beforeunload", cleanupListeners);
+    }
+    function close() {
+      if (closed) return;
+      closed = true;
+      if (chip) {
+        chip.remove();
+        chip = null;
+        updateTrayVisibility();
+      }
+      cleanupListeners();
+      delete activePanels[opts.id];
+      root.remove();
+      if (opts.onClose) opts.onClose();
+    }
+    function minimize() {
+      root.style.display = "none";
+      if (!chip) chip = makeChip();
+    }
+    function restore() {
+      root.style.display = "";
+      if (chip) {
+        chip.remove();
+        chip = null;
+        updateTrayVisibility();
+      }
+      clampPanel(panel);
+      try {
+        panel.focus();
+      } catch (e) {
+      }
+    }
+    handle = { root, panel, header, titleEl, body, actions, close, minimize, restore };
+    activePanels[opts.id] = handle;
+    minBtn.addEventListener("click", function(e) {
+      e.stopPropagation();
+      minimize();
+    });
+    closeBtn.addEventListener("click", function(e) {
+      e.stopPropagation();
+      close();
+    });
+    var dragging = false;
+    var dragDx = 0;
+    var dragDy = 0;
+    function onMouseMove(e) {
+      if (!dragging) return;
+      panel.style.left = Math.round(e.clientX - dragDx) + "px";
+      panel.style.top = Math.round(e.clientY - dragDy) + "px";
+      panel.style.right = "auto";
+      panel.style.bottom = "auto";
+    }
+    function onMouseUp() {
+      if (!dragging) return;
+      dragging = false;
+      clampPanel(panel);
+    }
+    function onResize() {
+      clampPanel(panel);
+    }
+    header.addEventListener("mousedown", function(e) {
+      if (e.target.closest("button")) return;
+      dragging = true;
+      var rect = panel.getBoundingClientRect();
+      dragDx = e.clientX - rect.left;
+      dragDy = e.clientY - rect.top;
+      e.preventDefault();
+    });
+    document.addEventListener("mousemove", onMouseMove);
+    document.addEventListener("mouseup", onMouseUp);
+    window.addEventListener("resize", onResize);
+    window.addEventListener("beforeunload", cleanupListeners);
+    return handle;
+  }
+  var activePanels, trayEl;
+  var init_floating_panel = __esm({
+    "src/notes/41-floating-panel.ts"() {
+      "use strict";
+      init_constants();
+      activePanels = {};
+      trayEl = null;
+    }
+  });
+
+  // src/notes/42-outline-generator.ts
+  function parseCsv(text) {
+    var s = String(text || "").replace(/^\uFEFF/, "");
+    var rows = [];
+    var row2 = [];
+    var field = "";
+    var i = 0;
+    var inQuotes = false;
+    function pushField() {
+      row2.push(field);
+      field = "";
+    }
+    function pushRow() {
+      pushField();
+      if (row2.length > 1 || row2[0] !== "" || rows.length === 0) rows.push(row2);
+      row2 = [];
+    }
+    while (i < s.length) {
+      var ch = s.charAt(i);
+      if (inQuotes) {
+        if (ch === '"') {
+          if (s.charAt(i + 1) === '"') {
+            field += '"';
+            i += 2;
+            continue;
+          }
+          inQuotes = false;
+          i++;
+          continue;
+        }
+        field += ch;
+        i++;
+        continue;
+      }
+      if (ch === '"') {
+        inQuotes = true;
+        i++;
+        continue;
+      }
+      if (ch === ",") {
+        pushField();
+        i++;
+        continue;
+      }
+      if (ch === "\r") {
+        i++;
+        continue;
+      }
+      if (ch === "\n") {
+        pushRow();
+        i++;
+        continue;
+      }
+      field += ch;
+      i++;
+    }
+    pushRow();
+    return rows;
+  }
+  function normalizeHeader(h) {
+    return String(h || "").trim().toLowerCase().replace(/\s+/g, " ");
+  }
+  function findColumnIndex(headers, candidates) {
+    for (var i = 0; i < headers.length; i++) {
+      var h = normalizeHeader(headers[i]);
+      for (var j = 0; j < candidates.length; j++) {
+        if (h === candidates[j]) return i;
+      }
+    }
+    return -1;
+  }
+  function parseOutlineCsvRows(text) {
+    var table = parseCsv(text);
+    if (!table.length) return { ok: false, error: "CSV is empty." };
+    var headers = table[0].map(function(c) {
+      return String(c || "").trim();
+    });
+    var groupIdx = findColumnIndex(headers, ["group"]);
+    var workflowIdx = findColumnIndex(headers, ["workflow"]);
+    var stepIdx = findColumnIndex(headers, ["test step", "teststep", "step"]);
+    if (groupIdx < 0) return { ok: false, error: "Missing required column: Group" };
+    if (workflowIdx < 0) return { ok: false, error: "Missing required column: Workflow" };
+    if (stepIdx < 0) return { ok: false, error: "Missing required column: Test Step" };
+    var rows = [];
+    for (var r = 1; r < table.length; r++) {
+      var line = table[r];
+      if (!line || !line.length) continue;
+      var group = groupIdx < line.length ? String(line[groupIdx] || "").trim() : "";
+      var workflow = workflowIdx < line.length ? String(line[workflowIdx] || "").trim() : "";
+      var testStep = stepIdx < line.length ? String(line[stepIdx] || "").trim() : "";
+      if (!group && !workflow && !testStep) continue;
+      rows.push({ group, workflow, testStep });
+    }
+    if (!rows.length) return { ok: false, error: "No data rows found after the header." };
+    return { ok: true, rows };
+  }
+  function forwardFillOutlineWorkflows(rows) {
+    var lastGroup = "";
+    var last = "";
+    for (var i = 0; i < rows.length; i++) {
+      var g = String(rows[i].group || "").trim();
+      if (g) lastGroup = g;
+      else rows[i].group = lastGroup;
+      var w = String(rows[i].workflow || "").trim();
+      if (w) last = w;
+      else rows[i].workflow = last;
+    }
+  }
+  function countOutlineStepRows(rows) {
+    var n = 0;
+    for (var i = 0; i < rows.length; i++) {
+      if (String(rows[i].testStep || "").trim()) n++;
+    }
+    return n;
+  }
+  function slugifyOutlineWorkflow(text) {
+    var s = String(text || "").toLowerCase();
+    s = s.replace(/[^a-z0-9\s-]/g, "");
+    s = s.replace(/[\s-]+/g, "-");
+    return s.replace(/^-+|-+$/g, "");
+  }
+  function slugNeedsWarning(text, slug) {
+    var original = String(text || "").trim();
+    if (!original) return false;
+    var spacingOnlySlug = original.toLowerCase().replace(/[\s-]+/g, "-").replace(/^-+|-+$/g, "");
+    return !slug || slug !== spacingOnlySlug;
+  }
+  function groupRowsByWorkflow(rows) {
+    var map = {};
+    var order = [];
+    for (var i = 0; i < rows.length; i++) {
+      var group = String(rows[i].group || "").trim();
+      var workflow = String(rows[i].workflow || "").trim();
+      var step = String(rows[i].testStep || "").trim();
+      if (!group || !workflow || !step) continue;
+      var key = group + "" + workflow;
+      if (!map[key]) {
+        map[key] = { group, workflow, steps: [] };
+        order.push(key);
+      }
+      map[key].steps.push(step);
+    }
+    return order.map(function(key2) {
+      return map[key2];
+    });
+  }
+  function buildFlowCode(workflow, steps, flowBrowser) {
+    var browser = flowBrowser || "Web - Chrome";
+    var code = 'import { flow, expect } from "@qawolf/flows/web";\n\n';
+    code += "export default flow(\n  " + JSON.stringify(workflow) + ",\n  " + JSON.stringify(browser) + ",\n";
+    code += "  async ({ test, ...testContext }) => {\n";
+    for (var i = 0; i < steps.length; i++) {
+      var step = steps[i];
+      var isLast = i === steps.length - 1;
+      code += "    await test(" + JSON.stringify(step) + ", async () => {\n";
+      code += "      //--------------------------------\n";
+      code += "      // Arrange:\n";
+      code += "      //--------------------------------\n\n";
+      code += "      // None\n\n";
+      code += "      //--------------------------------\n";
+      code += "      // Act:\n";
+      code += "      //--------------------------------\n\n\n";
+      code += "      //--------------------------------\n";
+      code += "      // Assert:\n";
+      code += "      //--------------------------------\n\n\n";
+      if (isLast) {
+        code += "      //--------------------------------\n";
+        code += "      // Clean up:\n";
+        code += "      //--------------------------------\n\n";
+        code += "      // No clean up required\n\n";
+      }
+      code += "    });\n\n";
+    }
+    code = code.replace(/\n+$/, "") + "\n  },\n);\n";
+    return code;
+  }
+  function generateOutlineMarkdownFromCsv(text, maxRows, flowBrowser) {
+    var limit = maxRows != null && maxRows > 0 ? maxRows : OUTLINE_MAX_STEP_ROWS;
+    var parsed = parseOutlineCsvRows(text);
+    if (!parsed.ok) return { ok: false, error: parsed.error };
+    var rows = parsed.rows.slice();
+    forwardFillOutlineWorkflows(rows);
+    var missingGroup = rows.some(function(r) {
+      return String(r.testStep || "").trim() && !String(r.group || "").trim();
+    });
+    if (missingGroup) {
+      return { ok: false, error: "Some rows have a Test Step but no Group (even after forward-fill)." };
+    }
+    var missingWorkflow = rows.some(function(r) {
+      return String(r.testStep || "").trim() && !String(r.workflow || "").trim();
+    });
+    if (missingWorkflow) {
+      return { ok: false, error: "Some rows have a Test Step but no Workflow (even after forward-fill)." };
+    }
+    var totalStepCount = countOutlineStepRows(rows);
+    if (!totalStepCount) return { ok: false, error: "No non-empty Test Step rows found." };
+    var allGroups = groupRowsByWorkflow(rows);
+    var groups = [];
+    var stepCount = 0;
+    for (var gi = 0; gi < allGroups.length; gi++) {
+      var candidate = allGroups[gi];
+      if (candidate.steps.length > limit && groups.length === 0) {
+        return {
+          ok: false,
+          error: "The first workflow has " + candidate.steps.length + " test steps. Max " + limit + " per batch. Split that workflow before generating."
+        };
+      }
+      if (stepCount + candidate.steps.length > limit) break;
+      groups.push(candidate);
+      stepCount += candidate.steps.length;
+    }
+    if (!groups.length) return { ok: false, error: "No workflow groups with test steps found." };
+    var omittedStepCount = totalStepCount - stepCount;
+    var omittedWorkflowNames = allGroups.slice(groups.length).map(function(g2) {
+      return g2.workflow;
+    });
+    var slugWarningNames = [];
+    var md = "# AI Task: Test Outline Generation\n\nPlease use your file-writing tools to create the following test files at the specified paths. Write the provided code blocks exactly as shown without modifications.\n\n---\n\n";
+    for (var g = 0; g < groups.length; g++) {
+      var group = groups[g];
+      var groupSlug = slugifyOutlineWorkflow(group.group) || "group";
+      var slug = slugifyOutlineWorkflow(group.workflow) || "workflow";
+      if (slugNeedsWarning(group.group, groupSlug) && slugWarningNames.indexOf(group.group) < 0) slugWarningNames.push(group.group);
+      if (slugNeedsWarning(group.workflow, slug) && slugWarningNames.indexOf(group.workflow) < 0) slugWarningNames.push(group.workflow);
+      var filename = "src/flows/" + groupSlug + "/" + slug + ".flow.ts";
+      var code = buildFlowCode(group.workflow, group.steps, flowBrowser);
+      md += "## Task: Create `" + filename + "`\n";
+      md += "**Target Path:** `" + filename + "`\n\n";
+      md += "```typescript\n" + code + "```\n\n---\n\n";
+    }
+    return {
+      ok: true,
+      markdown: md,
+      stepCount,
+      totalStepCount,
+      workflowCount: groups.length,
+      omittedStepCount,
+      omittedWorkflowNames,
+      slugWarningNames
+    };
+  }
+  function btnStyle(kind) {
+    if (kind === "primary") {
+      return "padding:6px 12px;border-radius:8px;border:1px solid #38bdf8;background:#0ea5e9;color:#0f172a;font-weight:700;cursor:pointer;font-size:11px;";
+    }
+    return "padding:6px 12px;border-radius:8px;border:1px solid #475569;background:#1e293b;color:#e2e8f0;cursor:pointer;font-size:11px;";
+  }
+  function mountOutlineGeneratorContent(container) {
+    var lastMarkdown = "";
+    var flowBrowser = "Web - Chrome";
+    var wrap = document.createElement("div");
+    wrap.setAttribute("data-qaw-outline-generator", "1");
+    wrap.style.cssText = "border:1px solid #334155;border-radius:10px;background:#0f172a;padding:12px;display:flex;flex-direction:column;gap:10px;color:#e2e8f0;font-family:monospace;font-size:11px;";
+    var title = document.createElement("div");
+    title.innerHTML = '<span style="font-size:13px;font-weight:700;color:#f8fafc;">Test outline generator</span>';
+    wrap.appendChild(title);
+    var hint = document.createElement("div");
+    hint.style.cssText = "color:#94a3b8;line-height:1.45;font-size:10px;";
+    hint.textContent = "Upload a coverage CSV with Group, Workflow, and Test Step columns. Generates ai_generation_instructions.md for the in-app AI. Generates complete workflows up to " + OUTLINE_MAX_STEP_ROWS + " non-empty test steps per batch.";
+    wrap.appendChild(hint);
+    var fileRow = document.createElement("div");
+    fileRow.style.cssText = "display:flex;align-items:center;gap:8px;flex-wrap:wrap;";
+    var fileInput = document.createElement("input");
+    fileInput.type = "file";
+    fileInput.accept = ".csv,text/csv";
+    fileInput.style.cssText = "font-size:11px;color:#cbd5e1;max-width:100%;";
+    var fileLabel = document.createElement("span");
+    fileLabel.style.cssText = "color:#64748b;font-size:10px;";
+    fileLabel.textContent = "No file chosen";
+    fileRow.appendChild(fileInput);
+    fileRow.appendChild(fileLabel);
+    wrap.appendChild(fileRow);
+    var status = document.createElement("div");
+    status.style.cssText = "font-size:10px;line-height:1.4;min-height:14px;";
+    wrap.appendChild(status);
+    var preview = document.createElement("textarea");
+    preview.readOnly = true;
+    preview.placeholder = "Generated Markdown preview will appear here\u2026";
+    preview.style.cssText = "width:100%;min-height:160px;max-height:280px;resize:vertical;box-sizing:border-box;border:1px solid #334155;border-radius:8px;background:#020617;color:#cbd5e1;padding:8px;font-family:monospace;font-size:10px;line-height:1.35;";
+    wrap.appendChild(preview);
+    var actions = document.createElement("div");
+    actions.style.cssText = "display:flex;gap:8px;flex-wrap:wrap;";
+    var copyBtn = document.createElement("button");
+    copyBtn.type = "button";
+    copyBtn.textContent = "Copy Markdown";
+    copyBtn.style.cssText = btnStyle("primary");
+    copyBtn.disabled = true;
+    var downloadBtn = document.createElement("button");
+    downloadBtn.type = "button";
+    downloadBtn.textContent = "Download .md";
+    downloadBtn.style.cssText = btnStyle("ghost");
+    downloadBtn.disabled = true;
+    actions.appendChild(copyBtn);
+    actions.appendChild(downloadBtn);
+    wrap.appendChild(actions);
+    function setStatus(text, tone) {
+      var color = tone === "ok" ? "#4ade80" : tone === "err" ? "#f87171" : "#94a3b8";
+      status.style.color = color;
+      status.textContent = text;
+    }
+    function setOutput(md, meta) {
+      lastMarkdown = md;
+      preview.value = md;
+      copyBtn.disabled = !md;
+      downloadBtn.disabled = !md;
+      setStatus(meta, "ok");
+    }
+    function clearOutput(err) {
+      lastMarkdown = "";
+      preview.value = "";
+      copyBtn.disabled = true;
+      downloadBtn.disabled = true;
+      setStatus(err, "err");
+    }
+    fileInput.addEventListener("change", function() {
+      var file = fileInput.files && fileInput.files[0];
+      if (!file) {
+        fileLabel.textContent = "No file chosen";
+        clearOutput("");
+        setStatus("", "muted");
+        return;
+      }
+      fileLabel.textContent = file.name;
+      var reader = new FileReader();
+      reader.onload = function() {
+        var text = String(reader.result || "");
+        var result = generateOutlineMarkdownFromCsv(text, void 0, flowBrowser);
+        if (!result.ok) {
+          clearOutput(result.error);
+          return;
+        }
+        var meta = "Ready: " + result.stepCount + " of " + result.totalStepCount + " test step" + (result.totalStepCount === 1 ? "" : "s") + " across " + result.workflowCount + " complete workflow" + (result.workflowCount === 1 ? "" : "s") + (result.omittedStepCount ? ". Omitted " + result.omittedStepCount + " step" + (result.omittedStepCount === 1 ? "" : "s") + " from: " + result.omittedWorkflowNames.join(", ") + "." : ".");
+        if (result.slugWarningNames.length) {
+          meta += " Warning: filename slug changed for: " + result.slugWarningNames.join(", ") + ".";
+        }
+        setOutput(
+          result.markdown,
+          meta
+        );
+      };
+      reader.onerror = function() {
+        clearOutput("Could not read the CSV file.");
+      };
+      reader.readAsText(file);
+    });
+    copyBtn.addEventListener("click", function() {
+      if (!lastMarkdown) return;
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(lastMarkdown).then(function() {
+          setStatus("Copied Markdown to clipboard.", "ok");
+        }).catch(function() {
+          setStatus("Copy failed \u2014 try Download .md instead.", "err");
+        });
+        return;
+      }
+      setStatus("Clipboard unavailable in this browser.", "err");
+    });
+    downloadBtn.addEventListener("click", function() {
+      if (!lastMarkdown) return;
+      var blob = new Blob([lastMarkdown], { type: "text/markdown;charset=utf-8" });
+      var link = document.createElement("a");
+      link.href = URL.createObjectURL(blob);
+      link.download = "ai_generation_instructions.md";
+      link.click();
+      URL.revokeObjectURL(link.href);
+      setStatus("Downloaded ai_generation_instructions.md", "ok");
+    });
+    container.appendChild(wrap);
+  }
+  function openOutlineGeneratorPanel() {
+    if (restoreFloatingPanel(OUTLINE_GENERATOR_PANEL_ID)) return;
+    var shell = createFloatingPanel({
+      id: OUTLINE_GENERATOR_PANEL_ID,
+      title: "Test Outline Generator",
+      width: 840,
+      height: 660,
+      minWidth: 460,
+      minHeight: 340
+    });
+    shell.body.style.padding = "12px";
+    shell.body.style.overflow = "auto";
+    mountOutlineGeneratorContent(shell.body);
+  }
+  function mountOutlineGeneratorView(container) {
+    var wrap = document.createElement("div");
+    wrap.setAttribute("data-qaw-outline-generator-launcher", "1");
+    wrap.style.cssText = "border:1px solid #334155;border-radius:10px;background:#0f172a;padding:12px;display:flex;align-items:center;justify-content:space-between;gap:12px;color:#e2e8f0;font-family:monospace;font-size:11px;";
+    var title = document.createElement("div");
+    title.innerHTML = '<div style="font-size:13px;font-weight:700;color:#f8fafc;">Test outline generator</div><div style="font-size:10px;color:#94a3b8;line-height:1.45;margin-top:4px;">Upload CSV and generate ai_generation_instructions.md in a draggable panel.</div>';
+    wrap.appendChild(title);
+    var openBtn = document.createElement("button");
+    openBtn.type = "button";
+    openBtn.textContent = "Open generator";
+    openBtn.style.cssText = btnStyle("primary") + "font-family:monospace;";
+    openBtn.addEventListener("click", openOutlineGeneratorPanel);
+    wrap.appendChild(openBtn);
+    container.appendChild(wrap);
+  }
+  var OUTLINE_MAX_STEP_ROWS, OUTLINE_GENERATOR_PANEL_ID;
+  var init_outline_generator = __esm({
+    "src/notes/42-outline-generator.ts"() {
+      "use strict";
+      init_floating_panel();
+      OUTLINE_MAX_STEP_ROWS = 20;
+      OUTLINE_GENERATOR_PANEL_ID = "outline-generator-panel";
     }
   });
 
@@ -6509,183 +7106,6 @@
     }
   });
 
-  // src/notes/41-floating-panel.ts
-  function ensureTray() {
-    if (trayEl && document.body.contains(trayEl)) return trayEl;
-    trayEl = document.createElement("div");
-    trayEl.setAttribute("data-qaw-floating-tray", "1");
-    trayEl.style.cssText = "position:fixed;right:16px;bottom:16px;z-index:" + (Z_INV_MODAL + 80) + ";display:flex;align-items:center;gap:6px;flex-wrap:wrap;max-width:50vw;font-family:monospace;pointer-events:none;";
-    document.body.appendChild(trayEl);
-    return trayEl;
-  }
-  function updateTrayVisibility() {
-    if (!trayEl) return;
-    trayEl.style.display = trayEl.children.length ? "flex" : "none";
-  }
-  function clampPanel(panel) {
-    var rect = panel.getBoundingClientRect();
-    var left = Math.max(8, Math.min(rect.left, window.innerWidth - Math.min(80, rect.width)));
-    var top = Math.max(8, Math.min(rect.top, window.innerHeight - Math.min(48, rect.height)));
-    panel.style.left = Math.round(left) + "px";
-    panel.style.top = Math.round(top) + "px";
-  }
-  function makeButton(label, title) {
-    var btn = document.createElement("button");
-    btn.type = "button";
-    btn.textContent = label;
-    btn.title = title;
-    btn.style.cssText = "font-size:11px;background:none;color:#94a3b8;border:1px solid #334155;border-radius:5px;padding:3px 8px;cursor:pointer;font-family:monospace;line-height:1.3;";
-    btn.addEventListener("mouseenter", function() {
-      btn.style.color = "#e2e8f0";
-      btn.style.borderColor = "#64748b";
-      btn.style.background = "#1e293b";
-    });
-    btn.addEventListener("mouseleave", function() {
-      btn.style.color = "#94a3b8";
-      btn.style.borderColor = "#334155";
-      btn.style.background = "none";
-    });
-    return btn;
-  }
-  function restoreFloatingPanel(id) {
-    var panel = activePanels[id];
-    if (!panel) return false;
-    panel.restore();
-    return true;
-  }
-  function createFloatingPanel(opts) {
-    if (activePanels[opts.id]) {
-      activePanels[opts.id].restore();
-      return activePanels[opts.id];
-    }
-    var width = opts.width || 720;
-    var height = opts.height || 560;
-    var zIndex = opts.zIndex || Z_INV_MODAL + 50;
-    var root = document.createElement("div");
-    root.setAttribute("data-qaw-floating-panel-root", opts.id);
-    root.setAttribute("data-qaw-overlay", "1");
-    root.style.cssText = "position:fixed;inset:0;z-index:" + zIndex + ";pointer-events:none;";
-    var panel = document.createElement("div");
-    panel.setAttribute("data-qaw-floating-panel", opts.id);
-    panel.style.cssText = "position:fixed;left:" + Math.max(16, Math.round((window.innerWidth - width) / 2)) + "px;top:" + Math.max(16, Math.round((window.innerHeight - height) / 2)) + "px;width:min(" + width + "px,calc(100vw - 32px));height:min(" + height + "px,calc(100vh - 32px));min-width:" + (opts.minWidth || 320) + "px;min-height:" + (opts.minHeight || 220) + "px;background:#0f172a;border:1px solid #475569;border-radius:10px;color:#e2e8f0;box-shadow:0 18px 56px rgba(0,0,0,0.62);display:flex;flex-direction:column;overflow:hidden;resize:both;pointer-events:auto;font-family:monospace;";
-    var header = document.createElement("div");
-    header.setAttribute("data-qaw-floating-panel-header", "1");
-    header.style.cssText = "display:flex;align-items:center;gap:8px;padding:9px 12px;border-bottom:1px solid #334155;background:#1e293b;cursor:move;user-select:none;flex-shrink:0;";
-    var titleEl = document.createElement("div");
-    titleEl.textContent = opts.title;
-    titleEl.style.cssText = "flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;font-weight:700;color:#f8fafc;";
-    header.appendChild(titleEl);
-    var actions = document.createElement("div");
-    actions.style.cssText = "display:flex;align-items:center;gap:6px;flex-shrink:0;";
-    var minBtn = makeButton("\u2013", "Minimize");
-    var closeBtn = makeButton("\xD7", "Close");
-    actions.appendChild(minBtn);
-    actions.appendChild(closeBtn);
-    header.appendChild(actions);
-    var body = document.createElement("div");
-    body.setAttribute("data-qaw-floating-panel-body", "1");
-    body.style.cssText = "flex:1;min-height:0;display:flex;flex-direction:column;background:#0f172a;";
-    panel.appendChild(header);
-    panel.appendChild(body);
-    root.appendChild(panel);
-    document.body.appendChild(root);
-    var chip = null;
-    var handle;
-    function makeChip() {
-      var tray = ensureTray();
-      var c = document.createElement("button");
-      c.type = "button";
-      c.setAttribute("data-qaw-floating-chip", opts.id);
-      c.textContent = opts.title;
-      c.style.cssText = "pointer-events:auto;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;font-weight:700;color:#dbeafe;background:#1e3a8a;border:1px solid #3b82f6;border-radius:999px;padding:6px 10px;cursor:pointer;font-family:monospace;box-shadow:0 6px 20px rgba(0,0,0,0.45);";
-      c.addEventListener("click", function() {
-        handle.restore();
-      });
-      tray.appendChild(c);
-      updateTrayVisibility();
-      return c;
-    }
-    function close() {
-      if (chip) {
-        chip.remove();
-        chip = null;
-        updateTrayVisibility();
-      }
-      document.removeEventListener("mousemove", onMouseMove);
-      document.removeEventListener("mouseup", onMouseUp);
-      window.removeEventListener("resize", onResize);
-      delete activePanels[opts.id];
-      root.remove();
-      if (opts.onClose) opts.onClose();
-    }
-    function minimize() {
-      root.style.display = "none";
-      if (!chip) chip = makeChip();
-    }
-    function restore() {
-      root.style.display = "";
-      if (chip) {
-        chip.remove();
-        chip = null;
-        updateTrayVisibility();
-      }
-      clampPanel(panel);
-      try {
-        panel.focus();
-      } catch (e) {
-      }
-    }
-    handle = { root, panel, header, titleEl, body, actions, close, minimize, restore };
-    activePanels[opts.id] = handle;
-    minBtn.addEventListener("click", function(e) {
-      e.stopPropagation();
-      minimize();
-    });
-    closeBtn.addEventListener("click", function(e) {
-      e.stopPropagation();
-      close();
-    });
-    var dragging = false;
-    var dragDx = 0;
-    var dragDy = 0;
-    function onMouseMove(e) {
-      if (!dragging) return;
-      panel.style.left = Math.round(e.clientX - dragDx) + "px";
-      panel.style.top = Math.round(e.clientY - dragDy) + "px";
-      panel.style.right = "auto";
-      panel.style.bottom = "auto";
-    }
-    function onMouseUp() {
-      if (!dragging) return;
-      dragging = false;
-      clampPanel(panel);
-    }
-    function onResize() {
-      clampPanel(panel);
-    }
-    header.addEventListener("mousedown", function(e) {
-      if (e.target.closest("button")) return;
-      dragging = true;
-      var rect = panel.getBoundingClientRect();
-      dragDx = e.clientX - rect.left;
-      dragDy = e.clientY - rect.top;
-      e.preventDefault();
-    });
-    document.addEventListener("mousemove", onMouseMove);
-    document.addEventListener("mouseup", onMouseUp);
-    window.addEventListener("resize", onResize);
-    return handle;
-  }
-  var activePanels, trayEl;
-  var init_floating_panel = __esm({
-    "src/notes/41-floating-panel.ts"() {
-      "use strict";
-      init_constants();
-      activePanels = {};
-      trayEl = null;
-    }
-  });
-
   // src/notes/29-note-llm-chat.ts
   function nlcSsKey(bulletId) {
     return NLC_SS_PREFIX + bulletId;
@@ -7320,7 +7740,13 @@
       if (payload.locators && payload.locators.length) {
         if (!Array.isArray(b.locators)) b.locators = [];
         payload.locators.forEach(function(loc) {
-          b.locators.push({ id: loc.id, text: loc.text, shorthand: loc.shorthand, detail: loc.detail });
+          b.locators.push({
+            id: loc.id,
+            text: loc.text,
+            shorthand: loc.shorthand,
+            detail: loc.detail,
+            matches: loc.matches
+          });
         });
       }
       var existing = String(b.text || "").trim();
@@ -7342,6 +7768,411 @@
     "src/notes/run-log-payloads.ts"() {
       "use strict";
       init_store();
+    }
+  });
+
+  // src/notes/run-log-parsers.ts
+  function formatTimeoutLabel(ms) {
+    if (!ms || ms < 0) return "?";
+    if (ms % 1e3 === 0) return Math.round(ms / 1e3) + "s";
+    return ms + "ms";
+  }
+  function locatorShorthand(full) {
+    var s = String(full || "").trim();
+    if (!s) return "{{locator}}";
+    var inner = s;
+    var pm = s.match(/^((?:page\d*|popupPage)\.)([\s\S]+)$/i);
+    if (pm) inner = pm[2];
+    var role = inner.match(/getByRole\(\s*['"]([^'"]+)['"]\s*,\s*\{[^}]*name:\s*['"]([^'"]+)['"]/i);
+    if (role) return "{{" + role[1] + ": " + role[2] + "}}";
+    var byText = inner.match(/getByText\(\s*['"]([^'"]+)['"]/i);
+    if (byText) return "{{text: " + byText[1] + "}}";
+    var byLabel = inner.match(/getByLabel\(\s*['"]([^'"]+)['"]/i);
+    if (byLabel) return "{{label: " + byLabel[1] + "}}";
+    var testid = inner.match(/data-testid=["']([^"']+)["']/i);
+    if (testid) return "{{testid: " + testid[1] + "}}";
+    return "{{locator}}";
+  }
+  function urlShorthand(raw) {
+    var s = String(raw || "").trim();
+    if (!s) return "{{url}}";
+    try {
+      var u = new URL(s);
+      var parts = u.hostname.split(".").filter(Boolean);
+      var top = parts.length >= 2 ? parts.slice(-2).join(".") : u.hostname;
+      if (parts.length > 2) top = "..." + top;
+      var hasMore = u.pathname && u.pathname !== "/" || !!u.search || !!u.hash;
+      return "{{url: " + top + (hasMore ? "/..." : "") + "}}";
+    } catch (_) {
+      return "{{url}}";
+    }
+  }
+  function extractExpectedActual(text) {
+    var s = String(text || "").replace(/\r/g, "").trim();
+    var m = s.match(
+      new RegExp(
+        "(?:Expected|Expect(?:ed)? value)\\s*:\\s*([\\s\\S]*?)\\s+(?:Received|Actual)\\s*:\\s*([\\s\\S]*?)" + EXPECTED_ACTUAL_TAIL_STOP,
+        "i"
+      )
+    );
+    if (!m) {
+      m = s.match(
+        new RegExp(
+          "(?:Expected)\\s+([\\s\\S]*?)\\s+(?:Received|Actual)\\s+([\\s\\S]*?)" + EXPECTED_ACTUAL_TAIL_STOP,
+          "i"
+        )
+      );
+    }
+    if (!m || !m[1] || !m[2]) return null;
+    function cleanSide(v) {
+      return String(v || "").replace(/\s+(?:Timeout:\s[\s\S]*|Call log:[\s\S]*|Call Log:[\s\S]*|Locator:[\s\S]*|Error:[\s\S]*|at\s+\S+:\d+:\d+[\s\S]*)$/i, "").trim().replace(/^['"`]|['"`]$/g, "");
+    }
+    var expected = cleanSide(m[1]);
+    var actual = cleanSide(m[2]);
+    if (!expected || !actual) return null;
+    return { expected, actual };
+  }
+  function extractWaitingForLocator(text) {
+    var s = String(text || "").replace(/\r/g, "");
+    var lines = s.split("\n");
+    for (var i = 0; i < lines.length; i++) {
+      var wm = lines[i].match(/^\s*-?\s*waiting for\s+(.+)$/i);
+      if (wm && wm[1]) return wm[1].trim();
+    }
+    var inline = s.match(
+      new RegExp("\\bwaiting for\\s+([\\s\\S]+?)" + LOCATOR_FIELD_STOP, "i")
+    );
+    if (inline && inline[1]) return inline[1].trim();
+    var toEnd = s.match(/\bwaiting for\s+(.+)$/i);
+    if (toEnd && toEnd[1]) return toEnd[1].trim();
+    return null;
+  }
+  function extractLocatorField(text) {
+    var s = String(text || "").replace(/\r/g, "");
+    var m = s.match(new RegExp("\\bLocator:\\s*([\\s\\S]+?)" + LOCATOR_FIELD_STOP, "i"));
+    return m && m[1] ? m[1].trim() : null;
+  }
+  function addLocatorRef(locators, full, detailOverride) {
+    var id = uid();
+    var parts = splitLocatorDetails(full);
+    var shorthand = locatorShorthand(parts.text);
+    locators.push({ id, text: parts.text, shorthand, detail: detailOverride || parts.detail });
+    return { clip: shorthand, note: "[[loc:" + id + "]]" };
+  }
+  function addLocatorRefWithLabel(locators, full, label, detailOverride) {
+    var id = uid();
+    var parts = splitLocatorDetails(full);
+    locators.push({ id, text: parts.text, shorthand: label, detail: detailOverride || parts.detail });
+    return { clip: label, note: "[[loc:" + id + "]]" };
+  }
+  function dedupeLines(lines) {
+    var seen = {};
+    var out = [];
+    lines.forEach(function(line) {
+      var key = line.toLowerCase();
+      if (seen[key]) return;
+      seen[key] = 1;
+      out.push(line);
+    });
+    return out;
+  }
+  function summarizeLocatorDetail(detail) {
+    var s = String(detail || "").replace(/\r/g, "").replace(/\s+/g, " ").trim();
+    if (!s) return void 0;
+    var lines = [];
+    if (/locator resolved to/i.test(s) || /\bfound\b/i.test(s)) lines.push("Locator resolved to an element.");
+    if (/waiting for element to be visible|element is not visible|not visible/i.test(s)) lines.push("Waiting for element to be visible.");
+    if (/waiting for element to be enabled|element is not enabled|disabled/i.test(s)) lines.push("Waiting for element to be enabled.");
+    if (/waiting for element to be stable|element is not stable|not stable/i.test(s)) lines.push("Waiting for element to be stable.");
+    if (/intercepts pointer events|intercepting action/i.test(s)) lines.push("Another element is intercepting the action.");
+    if (/to be hidden|waiting for .* hidden/i.test(s)) lines.push("Waiting for a blocking element to be hidden.");
+    if (/retrying/i.test(s)) lines.push("Playwright retried the action.");
+    if (/unexpected value/i.test(s)) lines.push("Element value did not match the expected value.");
+    lines = dedupeLines(lines);
+    if (lines.length) return lines.join("\n");
+    return s.replace(/<[^>]+>/g, "<element>").slice(0, 260);
+  }
+  function splitLocatorDetails(full) {
+    var s = String(full || "").trim();
+    if (!s) return { text: "" };
+    var detailAt = s.search(/\s+(?:-|\d+\s*[×x])\s+(?=(?:locator resolved|unexpected value|attempting click action|waiting\b|element is\b|retrying\b|found\b))/i);
+    if (detailAt < 0) return { text: s };
+    var text = s.slice(0, detailAt).trim();
+    var detail = summarizeLocatorDetail(s.slice(detailAt).trim());
+    return { text: text || s, detail: text ? detail : void 0 };
+  }
+  function finalizeTextResult(lines, locatorFull, extra) {
+    var locators = extra && extra.locators ? extra.locators.slice() : [];
+    var clipLines = lines.slice();
+    var noteLines = lines.slice();
+    if (locatorFull) {
+      var ref = addLocatorRef(locators, locatorFull);
+      clipLines.push("Target: " + ref.clip);
+      noteLines.push("Target: " + ref.note);
+    }
+    return {
+      clipboardText: clipLines.join("\n"),
+      noteText: noteLines.join("\n"),
+      locators: locators.length ? locators : void 0
+    };
+  }
+  function actionLabel(action) {
+    return action === "waitfor" ? "waitFor" : action;
+  }
+  function actionBadge(action, ms) {
+    return "[" + actionLabel(action) + (ms ? " " + formatTimeoutLabel(ms) : "") + "]";
+  }
+  function parseLocatorActionTimeout(text, onlyAction) {
+    var s = String(text || "").replace(/\r/g, "");
+    var m = s.match(/locator\.([A-Za-z][\w]*)\s*:\s*Timeout\s+(\d+)ms\s+exceeded/i);
+    if (!m) return null;
+    var action = actionLabel(m[1]);
+    if (onlyAction && action.toLowerCase() !== onlyAction.toLowerCase()) return null;
+    var ms = parseInt(m[2], 10);
+    var locator = extractWaitingForLocator(s) || extractLocatorField(s);
+    var badge = actionBadge(action, ms);
+    if (!locator) return { clipboardText: "{{locator}} " + badge, noteText: "{{locator}} " + badge };
+    var locators = [];
+    var ref = addLocatorRef(locators, locator);
+    return {
+      clipboardText: ref.clip + " " + badge,
+      noteText: ref.note + " " + badge,
+      locators
+    };
+  }
+  function parseImageMismatch(text) {
+    var s = String(text || "").replace(/\r/g, "");
+    var m = s.match(
+      /Expected an image (\d+)px by (\d+)px, received (\d+)px by (\d+)px\.\s*(\d+) pixels \(ratio ([\d.]+)(?:\s+of all image pixels)?\)\s+are different/i
+    );
+    if (!m) return null;
+    var ew = m[1];
+    var eh = m[2];
+    var rw = m[3];
+    var rh = m[4];
+    var pixels = m[5];
+    var ratio = parseFloat(m[6]);
+    var pct = Number.isFinite(ratio) ? Math.round(ratio * 100) : null;
+    var pctLabel = pct != null ? pct + "%" : String(m[6]);
+    return finalizeTextResult([
+      "Image mismatch: expected " + ew + "\xD7" + eh + ", received " + rw + "\xD7" + rh + " (" + pixels + " px diff" + (pctLabel ? ", " + pctLabel : "") + ")"
+    ], null);
+  }
+  function parseImagePixelMismatch(text) {
+    var s = String(text || "").replace(/\r/g, "");
+    var m = s.match(/(\d+)\s+pixels\s+\(ratio\s+([\d.]+)(?:\s+of all image pixels)?\)\s+are different/i);
+    if (!m) return null;
+    var ratio = parseFloat(m[2]);
+    var pct = Number.isFinite(ratio) ? Math.round(ratio * 100) : null;
+    return finalizeTextResult([
+      "Image mismatch: " + m[1] + " px diff" + (pct != null ? ", " + pct + "%" : "")
+    ], null);
+  }
+  function parsePageNavigationTimeout(text) {
+    var s = String(text || "").replace(/\r/g, "");
+    var m = s.match(/page\.(goto|reload|waitForLoadState):\s*Timeout\s+(\d+)ms\s+exceeded/i);
+    if (!m) return null;
+    var action = m[1] === "waitForLoadState" ? "waitForLoadState" : m[1];
+    var ms = parseInt(m[2], 10);
+    var url = null;
+    var waitUntil = null;
+    var nav = s.match(/navigating to\s+"([^"]+)"(?:,\s*waiting until\s+"([^"]+)")?/i);
+    if (nav) {
+      url = nav[1];
+      waitUntil = nav[2] || null;
+    }
+    var loadState = s.match(/waiting for\s+"([^"]+)"\s+load state/i);
+    if (loadState && !waitUntil) waitUntil = loadState[1];
+    var locators = [];
+    var label = url ? urlShorthand(url) : "{{url}}";
+    var detail = (url ? "URL: " + url : "Current page URL") + (waitUntil ? "\nWaited for: " + waitUntil : "");
+    var ref = addLocatorRefWithLabel(locators, url || "Current page URL", label, detail);
+    var badge = "[" + actionLabel(action) + " timeout" + (ms ? " " + formatTimeoutLabel(ms) : "") + "]";
+    var suffix = waitUntil ? " [" + waitUntil + "]" : "";
+    return {
+      clipboardText: ref.clip + " " + badge + suffix,
+      noteText: ref.note + " " + badge + suffix,
+      locators
+    };
+  }
+  function parseLocatorVisibleFailed(text) {
+    var s = String(text || "").replace(/\r/g, "");
+    if (!/expect\(locator\)\.toBeVisible\(\)\s+failed/i.test(s)) return null;
+    var locator = extractLocatorField(s) || extractWaitingForLocator(s);
+    var timeoutM = s.match(/\bTimeout:\s*(\d+)ms/i);
+    var ms = timeoutM ? parseInt(timeoutM[1], 10) : null;
+    var suffix = " [visible" + (ms ? " " + formatTimeoutLabel(ms) : "") + "]";
+    if (!locator) return { clipboardText: "{{locator}}" + suffix, noteText: "{{locator}}" + suffix };
+    var locators = [];
+    var ref = addLocatorRef(locators, locator);
+    return {
+      clipboardText: ref.clip + suffix,
+      noteText: ref.note + suffix,
+      locators
+    };
+  }
+  function extractStrictModeAkaLocators(text) {
+    var out = [];
+    var re = /\baka\s+([\s\S]*?)(?=\s+\d+\)\s+|\s+Call log:\s|$)/gi;
+    var m;
+    while (m = re.exec(text)) {
+      var locator = String(m[1] || "").trim();
+      if (locator) out.push(locator);
+    }
+    return out;
+  }
+  function parseLocatorStrictModeViolation(text) {
+    var s = String(text || "").replace(/\r/g, "");
+    var m = s.match(/locator\.([A-Za-z][\w]*)\s*:\s*Error:\s*strict mode violation:\s*([\s\S]+?)\s+resolved to\s+(\d+)\s+elements/i);
+    if (!m) return null;
+    var target = String(m[2] || "").trim();
+    var count = parseInt(m[3], 10);
+    var locators = [];
+    var akaLocators = extractStrictModeAkaLocators(s);
+    var detailLines = ["Strict mode resolved to " + (Number.isFinite(count) ? count : akaLocators.length) + " elements."];
+    var matches = akaLocators.map(function(locator) {
+      return { text: locator, shorthand: locatorShorthand(locator) };
+    });
+    var targetRef = target ? addLocatorRef(locators, target, detailLines.join("\n")) : null;
+    if (targetRef && locators.length) locators[locators.length - 1].matches = matches;
+    var prefixClip = targetRef ? targetRef.clip : "{{locator}}";
+    var prefixNote = targetRef ? targetRef.note : "{{locator}}";
+    var suffix = " [strict] [Matches]";
+    return {
+      clipboardText: prefixClip + suffix,
+      noteText: prefixNote + suffix,
+      locators: locators.length ? locators : void 0
+    };
+  }
+  function parseTextAssertionFailed(text) {
+    var s = String(text || "").replace(/\r/g, "");
+    var assertion = "";
+    if (/toHaveText/i.test(s)) assertion = "toHaveText";
+    else if (/toContainText/i.test(s)) assertion = "toContainText";
+    else return null;
+    var comp = extractExpectedActual(s);
+    if (!comp) return null;
+    var locator = extractLocatorField(s) || extractWaitingForLocator(s);
+    var timeoutM = s.match(/\bTimeout:\s*(\d+)ms/i) || s.match(/\btimeout\s+(\d+)ms/i);
+    var ms = timeoutM ? parseInt(timeoutM[1], 10) : null;
+    var badge = actionBadge(assertion, ms);
+    if (!locator) {
+      return {
+        clipboardText: badge + " <<" + comp.expected + "|" + comp.actual + ">>",
+        noteText: badge + " [[cmp]]",
+        comparison: comp
+      };
+    }
+    var locators = [];
+    var ref = addLocatorRef(locators, locator);
+    return {
+      clipboardText: ref.clip + " " + badge + " <<" + comp.expected + "|" + comp.actual + ">>",
+      noteText: ref.note + " " + badge + " [[cmp]]",
+      comparison: comp,
+      locators
+    };
+  }
+  function parseRunLogText(text) {
+    for (var i = 0; i < RUN_LOG_PARSERS.length; i++) {
+      var parser = RUN_LOG_PARSERS[i];
+      var result = parser.parse(text);
+      if (!result) continue;
+      if (result.comparison) {
+        var compId = uid();
+        var compToken = "[[cmp:" + compId + "]]";
+        var noteText = result.noteText ? String(result.noteText).replace(/\[\[cmp\]\]/g, compToken) : compToken;
+        var clipboardText = result.clipboardText || "<<" + result.comparison.expected + "|" + result.comparison.actual + ">>";
+        return {
+          clipboardText: String(clipboardText).trim(),
+          noteText: noteText.trim(),
+          matched: true,
+          comparison: result.comparison,
+          locators: result.locators
+        };
+      }
+      if (result.clipboardText && result.noteText) {
+        return {
+          clipboardText: String(result.clipboardText).trim(),
+          noteText: String(result.noteText).trim(),
+          matched: true,
+          locators: result.locators
+        };
+      }
+      var parsedText = String(result.text || "").trim();
+      return { clipboardText: parsedText, noteText: parsedText, matched: true, locators: result.locators };
+    }
+    var raw = String(text || "").trim();
+    return { clipboardText: raw, noteText: raw, matched: false };
+  }
+  var EXPECTED_ACTUAL_TAIL_STOP, LOCATOR_FIELD_STOP, RUN_LOG_PARSERS;
+  var init_run_log_parsers = __esm({
+    "src/notes/run-log-parsers.ts"() {
+      "use strict";
+      init_store();
+      EXPECTED_ACTUAL_TAIL_STOP = "(?=\\s+Timeout:\\s|\\s+Call log:\\s|\\s+Call Log:\\s|\\s+Locator:\\s|\\s+Error:\\s|$)";
+      LOCATOR_FIELD_STOP = "(?=\\s+Expected:\\s|\\s+Timeout:\\s|\\s+Error:\\s|\\s+Call log:\\s|\\s+Call Log:\\s|$)";
+      RUN_LOG_PARSERS = [
+        {
+          id: "text-assertion-failed",
+          label: "Text assertion failed",
+          example: "expect(locator).toHaveText() failed",
+          resultExample: "{{locator}} [toHaveText 30s] <<expected|actual>>",
+          parse: parseTextAssertionFailed
+        },
+        {
+          id: "expected-received",
+          label: "Expected / Received comparison",
+          example: "Expected: 40 Received: 45",
+          resultExample: "<<40|45>>",
+          parse: function(text) {
+            var comp = extractExpectedActual(text);
+            if (!comp) return null;
+            return { comparison: comp };
+          }
+        },
+        {
+          id: "image-mismatch",
+          label: "Image size / visual mismatch",
+          example: "Expected an image 492px by 133px, received 504px by 133px\u2026",
+          resultExample: "Image mismatch: expected 492\xD7133, received 504\xD7133 (1596 px diff, 3%)",
+          parse: parseImageMismatch
+        },
+        {
+          id: "image-pixel-mismatch",
+          label: "Image pixel mismatch",
+          example: "1596 pixels (ratio 0.03 of all image pixels) are different",
+          resultExample: "Image mismatch: 1596 px diff, 3%",
+          parse: parseImagePixelMismatch
+        },
+        {
+          id: "locator-visible-failed",
+          label: "Locator visibility assertion failed",
+          example: "expect(locator).toBeVisible() failed",
+          resultExample: "{{locator}} [visible 30s]",
+          parse: parseLocatorVisibleFailed
+        },
+        {
+          id: "locator-strict-mode-violation",
+          label: "Locator strict mode violation",
+          example: "locator.click: Error: strict mode violation: locator(...) resolved to 3 elements",
+          resultExample: "{{locator}} [click] [strict] [Matches]",
+          parse: parseLocatorStrictModeViolation
+        },
+        {
+          id: "locator-action-timeout",
+          label: "Locator action timeout",
+          example: "locator.click: Timeout 60000ms exceeded",
+          resultExample: "{{locator}} [click 60s]",
+          parse: parseLocatorActionTimeout
+        },
+        {
+          id: "page-navigation-timeout",
+          label: "Page navigation timeout",
+          example: "page.goto: Timeout 30000ms exceeded",
+          resultExample: "{{url}} [goto 30s]",
+          parse: parsePageNavigationTimeout
+        }
+      ];
     }
   });
 
@@ -8081,11 +8912,11 @@
       drop.remove();
       document.removeEventListener("mousedown", onOutside, true);
     }
-    var btnStyle = "display:block;width:100%;text-align:left;padding:6px 10px;border:none;background:transparent;color:#e2e8f0;cursor:pointer;font-size:11px;font-family:monospace;border-radius:3px;";
+    var btnStyle2 = "display:block;width:100%;text-align:left;padding:6px 10px;border:none;background:transparent;color:#e2e8f0;cursor:pointer;font-size:11px;font-family:monospace;border-radius:3px;";
     function addButton(label, onClick) {
       var btn = document.createElement("button");
       btn.type = "button";
-      btn.style.cssText = btnStyle;
+      btn.style.cssText = btnStyle2;
       btn.textContent = label;
       btn.addEventListener("mouseenter", function() {
         btn.style.background = "#1e293b";
@@ -8674,6 +9505,8 @@
     var n = ctx.n;
     var editKey = ctx.editKey;
     var pillBg = TAG_PILL_BG;
+    var hideAddNote = !!ctx.hideAddNote;
+    var hideDayDividers = !!ctx.hideDayDividers;
     if (!state.notesViewState[editKey]) state.notesViewState[editKey] = { filterFavs: false, collapsedDays: {} };
     var vs = state.notesViewState[editKey];
     var wrap = viewerEl.parentNode;
@@ -10788,7 +11621,7 @@
             vs.collapsedDays[group.dayKey] = !vs.collapsedDays[group.dayKey];
             redraw({});
           });
-          viewerEl.appendChild(divider);
+          if (!hideDayDividers) viewerEl.appendChild(divider);
           if (collapsed && !vs.filterFavs) {
             var pinnedInGroup = group.items.filter(function(item) {
               return !!item.b.favorite;
@@ -10844,7 +11677,7 @@
           enterCardEdit(_peeIdx);
         }, 0);
       }
-      if (!vs.filterFavs) {
+      if (!vs.filterFavs && !hideAddNote) {
         var addRow = document.createElement("div");
         addRow.className = "qaw-add-note";
         addRow.setAttribute("data-e2e", "investigation-notes-add");
@@ -11993,7 +12826,109 @@
       renderTextSegment(container, text.slice(lastIdx), knownFacets);
     }
   }
+  function findPreviousLocatorChip(container) {
+    var chips = Array.from(container.querySelectorAll("[data-qaw-locator-chip]"));
+    return chips.length ? chips[chips.length - 1] : null;
+  }
+  function parserBadgeTone(label) {
+    if (/^\[(strict|Matches)\]$/i.test(label)) return "amber";
+    if (/^\[(click|dblclick|hover|check|uncheck|textContent|waitFor|scrollIntoViewIfNeeded|goto|reload|waitForLoadState|toHaveText|toContainText|visible|load|domcontentloaded|networkidle|commit)\b/i.test(label)) return "blue";
+    return "slate";
+  }
+  function parserToneColors(tone) {
+    if (tone === "amber") return { border: "#a16207", bg: "#1f1605", fg: "#fbbf24", subBg: "#3b2505", subFg: "#fde68a" };
+    if (tone === "blue") return { border: "#2563eb", bg: "#071426", fg: "#bae6fd", subBg: "#0f2b46", subFg: "#e0f2fe" };
+    return { border: "#475569", bg: "#111827", fg: "#cbd5e1", subBg: "#1f2937", subFg: "#e5e7eb" };
+  }
+  function collectParserBadgesAt(text, start) {
+    var labels = [];
+    var idx = start;
+    while (idx < text.length) {
+      var spacer = text.slice(idx).match(/^[ \t]*/);
+      var afterSpace = idx + (spacer ? spacer[0].length : 0);
+      var m = text.slice(afterSpace).match(/^\[(click|dblclick|hover|check|uncheck|textContent|waitFor|scrollIntoViewIfNeeded|goto|reload|waitForLoadState|toHaveText|toContainText|visible|strict|Matches|load|domcontentloaded|networkidle|commit)(?:\s+[^\]\n]+)?\]/);
+      if (!m) break;
+      labels.push(m[0]);
+      idx = afterSpace + m[0].length;
+    }
+    return { labels, end: labels.length ? idx : start };
+  }
+  function makeCombinedLocatorPill(loc, badgeLabels) {
+    var mainTone = badgeLabels.some(function(label2) {
+      return parserBadgeTone(label2) === "amber";
+    }) ? "amber" : "blue";
+    var mainColors = parserToneColors(mainTone);
+    var full = loc && loc.text || "";
+    var detail = loc && loc.detail || "";
+    var matches = loc && Array.isArray(loc.matches) ? loc.matches : [];
+    var label = loc && loc.shorthand || "{{locator}}";
+    label = String(label).replace(/^\{\{([\s\S]+)\}\}$/, "$1");
+    var pill = document.createElement("span");
+    pill.setAttribute("data-qaw-no-edit", "1");
+    pill.setAttribute("data-qaw-locator-chip", "1");
+    pill._qawLocatorFull = full;
+    pill._qawLocatorDetail = detail;
+    pill._qawLocatorMatches = matches;
+    pill.style.cssText = "display:inline-flex;align-items:center;vertical-align:baseline;overflow:hidden;margin:0 2px;border:1px solid " + mainColors.border + ";border-radius:999px;background:" + mainColors.bg + ";color:" + mainColors.fg + ";font:11px/1.35 monospace;font-weight:700;white-space:nowrap;cursor:pointer;";
+    pill.title = "Show locator details";
+    pill.addEventListener("click", function(e) {
+      e.stopPropagation();
+      openLocatorMenu(pill, full, detail, matches);
+    });
+    var main = document.createElement("span");
+    main.textContent = label;
+    main.style.cssText = "padding:2px 8px;";
+    pill.appendChild(main);
+    badgeLabels.forEach(function(badgeLabel) {
+      var tone = parserBadgeTone(badgeLabel);
+      var colors = parserToneColors(tone);
+      var sub = document.createElement("span");
+      sub.textContent = badgeLabel.slice(1, -1);
+      sub.style.cssText = "align-self:stretch;display:flex;align-items:center;padding:2px 8px;border-left:1px solid " + colors.border + ";background:" + colors.subBg + ";color:" + colors.subFg + ";";
+      pill.appendChild(sub);
+    });
+    return pill;
+  }
+  function makeParserBadge(label, container) {
+    var badge = document.createElement("span");
+    var tone = parserBadgeTone(label);
+    var colors = parserToneColors(tone);
+    var isStrict = tone === "amber";
+    var isMatches = /^\[Matches\]$/i.test(label);
+    badge.setAttribute("data-qaw-no-edit", "1");
+    badge.style.cssText = "display:inline-flex;align-items:center;vertical-align:baseline;margin:0 2px;padding:1px 6px;border-radius:999px;border:1px solid " + colors.border + ";background:" + colors.bg + ";color:" + colors.fg + ";font:10px/1.35 monospace;font-weight:700;white-space:nowrap;" + (isMatches ? "cursor:pointer;" : "");
+    badge.textContent = label.slice(1, -1);
+    if (isMatches) {
+      badge.title = "Show strict mode matches";
+      badge.addEventListener("click", function(e) {
+        e.stopPropagation();
+        var locatorChip = findPreviousLocatorChip(container);
+        if (!locatorChip) return;
+        var full = locatorChip._qawLocatorFull || locatorChip.getAttribute("data-qaw-locator-full") || "";
+        var detail = locatorChip._qawLocatorDetail || locatorChip.getAttribute("data-qaw-locator-detail") || "";
+        var matches = locatorChip._qawLocatorMatches || [];
+        openLocatorMenu(badge, String(full), String(detail), matches);
+      });
+    }
+    return badge;
+  }
   function renderTextSegment(container, text, knownFacets) {
+    if (!text) return;
+    PARSER_BADGE_RE.lastIndex = 0;
+    var lastBadgeIdx = 0;
+    var badgeMatch;
+    while ((badgeMatch = PARSER_BADGE_RE.exec(text)) !== null) {
+      if (badgeMatch.index > lastBadgeIdx) {
+        renderTextSegmentUrls(container, text.slice(lastBadgeIdx, badgeMatch.index), knownFacets);
+      }
+      container.appendChild(makeParserBadge(badgeMatch[0], container));
+      lastBadgeIdx = badgeMatch.index + badgeMatch[0].length;
+    }
+    if (lastBadgeIdx < text.length) {
+      renderTextSegmentUrls(container, text.slice(lastBadgeIdx), knownFacets);
+    }
+  }
+  function renderTextSegmentUrls(container, text, knownFacets) {
     if (!text) return;
     var urlRe = /https?:\/\/[^\s<>"]+/g;
     var lastIdx = 0;
@@ -12090,7 +13025,7 @@
       ta.remove();
     }
   }
-  function openLocatorMenu(anchor, full, detail) {
+  function openLocatorMenu(anchor, full, detail, matches) {
     document.querySelectorAll("[data-qaw-locator-menu]").forEach(function(el) {
       el.remove();
     });
@@ -12142,6 +13077,27 @@
       detailEl.textContent = detail;
       detailEl.style.cssText = "white-space:pre-wrap;word-break:break-word;max-height:180px;overflow:auto;background:#020617;color:#94a3b8;border:1px solid #1e293b;border-radius:6px;padding:7px 8px;font:11px/1.4 monospace;";
       pop.appendChild(detailEl);
+    }
+    if (matches && matches.length) {
+      var matchesWrap = document.createElement("div");
+      matchesWrap.style.cssText = "display:flex;flex-direction:column;gap:6px;background:#020617;border:1px solid #1e293b;border-radius:6px;padding:7px 8px;";
+      var matchesTitle = document.createElement("div");
+      matchesTitle.textContent = "Matches";
+      matchesTitle.style.cssText = "font:10px/1.3 monospace;color:#fbbf24;text-transform:uppercase;letter-spacing:0.04em;";
+      matchesWrap.appendChild(matchesTitle);
+      matches.forEach(function(matchLoc) {
+        var matchBtn = document.createElement("button");
+        matchBtn.type = "button";
+        matchBtn.textContent = String(matchLoc.shorthand || locatorShorthand(matchLoc.text || "")).replace(/^\{\{([\s\S]+)\}\}$/, "$1");
+        matchBtn.style.cssText = "align-self:flex-start;max-width:100%;border:1px solid #2563eb;border-radius:999px;background:#071426;color:#bae6fd;padding:3px 8px;font:11px/1.35 monospace;font-weight:700;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
+        matchBtn.addEventListener("click", function(e) {
+          e.preventDefault();
+          e.stopPropagation();
+          openLocatorMenu(matchBtn, matchLoc.text || "", matchLoc.detail || "");
+        });
+        matchesWrap.appendChild(matchBtn);
+      });
+      pop.appendChild(matchesWrap);
     }
     document.body.appendChild(pop);
     var rect = anchor.getBoundingClientRect();
@@ -12266,22 +13222,31 @@
         })(cmpCtx.map[match[2]]);
       } else if (match[3] && cmpCtx && cmpCtx.locMap) {
         (function(loc) {
-          var chip = document.createElement("span");
-          chip.setAttribute("data-qaw-no-edit", "1");
-          var label = loc && loc.shorthand || "{{locator}}";
-          label = String(label).replace(/^\{\{([\s\S]+)\}\}$/, "$1");
-          var full = loc && loc.text || "";
-          var detail = loc && loc.detail || "";
-          chip.textContent = label;
-          chip.style.cssText = "display:inline;color:#bae6fd;cursor:pointer;text-decoration:underline dotted;text-underline-offset:2px;font-weight:600;";
-          chip.addEventListener("click", function(e) {
-            e.stopPropagation();
-            openLocatorMenu(chip, full, detail);
-          });
-          container.appendChild(chip);
+          var badgeRun = collectParserBadgesAt(text, tokenRe.lastIndex);
+          if (badgeRun.labels.length) {
+            container.appendChild(makeCombinedLocatorPill(loc, badgeRun.labels));
+            tokenRe.lastIndex = badgeRun.end;
+          } else {
+            var chip = document.createElement("span");
+            chip.setAttribute("data-qaw-no-edit", "1");
+            chip.setAttribute("data-qaw-locator-chip", "1");
+            var label = loc && loc.shorthand || "{{locator}}";
+            label = String(label).replace(/^\{\{([\s\S]+)\}\}$/, "$1");
+            var full = loc && loc.text || "";
+            var detail = loc && loc.detail || "";
+            chip._qawLocatorFull = full;
+            chip._qawLocatorDetail = detail;
+            chip.textContent = label;
+            chip.style.cssText = "display:inline;color:#bae6fd;cursor:pointer;font-weight:600;";
+            chip.addEventListener("click", function(e) {
+              e.stopPropagation();
+              openLocatorMenu(chip, full, detail);
+            });
+            container.appendChild(chip);
+          }
         })(cmpCtx.locMap[match[3]]);
       }
-      lastIdx = match.index + match[0].length;
+      lastIdx = tokenRe.lastIndex;
     }
     if (lastIdx < text.length) renderTextSegmentWithLineRefs(container, text.slice(lastIdx), knownFacets);
   }
@@ -12426,7 +13391,7 @@
       container.appendChild(chip);
     });
   }
-  var CASE_STATUS_OPTIONS, lineContextCloseTimer, lineContextOutsideHandler, SLACK_ICON_SVG, _slackPreviewCache, _slackRenderGroups, INLINE_LINE_REF_RE;
+  var CASE_STATUS_OPTIONS, lineContextCloseTimer, lineContextOutsideHandler, SLACK_ICON_SVG, _slackPreviewCache, _slackRenderGroups, INLINE_LINE_REF_RE, PARSER_BADGE_RE;
   var init_cards = __esm({
     "src/notes/05-cards.ts"() {
       "use strict";
@@ -12448,6 +13413,7 @@
       init_map_tab();
       init_head();
       init_run_log_payloads();
+      init_run_log_parsers();
       init_facet_hashtag();
       CASE_STATUS_OPTIONS = ["open", "resolved"];
       lineContextCloseTimer = null;
@@ -12456,6 +13422,394 @@
       _slackPreviewCache = /* @__PURE__ */ new Map();
       _slackRenderGroups = {};
       INLINE_LINE_REF_RE = /\bline(\d{1,7})\b/gi;
+      PARSER_BADGE_RE = /\[(click|dblclick|hover|check|uncheck|textContent|waitFor|scrollIntoViewIfNeeded|goto|reload|waitForLoadState|toHaveText|toContainText|visible|strict|Matches|load|domcontentloaded|networkidle|commit)(?:\s+[^\]\n]+)?\]/g;
+    }
+  });
+
+  // src/notes/run-log-parser-examples.ts
+  var RUN_LOG_PARSER_GALLERY_EXAMPLES;
+  var init_run_log_parser_examples = __esm({
+    "src/notes/run-log-parser-examples.ts"() {
+      "use strict";
+      RUN_LOG_PARSER_GALLERY_EXAMPLES = [
+        {
+          id: "expected-received",
+          label: "Expected / Received",
+          parserId: "expected-received",
+          raw: "12:44:05.120 [ Server ] expect(received).toEqual(expected) failed Expected: 40 Received: 45 Call log: - value assertion failed"
+        },
+        {
+          id: "locator-click-timeout",
+          label: "Locator click timeout",
+          parserId: "locator-click-timeout",
+          raw: [
+            "12:54:39.831 [ Server ] locator.click: Timeout 60000ms exceeded.",
+            "Call log:",
+            "  - waiting for getByRole('button', { name: 'Display' })"
+          ].join("\n"),
+          styleTarget: "{{button: Display}} [click 60s]"
+        },
+        {
+          id: "locator-click-timeout-flat",
+          label: "Locator click timeout (flattened)",
+          parserId: "locator-click-timeout",
+          raw: "13:43:33.650[ Server ] locator.click: Timeout 15000ms exceeded. Call log: - waiting for getByRole('link', { name: 'Add data source' }) Call Log: - Timeout 120000ms exceeded while waiting on the predicate",
+          styleTarget: "{{link: Add data source}} [click 15s]"
+        },
+        {
+          id: "locator-hover-timeout",
+          label: "Locator hover timeout",
+          parserId: "locator-action-timeout",
+          raw: `17:13:49.401[ Server ] locator.hover: Timeout 30000ms exceeded. Call log: - waiting for locator('[data-rel-nav="Service"]') - found locator('#beamerAnnouncementBar'), intercepting action to run the handler - locator handler has finished, waiting for locator('#beamerAnnouncementBar') to be hidden`,
+          styleTarget: "{{locator}} [hover 30s]"
+        },
+        {
+          id: "image-mismatch",
+          label: "Image mismatch",
+          parserId: "image-mismatch",
+          raw: "12:56:50.892 [ Server ] Expected an image 492px by 133px, received 504px by 133px. 1596 pixels (ratio 0.03 of all image pixels) are different."
+        },
+        {
+          id: "page-goto-timeout",
+          label: "Page navigation timeout",
+          parserId: "page-goto-timeout",
+          raw: [
+            "13:02:18.509 [ Server ] page.goto: Timeout 30000ms exceeded.",
+            "Call log:",
+            '  - navigating to "https://qawgrafana.grafana.net/invite/hLHC1WidjuYRWHKV4kOuUiWL99kolM", waiting until "load"'
+          ].join("\n"),
+          styleTarget: "{{url: ...grafana.net/...}} [goto timeout 30s] [load]"
+        },
+        {
+          id: "locator-visible-failed",
+          label: "Locator visibility failed",
+          parserId: "locator-visible-failed",
+          raw: [
+            "13:10:41.656 [ Server ] expect(locator).toBeVisible() failed",
+            "",
+            `Locator: locator('.tl-canvas__in-front').first().locator('button').filter({ has: locator('path[d^="M7.25781 4.25586C7"]') })`,
+            "Expected: visible",
+            "Timeout: 30000ms",
+            "Error: element(s) not found"
+          ].join("\n"),
+          styleTarget: "{{locator}} [visible 30s]"
+        },
+        {
+          id: "locator-strict-mode",
+          label: "Locator strict mode violation",
+          parserId: "locator-strict-mode-violation",
+          raw: `13:17:30.873[ Server ] locator.click: Error: strict mode violation: locator('[aria-haspopup="dialog"] [fill="none"]') resolved to 3 elements: 1) <circle></circle> aka getByRole('button', { name: 'Credits remaining' }) 2) <circle></circle> aka getByRole('button', { name: 'Credits remaining' }) 3) <svg></svg> aka locator('#base-ui-_r_2u_') Call log: - waiting for locator('[aria-haspopup="dialog"] [fill="none"]')`,
+          styleTarget: "{{locator}} [strict] [Matches]"
+        },
+        {
+          id: "text-assertion",
+          label: "Text assertion mismatch",
+          parserId: "text-assertion-failed",
+          raw: `13:54:51.479[ Server ] expect(locator).toHaveText(expected) failed Locator: locator('tbody [aria-colindex="2"]') Expected: "QXPW1T" Received: "597P317G5CBLPBPRC" Timeout: 30000ms Call log: - Expect "to.have.text"`,
+          styleTarget: "{{locator}} [toHaveText 30s] <<QXPW1T|597P317G5CBLPBPRC>>"
+        },
+        {
+          id: "image-pixel-only",
+          label: "Image mismatch (pixel-only)",
+          parserId: "image-pixel-mismatch",
+          raw: "1596 pixels (ratio 0.03 of all image pixels) are different.",
+          styleTarget: "Image mismatch: 1596 px diff, 3%"
+        },
+        {
+          id: "unmatched-predicate",
+          label: "Unmatched predicate timeout noise",
+          parserId: "unmatched",
+          raw: "12:54:18.230[ Server ] Call Log: - Timeout 30000ms exceeded while waiting on the predicate"
+        }
+      ];
+    }
+  });
+
+  // src/notes/43-parser-gallery.ts
+  function escHtml2(s) {
+    var d = document.createElement("div");
+    d.textContent = s;
+    return d.innerHTML;
+  }
+  function buildBullet(example, idx) {
+    var parsed = parseRunLogText(example.raw);
+    var bullet = {
+      id: "gallery-" + example.id,
+      text: parsed.noteText,
+      tag: null,
+      occurrences: 1,
+      loggedAt: new Date(Date.now() - (RUN_LOG_PARSER_GALLERY_EXAMPLES.length - idx) * 6e4).toISOString(),
+      timestamps: [{
+        id: uid(),
+        ts: (/* @__PURE__ */ new Date()).toISOString(),
+        log: parsed.clipboardText || example.raw,
+        label: example.label,
+        source: "parser-gallery"
+      }],
+      parserGallery: {
+        label: example.label,
+        parserId: example.parserId,
+        raw: example.raw,
+        matched: parsed.matched,
+        clipboardText: parsed.clipboardText,
+        styleTarget: example.styleTarget || ""
+      },
+      locators: parsed.locators ? parsed.locators.map(function(loc) {
+        return { id: loc.id, text: loc.text, shorthand: loc.shorthand, detail: loc.detail, matches: loc.matches };
+      }) : [],
+      comparisons: []
+    };
+    if (parsed.comparison) {
+      var cmpId = (parsed.noteText.match(/\[\[cmp:([^\]]+)\]\]/) || [])[1] || uid();
+      bullet.comparisons.push({
+        id: cmpId,
+        expected: { text: parsed.comparison.expected },
+        actual: { text: parsed.comparison.actual }
+      });
+    }
+    return bullet;
+  }
+  function createExampleNote(example, idx) {
+    return {
+      status: "open",
+      workMode: "follow",
+      updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      bullets: [buildBullet(example, idx)]
+    };
+  }
+  function createDefaultPlaygroundRows() {
+    return RUN_LOG_PARSER_GALLERY_EXAMPLES.map(function(example, idx) {
+      return { example, note: createExampleNote(example, idx) };
+    });
+  }
+  function getPlaygroundRows() {
+    if (!playgroundRows) playgroundRows = createDefaultPlaygroundRows();
+    return playgroundRows;
+  }
+  function makeButton2(label, kind) {
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = label;
+    btn.style.cssText = kind === "primary" ? "padding:6px 12px;border-radius:8px;border:1px solid #38bdf8;background:#0ea5e9;color:#0f172a;font-weight:700;cursor:pointer;font-size:11px;font-family:monospace;" : "padding:6px 12px;border-radius:8px;border:1px solid #475569;background:#1e293b;color:#e2e8f0;cursor:pointer;font-size:11px;font-family:monospace;";
+    return btn;
+  }
+  function loadLeftColumnWidth() {
+    var raw = 0;
+    try {
+      raw = parseInt(localStorage.getItem(PARSER_GALLERY_LEFT_WIDTH_KEY) || "", 10);
+    } catch (_) {
+      raw = 0;
+    }
+    if (!Number.isFinite(raw) || raw <= 0) return 430;
+    return Math.max(240, Math.min(720, raw));
+  }
+  function saveLeftColumnWidth(width) {
+    try {
+      localStorage.setItem(PARSER_GALLERY_LEFT_WIDTH_KEY, String(Math.round(width)));
+    } catch (_) {
+    }
+  }
+  function applyLeftColumnWidth(list, width) {
+    var clamped = Math.max(220, Math.min(760, Math.round(width)));
+    list.style.setProperty("--qaw-parser-left-width", clamped + "px");
+  }
+  function rowHeightKey(exampleId) {
+    return PARSER_GALLERY_ROW_HEIGHT_PREFIX + exampleId;
+  }
+  function loadRowHeight(exampleId) {
+    var raw = 0;
+    try {
+      raw = parseInt(localStorage.getItem(rowHeightKey(exampleId)) || "", 10);
+    } catch (_) {
+      raw = 0;
+    }
+    if (!Number.isFinite(raw) || raw <= 0) return 120;
+    return Math.max(96, Math.min(520, raw));
+  }
+  function saveRowHeight(exampleId, height) {
+    try {
+      localStorage.setItem(rowHeightKey(exampleId), String(Math.round(height)));
+    } catch (_) {
+    }
+  }
+  function applyRowHeight(row2, height) {
+    var clamped = Math.max(96, Math.min(560, Math.round(height)));
+    row2.style.setProperty("--qaw-parser-row-height", clamped + "px");
+  }
+  function makeColumnResizer(list, row2) {
+    var handle = document.createElement("div");
+    handle.setAttribute("data-qaw-parser-resizer", "1");
+    handle.title = "Drag to resize all parser playground rows";
+    handle.style.cssText = "width:8px;cursor:col-resize;background:#111827;border-left:1px solid #1e293b;border-right:1px solid #1e293b;position:relative;touch-action:none;";
+    var stripe = document.createElement("div");
+    stripe.style.cssText = "position:absolute;left:3px;top:12px;bottom:12px;width:2px;border-radius:999px;background:#475569;";
+    handle.appendChild(stripe);
+    handle.addEventListener("mouseenter", function() {
+      stripe.style.background = "#38bdf8";
+    });
+    handle.addEventListener("mouseleave", function() {
+      stripe.style.background = "#475569";
+    });
+    handle.addEventListener("mousedown", function(e) {
+      e.preventDefault();
+      e.stopPropagation();
+      var startX = e.clientX;
+      var leftCell = row2.firstElementChild;
+      var startWidth = leftCell ? leftCell.getBoundingClientRect().width : loadLeftColumnWidth();
+      function onMove(ev) {
+        var next = startWidth + (ev.clientX - startX);
+        applyLeftColumnWidth(list, next);
+      }
+      function onUp(ev) {
+        document.removeEventListener("mousemove", onMove);
+        document.removeEventListener("mouseup", onUp);
+        var next = startWidth + (ev.clientX - startX);
+        applyLeftColumnWidth(list, next);
+        saveLeftColumnWidth(next);
+        document.body.style.cursor = "";
+        document.body.style.userSelect = "";
+      }
+      document.body.style.cursor = "col-resize";
+      document.body.style.userSelect = "none";
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup", onUp);
+    });
+    return handle;
+  }
+  function makeRowResizer(row2, exampleId) {
+    var handle = document.createElement("div");
+    handle.setAttribute("data-qaw-parser-row-resizer", "1");
+    handle.title = "Drag to resize this parser playground row";
+    handle.style.cssText = "grid-column:1 / -1;height:14px;cursor:row-resize;background:#1e293b;border-top:1px solid #334155;position:relative;touch-action:none;display:flex;align-items:center;justify-content:center;box-shadow:inset 0 1px 0 rgba(148,163,184,0.12);";
+    var stripe = document.createElement("div");
+    stripe.style.cssText = "width:52px;height:3px;border-radius:999px;background:#64748b;box-shadow:0 0 0 1px rgba(15,23,42,0.8);";
+    handle.appendChild(stripe);
+    handle.addEventListener("mouseenter", function() {
+      stripe.style.background = "#38bdf8";
+    });
+    handle.addEventListener("mouseleave", function() {
+      stripe.style.background = "#475569";
+    });
+    handle.addEventListener("mousedown", function(e) {
+      e.preventDefault();
+      e.stopPropagation();
+      var startY = e.clientY;
+      var firstRow = row2.firstElementChild;
+      var startHeight = firstRow ? firstRow.getBoundingClientRect().height : loadRowHeight(exampleId);
+      function onMove(ev) {
+        applyRowHeight(row2, startHeight + (ev.clientY - startY));
+      }
+      function onUp(ev) {
+        document.removeEventListener("mousemove", onMove);
+        document.removeEventListener("mouseup", onUp);
+        var next = startHeight + (ev.clientY - startY);
+        applyRowHeight(row2, next);
+        saveRowHeight(exampleId, next);
+        document.body.style.cursor = "";
+        document.body.style.userSelect = "";
+      }
+      document.body.style.cursor = "row-resize";
+      document.body.style.userSelect = "none";
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup", onUp);
+    });
+    return handle;
+  }
+  function renderExplanationCell(container, note) {
+    var b = note.bullets && note.bullets[0] ? note.bullets[0] : {};
+    var meta = b.parserGallery || {};
+    container.style.cssText = "min-width:0;border-right:1px solid #1e293b;background:#020617;color:#94a3b8;font:10px/1.45 monospace;padding:10px;box-sizing:border-box;overflow:auto;";
+    container.innerHTML = '<div style="font-size:12px;font-weight:700;color:#f8fafc;margin-bottom:6px;">' + escHtml2(meta.label || "Example") + '</div><pre style="white-space:pre-wrap;word-break:break-word;margin:0;color:#64748b;font:10px/1.4 monospace;">' + escHtml2(meta.raw || "") + "</pre>";
+  }
+  function renderPlaygroundRow(container, rowData, idx) {
+    var row2 = document.createElement("div");
+    row2.style.cssText = "display:grid;grid-template-columns:minmax(220px,var(--qaw-parser-left-width,430px)) 8px minmax(220px,1fr);grid-template-rows:minmax(96px,var(--qaw-parser-row-height,120px)) 14px;border:1px solid #334155;border-radius:10px;overflow:hidden;background:#0f172a;flex:0 0 auto;";
+    applyRowHeight(row2, loadRowHeight(rowData.example.id));
+    var left = document.createElement("div");
+    renderExplanationCell(left, rowData.note);
+    row2.appendChild(left);
+    row2.appendChild(makeColumnResizer(container, row2));
+    var viewerWrap = document.createElement("div");
+    viewerWrap.style.cssText = "position:relative;min-width:0;min-height:0;background:#0f172a;overflow:hidden;";
+    var viewer = document.createElement("div");
+    viewer.setAttribute("data-qaw-notes-viewer", "1");
+    viewer.style.cssText = "height:100%;min-height:0;overflow:auto;padding:8px;background:#0f172a;box-sizing:border-box;";
+    viewerWrap.appendChild(viewer);
+    row2.appendChild(viewerWrap);
+    row2.appendChild(makeRowResizer(row2, rowData.example.id));
+    container.appendChild(row2);
+    mountInvestigationNotesCards(viewer, viewerWrap, {
+      n: rowData.note,
+      editKey: noteKey("parser-gallery", "playground", "run-log-parser-gallery-" + idx + "-" + rowData.example.id + ".ts"),
+      code: "",
+      hideAddNote: true,
+      hideDayDividers: true
+    });
+  }
+  function mountPlaygroundBody(container) {
+    container.innerHTML = "";
+    container.style.cssText = "flex:1;min-height:0;display:flex;flex-direction:column;background:#0f172a;";
+    var rows = getPlaygroundRows();
+    var toolbar = document.createElement("div");
+    toolbar.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px 12px;border-bottom:1px solid #334155;flex-shrink:0;";
+    var hint = document.createElement("div");
+    hint.style.cssText = "font:10px/1.45 monospace;color:#94a3b8;";
+    hint.innerHTML = 'Temporary real note bullets paired with their source logs. Edit and click chips to compare parser behavior. <strong style="color:#cbd5e1;">Nothing is added to saved notes.</strong>';
+    toolbar.appendChild(hint);
+    var resetBtn = makeButton2("Reset examples", "ghost");
+    resetBtn.addEventListener("click", function() {
+      playgroundRows = null;
+      mountPlaygroundBody(container);
+    });
+    toolbar.appendChild(resetBtn);
+    container.appendChild(toolbar);
+    var list = document.createElement("div");
+    list.style.cssText = "flex:1;min-height:0;overflow:auto;padding:10px;display:flex;flex-direction:column;gap:10px;";
+    applyLeftColumnWidth(list, loadLeftColumnWidth());
+    container.appendChild(list);
+    rows.forEach(function(rowData, idx) {
+      renderPlaygroundRow(list, rowData, idx);
+    });
+  }
+  function openParserGalleryPanel() {
+    if (restoreFloatingPanel(PARSER_GALLERY_PANEL_ID)) return;
+    var shell = createFloatingPanel({
+      id: PARSER_GALLERY_PANEL_ID,
+      title: "Parser Playground",
+      width: 820,
+      height: 680,
+      minWidth: 440,
+      minHeight: 360
+    });
+    shell.body.setAttribute("data-qaw-parser-gallery-panel", "1");
+    mountPlaygroundBody(shell.body);
+  }
+  function mountParserGalleryView(container) {
+    var wrap = document.createElement("div");
+    wrap.setAttribute("data-qaw-parser-gallery", "1");
+    wrap.style.cssText = "border:1px solid #334155;border-radius:10px;background:#0f172a;padding:12px;display:flex;align-items:center;justify-content:space-between;gap:12px;color:#e2e8f0;font-family:monospace;font-size:11px;";
+    var title = document.createElement("div");
+    title.innerHTML = '<div style="font-size:13px;font-weight:700;color:#f8fafc;">Parser playground</div><div style="font-size:10px;color:#94a3b8;line-height:1.45;margin-top:4px;">Open temporary real note bullets for parser examples. Edits are in-memory only and reset when the page unloads.</div>';
+    wrap.appendChild(title);
+    var openBtn = makeButton2("Open playground", "primary");
+    openBtn.addEventListener("click", openParserGalleryPanel);
+    wrap.appendChild(openBtn);
+    container.appendChild(wrap);
+  }
+  var PARSER_GALLERY_PANEL_ID, PARSER_GALLERY_LEFT_WIDTH_KEY, PARSER_GALLERY_ROW_HEIGHT_PREFIX, playgroundRows;
+  var init_parser_gallery = __esm({
+    "src/notes/43-parser-gallery.ts"() {
+      "use strict";
+      init_store();
+      init_context();
+      init_cards();
+      init_floating_panel();
+      init_run_log_parsers();
+      init_run_log_parser_examples();
+      PARSER_GALLERY_PANEL_ID = "parser-gallery-playground";
+      PARSER_GALLERY_LEFT_WIDTH_KEY = "_qawParserGalleryLeftWidth";
+      PARSER_GALLERY_ROW_HEIGHT_PREFIX = "_qawParserGalleryRowHeight:";
+      playgroundRows = null;
     }
   });
 
@@ -17959,6 +19313,8 @@ This won't delete the actual file.`)) return;
     container.setAttribute("data-qaw-ai-mounted", "1");
     container.style.cssText += ";display:flex;flex-direction:column;gap:12px;";
     mountAiTabPromptCards(container, editKey);
+    mountOutlineGeneratorView(container);
+    mountParserGalleryView(container);
   }
   var init_render_panel = __esm({
     "src/notes/11-render-panel.ts"() {
@@ -17973,6 +19329,8 @@ This won't delete the actual file.`)) return;
       init_search_export();
       init_quicklinks();
       init_ai_prompts();
+      init_outline_generator();
+      init_parser_gallery();
       init_cards();
       init_history();
       init_settings();
@@ -19556,7 +20914,7 @@ This won't delete the actual file.`)) return;
             return;
           }
           var ms = Date.now() - slot.currentRunStartedAt;
-          liveRow.innerHTML = 'Running: <strong style="color:#86efac;">' + escHtml2(formatDurationMs(ms)) + "</strong>";
+          liveRow.innerHTML = 'Running: <strong style="color:#86efac;">' + escHtml3(formatDurationMs(ms)) + "</strong>";
         };
         var updateLiveRow = updateLiveRow2;
         liveRow = document.createElement("div");
@@ -19569,7 +20927,7 @@ This won't delete the actual file.`)) return;
       var lastDur = formatDurationMs(noteData.lastRunDurationMs);
       if (lastDur !== "\u2014") {
         var lastRow = document.createElement("div");
-        lastRow.innerHTML = 'Last finished: <strong style="color:#f1f5f9;">' + escHtml2(lastDur) + "</strong>";
+        lastRow.innerHTML = 'Last finished: <strong style="color:#f1f5f9;">' + escHtml3(lastDur) + "</strong>";
         col.appendChild(lastRow);
       } else if (!liveRow && (noteData.lastRunEndedAt == null || !Number.isFinite(noteData.lastRunEndedAt))) {
         var waitRow = document.createElement("div");
@@ -19600,7 +20958,7 @@ This won't delete the actual file.`)) return;
     refreshThrowBadge();
     state.throwTrackerInterval = setInterval(refreshThrowBadge, 4e3);
   }
-  function escHtml2(s) {
+  function escHtml3(s) {
     var d = document.createElement("div");
     d.textContent = s;
     return d.innerHTML;
@@ -21116,290 +22474,7 @@ This won't delete the actual file.`)) return;
   init_shift();
   init_render_panel();
   init_history();
-
-  // src/notes/run-log-parsers.ts
-  init_store();
-  function formatTimeoutLabel(ms) {
-    if (!ms || ms < 0) return "?";
-    if (ms % 1e3 === 0) return Math.round(ms / 1e3) + "s";
-    return ms + "ms";
-  }
-  function locatorShorthand(full) {
-    var s = String(full || "").trim();
-    if (!s) return "{{locator}}";
-    var inner = s;
-    var pm = s.match(/^((?:page\d*|popupPage)\.)([\s\S]+)$/i);
-    if (pm) inner = pm[2];
-    var role = inner.match(/getByRole\(\s*['"]([^'"]+)['"]\s*,\s*\{[^}]*name:\s*['"]([^'"]+)['"]/i);
-    if (role) return "{{" + role[1] + ": " + role[2] + "}}";
-    var byText = inner.match(/getByText\(\s*['"]([^'"]+)['"]/i);
-    if (byText) return "{{text: " + byText[1] + "}}";
-    var byLabel = inner.match(/getByLabel\(\s*['"]([^'"]+)['"]/i);
-    if (byLabel) return "{{label: " + byLabel[1] + "}}";
-    var testid = inner.match(/data-testid=["']([^"']+)["']/i);
-    if (testid) return "{{testid: " + testid[1] + "}}";
-    return "{{locator}}";
-  }
-  var EXPECTED_ACTUAL_TAIL_STOP = "(?=\\s+Timeout:\\s|\\s+Call log:\\s|\\s+Call Log:\\s|\\s+Locator:\\s|\\s+Error:\\s|$)";
-  function extractExpectedActual(text) {
-    var s = String(text || "").replace(/\r/g, "").trim();
-    var m = s.match(
-      new RegExp(
-        "(?:Expected|Expect(?:ed)? value)\\s*:\\s*([\\s\\S]*?)\\s+(?:Received|Actual)\\s*:\\s*([\\s\\S]*?)" + EXPECTED_ACTUAL_TAIL_STOP,
-        "i"
-      )
-    );
-    if (!m) {
-      m = s.match(
-        new RegExp(
-          "(?:Expected)\\s+([\\s\\S]*?)\\s+(?:Received|Actual)\\s+([\\s\\S]*?)" + EXPECTED_ACTUAL_TAIL_STOP,
-          "i"
-        )
-      );
-    }
-    if (!m || !m[1] || !m[2]) return null;
-    function cleanSide(v) {
-      return String(v || "").replace(/\s+(?:Timeout:\s[\s\S]*|Call log:[\s\S]*|Call Log:[\s\S]*|Locator:[\s\S]*|Error:[\s\S]*|at\s+\S+:\d+:\d+[\s\S]*)$/i, "").trim().replace(/^['"`]|['"`]$/g, "");
-    }
-    var expected = cleanSide(m[1]);
-    var actual = cleanSide(m[2]);
-    if (!expected || !actual) return null;
-    return { expected, actual };
-  }
-  var LOCATOR_FIELD_STOP = "(?=\\s+Expected:\\s|\\s+Timeout:\\s|\\s+Error:\\s|\\s+Call log:\\s|\\s+Call Log:\\s|$)";
-  function extractWaitingForLocator(text) {
-    var s = String(text || "").replace(/\r/g, "");
-    var lines = s.split("\n");
-    for (var i = 0; i < lines.length; i++) {
-      var wm = lines[i].match(/^\s*-?\s*waiting for\s+(.+)$/i);
-      if (wm && wm[1]) return wm[1].trim();
-    }
-    var inline = s.match(
-      new RegExp("\\bwaiting for\\s+([\\s\\S]+?)" + LOCATOR_FIELD_STOP, "i")
-    );
-    if (inline && inline[1]) return inline[1].trim();
-    var toEnd = s.match(/\bwaiting for\s+(.+)$/i);
-    if (toEnd && toEnd[1]) return toEnd[1].trim();
-    return null;
-  }
-  function extractLocatorField(text) {
-    var s = String(text || "").replace(/\r/g, "");
-    var m = s.match(new RegExp("\\bLocator:\\s*([\\s\\S]+?)" + LOCATOR_FIELD_STOP, "i"));
-    return m && m[1] ? m[1].trim() : null;
-  }
-  function addLocatorRef(locators, full) {
-    var id = uid();
-    var parts = splitLocatorDetails(full);
-    var shorthand = locatorShorthand(parts.text);
-    locators.push({ id, text: parts.text, shorthand, detail: parts.detail });
-    return { clip: shorthand, note: "[[loc:" + id + "]]" };
-  }
-  function addLocatorRefWithLabel(locators, full, label) {
-    var id = uid();
-    var parts = splitLocatorDetails(full);
-    locators.push({ id, text: parts.text, shorthand: label, detail: parts.detail });
-    return { clip: label, note: "[[loc:" + id + "]]" };
-  }
-  function splitLocatorDetails(full) {
-    var s = String(full || "").trim();
-    if (!s) return { text: "" };
-    var detailAt = s.search(/\s+(?:-|\d+\s*[×x])\s+(?=(?:locator resolved|unexpected value|attempting click action|waiting\b|element is\b|retrying\b))/i);
-    if (detailAt < 0) return { text: s };
-    var text = s.slice(0, detailAt).trim();
-    var detail = s.slice(detailAt).trim();
-    return { text: text || s, detail: text ? detail : void 0 };
-  }
-  function finalizeTextResult(lines, locatorFull, extra) {
-    var locators = extra && extra.locators ? extra.locators.slice() : [];
-    var clipLines = lines.slice();
-    var noteLines = lines.slice();
-    if (locatorFull) {
-      var ref = addLocatorRef(locators, locatorFull);
-      clipLines.push("Target: " + ref.clip);
-      noteLines.push("Target: " + ref.note);
-    }
-    return {
-      clipboardText: clipLines.join("\n"),
-      noteText: noteLines.join("\n"),
-      locators: locators.length ? locators : void 0
-    };
-  }
-  function parseLocatorClickTimeout(text) {
-    var s = String(text || "").replace(/\r/g, "");
-    var m = s.match(/locator\.click:\s*Timeout\s+(\d+)ms\s+exceeded/i);
-    if (!m) return null;
-    var ms = parseInt(m[1], 10);
-    var locator = extractWaitingForLocator(s);
-    return finalizeTextResult(["Locator click timeout (" + formatTimeoutLabel(ms) + ")"], locator);
-  }
-  function parseImageMismatch(text) {
-    var s = String(text || "").replace(/\r/g, "");
-    var m = s.match(
-      /Expected an image (\d+)px by (\d+)px, received (\d+)px by (\d+)px\.\s*(\d+) pixels \(ratio ([\d.]+)(?:\s+of all image pixels)?\)\s+are different/i
-    );
-    if (!m) return null;
-    var ew = m[1];
-    var eh = m[2];
-    var rw = m[3];
-    var rh = m[4];
-    var pixels = m[5];
-    var ratio = parseFloat(m[6]);
-    var pct = Number.isFinite(ratio) ? Math.round(ratio * 100) : null;
-    var pctLabel = pct != null ? pct + "%" : String(m[6]);
-    return finalizeTextResult([
-      "Image mismatch: expected " + ew + "\xD7" + eh + ", received " + rw + "\xD7" + rh + " (" + pixels + " px diff" + (pctLabel ? ", " + pctLabel : "") + ")"
-    ], null);
-  }
-  function parsePageGotoTimeout(text) {
-    var s = String(text || "").replace(/\r/g, "");
-    var m = s.match(/page\.goto:\s*Timeout\s+(\d+)ms\s+exceeded/i);
-    if (!m) return null;
-    var ms = parseInt(m[1], 10);
-    var url = null;
-    var waitUntil = null;
-    var nav = s.match(/navigating to\s+"([^"]+)"(?:,\s*waiting until\s+"([^"]+)")?/i);
-    if (nav) {
-      url = nav[1];
-      waitUntil = nav[2] || null;
-    }
-    var lines = ["Navigation timeout (" + formatTimeoutLabel(ms) + ")"];
-    if (url) lines.push("URL: " + url);
-    if (waitUntil) lines.push("Waited for: " + waitUntil);
-    return finalizeTextResult(lines, null);
-  }
-  function parseLocatorVisibleFailed(text) {
-    var s = String(text || "").replace(/\r/g, "");
-    if (!/expect\(locator\)\.toBeVisible\(\)\s+failed/i.test(s)) return null;
-    var locator = extractLocatorField(s) || extractWaitingForLocator(s);
-    var timeoutM = s.match(/\bTimeout:\s*(\d+)ms/i);
-    var ms = timeoutM ? parseInt(timeoutM[1], 10) : null;
-    var suffix = " not visible" + (ms ? " (" + formatTimeoutLabel(ms) + ")" : "");
-    if (!locator) return { clipboardText: "Element" + suffix, noteText: "Element" + suffix };
-    var locators = [];
-    var ref = addLocatorRefWithLabel(locators, locator, "<Element>");
-    return {
-      clipboardText: ref.clip + suffix,
-      noteText: ref.note + suffix,
-      locators
-    };
-  }
-  function extractStrictModeAkaLocators(text) {
-    var out = [];
-    var re = /\baka\s+([\s\S]*?)(?=\s+\d+\)\s+|\s+Call log:\s|$)/gi;
-    var m;
-    while (m = re.exec(text)) {
-      var locator = String(m[1] || "").trim();
-      if (locator) out.push(locator);
-    }
-    return out;
-  }
-  function parseLocatorStrictModeViolation(text) {
-    var s = String(text || "").replace(/\r/g, "");
-    var m = s.match(/locator\.click:\s*Error:\s*strict mode violation:\s*([\s\S]+?)\s+resolved to\s+(\d+)\s+elements/i);
-    if (!m) return null;
-    var target = String(m[1] || "").trim();
-    var locators = [];
-    var targetRef = target ? addLocatorRef(locators, target) : null;
-    var clipParts = ["#strict"];
-    var noteParts = ["#strict"];
-    if (targetRef) clipParts.push("Target: " + targetRef.clip);
-    if (targetRef) noteParts.push("Target: " + targetRef.note);
-    var akaLocators = extractStrictModeAkaLocators(s);
-    if (akaLocators.length) {
-      var clipMatches = [];
-      var noteMatches = [];
-      for (var i = 0; i < akaLocators.length; i++) {
-        var ref = addLocatorRef(locators, akaLocators[i]);
-        clipMatches.push(ref.clip);
-        noteMatches.push(ref.note);
-      }
-      clipParts.push("Matches: " + clipMatches.join(" "));
-      noteParts.push("Matches: " + noteMatches.join(" "));
-    }
-    return {
-      clipboardText: clipParts.join(" "),
-      noteText: noteParts.join(" "),
-      locators: locators.length ? locators : void 0
-    };
-  }
-  var RUN_LOG_PARSERS = [
-    {
-      id: "expected-received",
-      label: "Expected / Received comparison",
-      example: "Expected: 40 Received: 45",
-      resultExample: "<<40|45>>",
-      parse: function(text) {
-        var comp = extractExpectedActual(text);
-        if (!comp) return null;
-        return { comparison: comp };
-      }
-    },
-    {
-      id: "image-mismatch",
-      label: "Image size / visual mismatch",
-      example: "Expected an image 492px by 133px, received 504px by 133px\u2026",
-      resultExample: "Image mismatch: expected 492\xD7133, received 504\xD7133 (1596 px diff, 3%)",
-      parse: parseImageMismatch
-    },
-    {
-      id: "locator-visible-failed",
-      label: "Locator visibility assertion failed",
-      example: "expect(locator).toBeVisible() failed",
-      resultExample: "Element not visible (30s) + locator chip",
-      parse: parseLocatorVisibleFailed
-    },
-    {
-      id: "locator-strict-mode-violation",
-      label: "Locator strict mode violation",
-      example: "locator.click: Error: strict mode violation: locator(...) resolved to 3 elements",
-      resultExample: "#strict Target: {{locator}} Matches: {{locator}} {{locator}}",
-      parse: parseLocatorStrictModeViolation
-    },
-    {
-      id: "locator-click-timeout",
-      label: "Locator click timeout",
-      example: "locator.click: Timeout 60000ms exceeded",
-      resultExample: "Locator click timeout (60s) + locator chip",
-      parse: parseLocatorClickTimeout
-    },
-    {
-      id: "page-goto-timeout",
-      label: "Page navigation timeout",
-      example: "page.goto: Timeout 30000ms exceeded",
-      resultExample: "Navigation timeout (30s) + URL",
-      parse: parsePageGotoTimeout
-    }
-  ];
-  function parseRunLogText(text) {
-    for (var i = 0; i < RUN_LOG_PARSERS.length; i++) {
-      var parser = RUN_LOG_PARSERS[i];
-      var result = parser.parse(text);
-      if (!result) continue;
-      if (result.comparison) {
-        var compId = uid();
-        return {
-          clipboardText: "<<" + result.comparison.expected + "|" + result.comparison.actual + ">>",
-          noteText: "[[cmp:" + compId + "]]",
-          matched: true,
-          comparison: result.comparison
-        };
-      }
-      if (result.clipboardText && result.noteText) {
-        return {
-          clipboardText: String(result.clipboardText).trim(),
-          noteText: String(result.noteText).trim(),
-          matched: true,
-          locators: result.locators
-        };
-      }
-      var parsedText = String(result.text || "").trim();
-      return { clipboardText: parsedText, noteText: parsedText, matched: true, locators: result.locators };
-    }
-    var raw = String(text || "").trim();
-    return { clipboardText: raw, noteText: raw, matched: false };
-  }
-
-  // src/notes/31-run-log-actions.ts
+  init_run_log_parsers();
   init_run_log_payloads();
   init_github_feedback();
   var LOG_ROW_ATTR = "data-qaw-run-log-actions";
@@ -21562,7 +22637,7 @@ This won't delete the actual file.`)) return;
     } catch (_) {
     }
     try {
-      if ("1.465") return "1.465";
+      if ("1.478") return "1.478";
     } catch (_) {
     }
     return "unknown";
