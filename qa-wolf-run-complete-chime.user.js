@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         QA Wolf — run finished chime
 // @namespace    http://tampermonkey.net/
-// @version      1.16
+// @version      1.19
 // @description  Short sound when a code run finishes. Records last run duration, current run start time (for live elapsed in investigation notes). Click the page once if the browser blocks audio until gesture.
 // @match        https://app.qawolf.com/*
 // @grant        none
@@ -193,7 +193,7 @@
         runSegmentFile = getActiveFlowFileName();
         wasRunning = true;
         if (runSegmentFile) {
-          writeFileMetrics(runSegmentFile, { currentRunStartedAt: runSegmentStart });
+          writeFileMetrics(runSegmentFile, { currentRunStartedAt: runSegmentStart, completedRunStartedAt: null });
         }
       }
       return;
@@ -209,6 +209,7 @@
       if (runSegmentFile) {
         writeFileMetrics(runSegmentFile, {
           currentRunStartedAt: null,
+          completedRunStartedAt: runSegmentStart,
           completedRunDurationMs: durationMs,
           completedRunEndedAt: endedAt
         });
@@ -227,7 +228,7 @@
     runSegmentStart = Date.now();
     runSegmentFile = getActiveFlowFileName();
     if (runSegmentFile) {
-      writeFileMetrics(runSegmentFile, { currentRunStartedAt: runSegmentStart });
+      writeFileMetrics(runSegmentFile, { currentRunStartedAt: runSegmentStart, completedRunStartedAt: null });
     }
   }
   setInterval(onPoll, POLL_MS);

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         QA Wolf Investigation Notes
 // @namespace    http://tampermonkey.net/
-// @version      1.481
+// @version      1.485
 // @description  Per-file investigation notes: quick links (new-tab opens, PoC textarea, client-wide notes), client/env chips, instant tooltips, run timing, shift sync, work mode, export, search. data-e2e investigation-* hooks.
 // @author       You
 // @match        https://app.qawolf.com/*
@@ -113,7 +113,7 @@
   });
 
   // src/notes/01-constants.ts
-  var STORAGE_KEY, NOTE_LS_KEY_PREFIX, META_STORAGE_KEY, DEBOUNCE_MS, POLL_MS, SHIFT_BRIDGE_GM_KEY, TASK_WOLF_SHIFT_DOM_BRIDGE_DISABLED, SETTINGS_GM_KEY, TASK_WOLF_HQ_URL, RUN_CHIME_METRICS_KEY, DAILY_CLIENT_WORK_KEY, CLIENT_SCOPE_ENV, CLIENT_NOTES_FILE, NOTES_SYNTAX_TOOLTIP, RUN_METRICS_TOOLTIP, RAW_LINE, RAW_CHAR_TO_TAG, RAW_TAG_TO_CHAR, FACET_OPTIONS, FACET_DEFINITIONS, TEAM_DEFAULT_SLACK_IMAGE_CHANNEL, TEAM_DEFAULT_CLOUDINARY_CLOUD_NAME, TEAM_DEFAULT_CLOUDINARY_UPLOAD_PRESET, Z_INV_DRAWER, Z_INV_MODAL, STATUS_OPTIONS, STATUS_CHIP_STYLE, WORK_MODE_OPTIONS;
+  var STORAGE_KEY, NOTE_LS_KEY_PREFIX, META_STORAGE_KEY, DEBOUNCE_MS, POLL_MS, SHIFT_BRIDGE_GM_KEY, TASK_WOLF_SHIFT_DOM_BRIDGE_DISABLED, SETTINGS_GM_KEY, TASK_WOLF_HQ_URL, RUN_CHIME_METRICS_KEY, OPEN_TABS_KEY, DAILY_CLIENT_WORK_KEY, CLIENT_SCOPE_ENV, CLIENT_NOTES_FILE, NOTES_SYNTAX_TOOLTIP, RUN_METRICS_TOOLTIP, RAW_LINE, RAW_CHAR_TO_TAG, RAW_TAG_TO_CHAR, FACET_OPTIONS, FACET_DEFINITIONS, TEAM_DEFAULT_SLACK_IMAGE_CHANNEL, TEAM_DEFAULT_CLOUDINARY_CLOUD_NAME, TEAM_DEFAULT_CLOUDINARY_UPLOAD_PRESET, Z_INV_DRAWER, Z_INV_MODAL, STATUS_OPTIONS, STATUS_CHIP_STYLE, WORK_MODE_OPTIONS;
   var init_constants = __esm({
     "src/notes/01-constants.ts"() {
       "use strict";
@@ -127,6 +127,7 @@
       SETTINGS_GM_KEY = "_qawInvNotesSettings_v1";
       TASK_WOLF_HQ_URL = "https://www.task-wolf.com/hq";
       RUN_CHIME_METRICS_KEY = "_qawRunChimeMetrics";
+      OPEN_TABS_KEY = "_qawOpenTabs";
       DAILY_CLIENT_WORK_KEY = "_qawDailyClientWork";
       CLIENT_SCOPE_ENV = "__client_scope__";
       CLIENT_NOTES_FILE = "__client_notes__";
@@ -293,7 +294,7 @@
     });
   }
   function pruneOpenTabs(stats, nowMs) {
-    var tabs = parseJsonObject(localStorage.getItem(OPEN_TABS_KEY));
+    var tabs = parseJsonObject(localStorage.getItem(OPEN_TABS_KEY2));
     if (!tabs) return;
     var before = Object.keys(tabs).length;
     Object.keys(tabs).forEach(function(k) {
@@ -303,8 +304,8 @@
     var after = Object.keys(tabs).length;
     stats.openTabsRemoved += before - after;
     if (before === after) return;
-    if (after) localStorage.setItem(OPEN_TABS_KEY, JSON.stringify(tabs));
-    else localStorage.removeItem(OPEN_TABS_KEY);
+    if (after) localStorage.setItem(OPEN_TABS_KEY2, JSON.stringify(tabs));
+    else localStorage.removeItem(OPEN_TABS_KEY2);
     stats.changed = true;
   }
   function runChimeSlotTime(slot) {
@@ -375,14 +376,14 @@
     var saved = Math.max(0, stats.bytesBefore - stats.bytesAfter);
     return "Removed " + parts.join(", ") + (saved ? " (~" + Math.round(saved / 1024) + " KB)" : "") + ".";
   }
-  var STORAGE_CLEANUP_MARKER_KEY, FLOW_HISTORY_KEY, OPEN_TABS_KEY, SCROLL_DEBUG_PREFIX, HISTORY_RETENTION_DAYS, HISTORY_MAX_EVENTS_PER_NOTE, HISTORY_MAX_TOTAL_EVENTS, OPEN_TABS_STALE_MS, RUN_CHIME_RETENTION_DAYS, RUN_CHIME_MAX_FILES;
+  var STORAGE_CLEANUP_MARKER_KEY, FLOW_HISTORY_KEY, OPEN_TABS_KEY2, SCROLL_DEBUG_PREFIX, HISTORY_RETENTION_DAYS, HISTORY_MAX_EVENTS_PER_NOTE, HISTORY_MAX_TOTAL_EVENTS, OPEN_TABS_STALE_MS, RUN_CHIME_RETENTION_DAYS, RUN_CHIME_MAX_FILES;
   var init_storage_cleanup = __esm({
     "src/notes/32-storage-cleanup.ts"() {
       "use strict";
       init_constants();
       STORAGE_CLEANUP_MARKER_KEY = "_qawStorageCleanupV1Done";
       FLOW_HISTORY_KEY = "_qawFlowHistory";
-      OPEN_TABS_KEY = "_qawOpenTabs";
+      OPEN_TABS_KEY2 = "_qawOpenTabs";
       SCROLL_DEBUG_PREFIX = "_qawScrollDebug_";
       HISTORY_RETENTION_DAYS = 30;
       HISTORY_MAX_EVENTS_PER_NOTE = 200;
@@ -2194,7 +2195,7 @@
       return ctx.client + "" + ctx.envId + "" + fileName;
     };
     var activeShiftId = state.store && state.store.investigationShift && state.store.investigationShift.id ? String(state.store.investigationShift.id) : "";
-    function detectTerminalOutcomeFromPanel() {
+    function detectTerminalOutcomeFromPanel2() {
       try {
         var panel = document.getElementById("gitwolf-file-editor-panel") || document.body;
         var txt = String(panel && (panel.innerText || panel.textContent) || "").toLowerCase();
@@ -2246,7 +2247,7 @@
         var startedAtNum = Number(startMeta.startedAt);
         var durationNum = Number(slot.completedRunDurationMs);
         var isLikelyFull = Number.isFinite(durationNum) ? durationNum >= 1e4 : true;
-        var panelOutcome = detectTerminalOutcomeFromPanel();
+        var panelOutcome = detectTerminalOutcomeFromPanel2();
         var outcome = "";
         if (panelOutcome === "passed" || panelOutcome === "failed") outcome = panelOutcome;
         else if (panelOutcome === "stopped") outcome = "";
@@ -2257,23 +2258,8 @@
         if (isLikelyFull && outcome && Number.isFinite(endedAtNum)) {
           var failedLine = void 0;
           if (outcome === "failed") {
-            try {
-              var openTabs = JSON.parse(localStorage.getItem("_qawOpenTabs") || "{}");
-              Object.keys(openTabs).some(function(wn) {
-                var t = openTabs[wn];
-                if (!t) return false;
-                if (String(t.client || "") !== String(ctx.client)) return false;
-                if (String(t.envId || "") !== String(ctx.envId)) return false;
-                if (String(t.flowName || "") !== String(fileName)) return false;
-                var ln = Number(t.currentLine);
-                if (Number.isFinite(ln) && ln > 0) {
-                  failedLine = Math.floor(ln);
-                  return true;
-                }
-                return false;
-              });
-            } catch (_e3) {
-            }
+            var completedFailedLine = getCompletedFailedRunLineFromOpenTabs(ctx.client, ctx.envId, fileName);
+            if (completedFailedLine != null) failedLine = completedFailedLine;
           }
           recordHistoryEvent(key, {
             type: "run_result",
@@ -2389,7 +2375,7 @@
       } catch (e) {
       }
       try {
-        if ("1.481") return "1.481";
+        if ("1.485") return "1.485";
       } catch (e2) {
       }
       return "unknown";
@@ -11879,6 +11865,12 @@
           var atBottom = isAtBottom();
           var pendingRunLog = state.pendingRunLogCopy;
           var newBullet = appendNewBullet(n);
+          var failedLine = getFailedRunLineForNote(editKey);
+          if (failedLine != null) {
+            newBullet.lineNo = failedLine;
+            var failedLineCtx = captureLineContext(failedLine);
+            if (failedLineCtx) newBullet.lineContext = failedLineCtx;
+          }
           var appliedRunLog = false;
           var attachedTimestampId = "";
           if (pendingRunLog) {
@@ -19714,6 +19706,67 @@ This won't delete the actual file.`)) return;
     if (!ctx || !fn || !meta) return false;
     return meta.client === ctx.client && meta.envId === ctx.envId && meta.fileName === fn;
   }
+  function detectTerminalOutcomeFromPanel() {
+    try {
+      var panel = document.getElementById("gitwolf-file-editor-panel") || document.body;
+      var txt = String(panel && (panel.innerText || panel.textContent) || "").toLowerCase();
+      if (txt.indexOf("flow passed") !== -1) return "passed";
+      if (txt.indexOf("flow stopped") !== -1) return "stopped";
+      if (txt.indexOf("flow failed") !== -1) return "failed";
+    } catch (_e) {
+    }
+    return "";
+  }
+  function readRunMetricsSlot(fileName) {
+    try {
+      var raw = localStorage.getItem(RUN_CHIME_METRICS_KEY);
+      if (!raw) return null;
+      var metrics = JSON.parse(raw);
+      return metrics && metrics.byFile && metrics.byFile[fileName] ? metrics.byFile[fileName] : null;
+    } catch (_e) {
+    }
+    return null;
+  }
+  function runTimesMatch(a, b) {
+    return Number.isFinite(a) && Number.isFinite(b) && Math.abs(a - b) <= 5e3;
+  }
+  function tabMatchesNote(t, client, envId, fileName) {
+    if (!t) return false;
+    if (String(t.client || "") !== String(client)) return false;
+    if (String(t.envId || "") !== String(envId)) return false;
+    return String(t.flowName || "") === String(fileName);
+  }
+  function getCompletedFailedRunLineFromOpenTabs(client, envId, fileName) {
+    try {
+      var raw = localStorage.getItem(OPEN_TABS_KEY);
+      if (!raw) return null;
+      var openTabs = JSON.parse(raw);
+      var wn = window.name || "";
+      var t = wn ? openTabs[wn] : null;
+      if (!tabMatchesNote(t, client, envId, fileName)) return null;
+      if (t.isRunning) return null;
+      if (t.lastRunPassed === true) return null;
+      var slot = readRunMetricsSlot(fileName);
+      var completedStart = Number(slot && slot.completedRunStartedAt);
+      var completedEnd = Number(slot && slot.completedRunEndedAt);
+      var lineRunStart = Number(t.currentLineRunStartedAt);
+      var lineSeenAt = Number(t.currentLineSeenAt);
+      if (!runTimesMatch(lineRunStart, completedStart)) return null;
+      if (Number.isFinite(completedEnd) && Number.isFinite(lineSeenAt) && lineSeenAt > completedEnd + 5e3) return null;
+      var ln = Number(t.currentLine);
+      if (Number.isFinite(ln) && ln > 0) return Math.floor(ln);
+    } catch (_e) {
+    }
+    return null;
+  }
+  function getFailedRunLineForNote(editKey) {
+    var meta = parseNoteKey(editKey);
+    if (!meta) return null;
+    if (!noteMatchesActiveEditorFile(editKey)) return null;
+    var panelOutcome = detectTerminalOutcomeFromPanel();
+    if (panelOutcome !== "failed") return null;
+    return getCompletedFailedRunLineFromOpenTabs(meta.client, meta.envId, meta.fileName);
+  }
   function getMonacoEditorsFromWindow() {
     try {
       if (typeof monaco !== "undefined" && monaco.editor && typeof monaco.editor.getEditors === "function") {
@@ -22843,7 +22896,7 @@ This won't delete the actual file.`)) return;
     } catch (_) {
     }
     try {
-      if ("1.481") return "1.481";
+      if ("1.485") return "1.485";
     } catch (_) {
     }
     return "unknown";

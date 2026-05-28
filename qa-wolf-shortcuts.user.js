@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         QA Wolf Shortcuts
 // @namespace    http://tampermonkey.net/
-// @version      4.143
+// @version      4.146
 // @description  Keyboard shortcut hints for app.qawolf.com. Header nav shortcuts live in JSON key __global__ (editable). File tabs: Shift+right-click = Close other tabs. Violet badges = Meta chord. task-wolf.com: Select All button for Bug Revalidation Tasks.
 // @author       You
 // @match        https://app.qawolf.com/*
@@ -17,11 +17,8 @@
   // src/qa-wolf-shortcuts.ts
   var STORAGE_KEY_ACTIVE = "_qaWolfActive";
   var STORAGE_KEY_SHORTCUTS = "_qaWolfShortcuts";
-  var STORAGE_KEY_FOLLOW = "_qaWolfFollowMode";
-  var STORAGE_KEY_LINE_COUNTS = "_qaWolfLineCounts";
   var STORAGE_KEY_OPEN_TABS = "_qawOpenTabs";
   var STORAGE_KEY_FILE_INDEX = "_qawFileIndex";
-  var STORAGE_KEY_LIVE_LINE = "_qawLiveLine";
   var GLOBAL_PAGE_KEY = "__global__";
   var ANCHOR_THRESHOLD = 120;
   var POLL_INTERVAL = 600;
@@ -50,30 +47,21 @@
   var shortcutsDrawer = null;
   var helpDrawer = null;
   var lastOverlaySig = "";
-  var _followMode = localStorage.getItem(STORAGE_KEY_FOLLOW) !== "0";
+  var _lineChip = null;
   var _isPartialRun = false;
-  var _originalTitle = null;
-  var _lastProgressPct = null;
   var _lastExecutingLine = null;
   var _lastExecutingLineSeenAt = 0;
+  var _lastExecutingLineRunStartedAt = null;
   var _runStartGlyphSig = null;
   var _waitForRunGlyphTransition = false;
   var _runStartStaleGlyphNodes = /* @__PURE__ */ new Set();
-  var _didRunStartTopReset = false;
   var _runStartedAt = null;
+  var _lastCompletedRunStartedAt = null;
   var _lastRunDurationMs = null;
   var _lastRunPassed = null;
   var _prevHeartbeatIsRunning = false;
   var _lastIndexedModelKey = null;
   var _runMaxLine = 0;
-  var _lastHiddenScrollNudgeAt = 0;
-  var _fileTotalLines = function() {
-    try {
-      return JSON.parse(localStorage.getItem(STORAGE_KEY_LINE_COUNTS) || "{}");
-    } catch (e) {
-      return {};
-    }
-  }();
   function isTypingTarget(el) {
     if (!el || el === document.body) return false;
     var tn = el.tagName;
@@ -1760,14 +1748,6 @@
     var missing = !st.hasAny;
     if (!changed && !missing) return false;
     _waitForRunGlyphTransition = false;
-    if (!_didRunStartTopReset && ed) {
-      try {
-        var curTop = Math.max(0, ed.getScrollTop());
-        if (curTop > 120) ed.setScrollTop(0);
-      } catch (e) {
-      }
-      _didRunStartTopReset = true;
-    }
     return true;
   }
   function _qawLineFromStatusIconsStyleTop(iconValues) {
@@ -2102,27 +2082,21 @@
       if (!_isPartialRun) _clearStaleProgressGlyphs();
     }
   }, true);
-  document.addEventListener("visibilitychange", function() {
-    if (document.hidden || !_followMode) return;
+  function _updateLineChip() {
+    if (!_lineChip) return;
     var ed = getMonacoEditor();
-    if (!ed || !_isFollowEligibleFile(ed)) return;
-    var line = getCurrentTargetLine(ed);
-    if (line == null) return;
-    try {
-      if (typeof ed.revealLineInCenterIfOutsideViewport === "function") {
-        ed.revealLineInCenterIfOutsideViewport(line);
-      } else {
-        ed.revealLineInCenter(line);
-      }
-    } catch (e) {
+    var hasGlyph = ed ? getCurrentTargetLine(ed) != null : false;
+    var jumpPart = _lineChip.querySelector("[data-qaw-jump]");
+    var menuPart = _lineChip.querySelector("[data-qaw-menu]");
+    if (jumpPart) {
+      jumpPart.style.opacity = hasGlyph ? "1" : "0.4";
+      jumpPart.style.cursor = hasGlyph ? "pointer" : "default";
+      jumpPart.style.pointerEvents = hasGlyph ? "" : "none";
     }
-  });
-  function _applyTitleProgress() {
-    if (_lastProgressPct == null) return;
-    var base = document.title.replace(/^\d+%\s*\u2014\s*/, "");
-    if (_originalTitle == null) _originalTitle = base;
-    var want = _lastProgressPct + "% \u2014 " + _originalTitle;
-    if (document.title !== want) document.title = want;
+    if (menuPart) {
+      menuPart.style.color = "#94a3b8";
+      menuPart.title = "Line navigation";
+    }
   }
   function startPolling() {
     if (pollTimer) return;
@@ -2152,22 +2126,6 @@
   function writeTabHeartbeat() {
     try {
       var ed = getMonacoEditor();
-      var liveLine = ed ? getExecutingLine(ed) : null;
-      if (liveLine == null && document.hidden) {
-        try {
-          var _clRaw = localStorage.getItem("_qawCenterLine_" + (window.name || ""));
-          if (_clRaw) {
-            var _clData = JSON.parse(_clRaw);
-            if (_clData && typeof _clData.line === "number" && _clData.line > 0 && Date.now() - (_clData.ts || 0) < 1e4) {
-              liveLine = _clData.line;
-            }
-          }
-        } catch (_eCL) {
-        }
-      }
-      if (liveLine == null && document.hidden && _lastExecutingLine != null && Date.now() - _lastExecutingLineSeenAt < 4e3) {
-        liveLine = _lastExecutingLine;
-      }
       var modelKey = ed ? _getModelKey(ed) : null;
       var flowName = modelKey ? modelKey.split("/").pop() || "" : "";
       var pathMatch = location.pathname.match(/^\/([^/]+)\/environments\/([^/]+)/);
@@ -2183,73 +2141,33 @@
         } catch (e2) {
         }
       }
-      var totalLines = modelKey && _fileTotalLines[modelKey] ? _fileTotalLines[modelKey] : null;
-      if (!totalLines && ed && modelKey) {
-        try {
-          var directTotal = ed.getModel().getLineCount();
-          if (directTotal > 0) {
-            _fileTotalLines[modelKey] = directTotal;
-            totalLines = directTotal;
-            try {
-              localStorage.setItem(STORAGE_KEY_LINE_COUNTS, JSON.stringify(_fileTotalLines));
-            } catch (e2) {
-            }
-          }
-        } catch (e2) {
-        }
-      }
-      if (totalLines && _lastExecutingLine && _lastExecutingLine > totalLines && ed) {
-        try {
-          var actualTotal = ed.getModel().getLineCount();
-          if (actualTotal > totalLines) {
-            _fileTotalLines[modelKey] = actualTotal;
-            totalLines = actualTotal;
-            try {
-              localStorage.setItem(STORAGE_KEY_LINE_COUNTS, JSON.stringify(_fileTotalLines));
-            } catch (e2) {
-            }
-          }
-        } catch (e2) {
-        }
-      }
       var stopBtn = document.querySelector('[data-e2e="stop-run-button"]');
       var runBtn = document.querySelector('[data-e2e="run-code-button"]');
       var isRunning = !!stopBtn;
-      if (ed && isRunning && document.hidden) {
-        var nowNudge = Date.now();
-        if (nowNudge - _lastHiddenScrollNudgeAt > 2200) {
-          _lastHiddenScrollNudgeAt = nowNudge;
-          try {
-            var curTop = Math.max(0, ed.getScrollTop());
-            var jiggle = 24;
-            ed.setScrollTop(curTop + jiggle);
-            ed.setScrollTop(curTop);
-          } catch (eNudge) {
+      if (ed && _isFollowEligibleFile(ed)) {
+        var line = getCurrentTargetLine(ed);
+        if (line != null) {
+          if (isRunning) {
+            if (line > _runMaxLine) _runMaxLine = line;
+            if (_runMaxLine > 0 && line < _runMaxLine) line = _runMaxLine;
+            if (_runStartedAt != null) _lastExecutingLineRunStartedAt = _runStartedAt;
+          }
+          var shouldUpdate = _lastExecutingLine == null || line >= _lastExecutingLine || !isRunning;
+          if (shouldUpdate) {
+            _lastExecutingLine = line;
+            _lastExecutingLineSeenAt = Date.now();
           }
         }
       }
-      if (liveLine != null) {
-        if (isRunning) {
-          if (liveLine > _runMaxLine) _runMaxLine = liveLine;
-          if (_runMaxLine > 0 && liveLine < _runMaxLine) liveLine = _runMaxLine;
-        }
-        if (_lastExecutingLine == null || liveLine >= _lastExecutingLine) _lastExecutingLine = liveLine;
-      }
-      if (isRunning && totalLines && _runMaxLine > 0) {
-        var runPct = Math.min(100, Math.round(_runMaxLine / totalLines * 100));
-        if (_lastProgressPct == null || runPct > _lastProgressPct) _lastProgressPct = runPct;
-      }
-      _applyTitleProgress();
       var activeBtn = stopBtn || runBtn;
       var runBtnDisabled = activeBtn ? activeBtn.disabled : true;
       if (!_prevHeartbeatIsRunning && isRunning) {
         _runStartedAt = Date.now();
-        _lastProgressPct = null;
+        _lastCompletedRunStartedAt = null;
         _lastRunPassed = null;
         _runMaxLine = 0;
         _runStartGlyphSig = _qawStatusGlyphSignature().sig;
         _waitForRunGlyphTransition = true;
-        _didRunStartTopReset = false;
         _runStartStaleGlyphNodes = /* @__PURE__ */ new Set();
         try {
           var _staleNodes = Array.prototype.slice.call(
@@ -2262,27 +2180,28 @@
         }
         _lastExecutingLine = null;
         _lastExecutingLineSeenAt = 0;
-        try {
-          var _llClear = JSON.parse(localStorage.getItem(STORAGE_KEY_LIVE_LINE) || "{}");
-          delete _llClear[window.name || ""];
-          localStorage.setItem(STORAGE_KEY_LIVE_LINE, JSON.stringify(_llClear));
-        } catch (_llCE) {
-        }
+        _lastExecutingLineRunStartedAt = null;
       }
       if (_prevHeartbeatIsRunning && !isRunning) {
         if (_runStartedAt != null) _lastRunDurationMs = Date.now() - _runStartedAt;
+        _lastCompletedRunStartedAt = _runStartedAt;
         _runStartedAt = null;
         _runMaxLine = 0;
+        if (ed && _isFollowEligibleFile(ed)) {
+          var resultLine = getCurrentTargetLine(ed);
+          if (resultLine != null) {
+            _lastExecutingLine = resultLine;
+            _lastExecutingLineSeenAt = Date.now();
+          }
+        }
         try {
           var panel = document.getElementById("gitwolf-file-editor-panel") || document.body;
           _lastRunPassed = (panel.innerText || panel.textContent || "").toLowerCase().indexOf("flow passed") !== -1;
-          if (_lastRunPassed) _lastProgressPct = 100;
         } catch (e2) {
           _lastRunPassed = null;
         }
         _runStartGlyphSig = null;
         _waitForRunGlyphTransition = false;
-        _didRunStartTopReset = false;
       }
       _prevHeartbeatIsRunning = isRunning;
       var reattemptBtn = document.querySelector('[data-e2e="button-use-as-reattempt"]');
@@ -2293,14 +2212,15 @@
         url: location.href,
         windowName: window.name,
         lastSeen: Date.now(),
-        pct: _lastProgressPct,
         client,
         envId,
         flowName,
         modelKey,
-        totalLines,
         currentLine: _lastExecutingLine,
+        currentLineSeenAt: _lastExecutingLineSeenAt,
+        currentLineRunStartedAt: _lastExecutingLineRunStartedAt,
         runStartedAt: _runStartedAt,
+        lastCompletedRunStartedAt: _lastCompletedRunStartedAt,
         lastRunDurationMs: _lastRunDurationMs,
         lastRunPassed: _lastRunPassed,
         isRunning,
@@ -2309,6 +2229,7 @@
         reattemptBtnDisabled
       };
       localStorage.setItem(STORAGE_KEY_OPEN_TABS, JSON.stringify(tabs));
+      if (_lineChip) _updateLineChip();
     } catch (e) {
     }
   }
