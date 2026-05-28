@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         QA Wolf Investigation Notes
 // @namespace    http://tampermonkey.net/
-// @version      1.485
+// @version      1.489
 // @description  Per-file investigation notes: quick links (new-tab opens, PoC textarea, client-wide notes), client/env chips, instant tooltips, run timing, shift sync, work mode, export, search. data-e2e investigation-* hooks.
 // @author       You
 // @match        https://app.qawolf.com/*
@@ -418,7 +418,8 @@
       bugsDashboard: { lastCollectedAt: "", entries: [] },
       bugsDashboardByClient: {},
       maintenanceDashboardByClient: {},
-      revalReportSnapshotsByClient: {}
+      revalReportSnapshotsByClient: {},
+      revalReportIntroByClient: {}
     };
   }
   function ensureQuickLinksByClient(p) {
@@ -647,6 +648,14 @@
       if (!Array.isArray(snap.openIds)) snap.openIds = [];
       if (!Array.isArray(snap.closedIds)) snap.closedIds = [];
     });
+    if (!p.revalReportIntroByClient || typeof p.revalReportIntroByClient !== "object") {
+      p.revalReportIntroByClient = {};
+    }
+    Object.keys(p.revalReportIntroByClient).forEach(function(slug) {
+      if (typeof p.revalReportIntroByClient[slug] !== "string") {
+        delete p.revalReportIntroByClient[slug];
+      }
+    });
     migrateLegacyBugsToBullets(p);
     applyGmShiftOverlayToStore(p);
     return p;
@@ -669,7 +678,8 @@
       bugsDashboard: p.bugsDashboard || { lastCollectedAt: "", entries: [] },
       bugsDashboardByClient: p.bugsDashboardByClient || {},
       maintenanceDashboardByClient: p.maintenanceDashboardByClient || {},
-      revalReportSnapshotsByClient: p.revalReportSnapshotsByClient || {}
+      revalReportSnapshotsByClient: p.revalReportSnapshotsByClient || {},
+      revalReportIntroByClient: p.revalReportIntroByClient || {}
     };
   }
   function loadStore() {
@@ -2388,7 +2398,7 @@
       } catch (e) {
       }
       try {
-        if ("1.485") return "1.485";
+        if ("1.489") return "1.489";
       } catch (e2) {
       }
       return "unknown";
@@ -3838,7 +3848,7 @@
           return buildFlowOverviewPrompt(fileName);
         },
         function() {
-          return getEditorCodeContext();
+          return getFlowOverviewCodeContext();
         }
       ));
     }
@@ -4050,52 +4060,47 @@
     lines.push("Report findings with file names and line numbers.");
     return lines.join("\n");
   }
-  function buildFlowOverviewPrompt(fileName, lineNo) {
+  function getFlowOverviewFocusRange(lineNo) {
     var ed = null;
     try {
-      var eds = getMonacoEditorsFromWindow();
-      ed = pickMonacoEditor(eds);
+      ed = pickMonacoEditor(getMonacoEditorsFromWindow());
     } catch (e) {
     }
-    var selectedCode = "";
-    var selStart = 0;
-    var selEnd = 0;
     if (ed) {
       try {
         var sel = ed.getSelection();
         if (sel && sel.startLineNumber && sel.endLineNumber && !(sel.startLineNumber === sel.endLineNumber && sel.startColumn === sel.endColumn)) {
-          selStart = sel.startLineNumber;
-          selEnd = sel.endLineNumber;
-          var model = ed.getModel();
-          if (model) selectedCode = model.getValueInRange(sel);
-        } else if (lineNo) {
-          selStart = Math.max(1, lineNo - 3);
-          selEnd = lineNo + 3;
-          var model2 = ed.getModel();
-          if (model2) {
-            selectedCode = model2.getValueInRange({
-              startLineNumber: selStart,
-              startColumn: 1,
-              endLineNumber: selEnd,
-              endColumn: model2.getLineMaxColumn(selEnd)
-            });
-          }
+          return { startLine: sel.startLineNumber, endLine: sel.endLineNumber };
         }
       } catch (e2) {
       }
     }
+    if (lineNo) {
+      return { startLine: Math.max(1, lineNo - 3), endLine: lineNo + 3 };
+    }
+    return null;
+  }
+  function getFlowOverviewCodeContext() {
+    var editor = pickMonacoEditor(getMonacoEditorsFromWindow());
+    if (!editor) return "";
+    try {
+      var model = editor.getModel();
+      if (!model) return "";
+      return String(model.getValue() || "");
+    } catch (_e) {
+      return "";
+    }
+  }
+  function buildFlowOverviewPrompt(fileName, lineNo) {
+    var focus = getFlowOverviewFocusRange(lineNo);
     var lines = [];
     lines.push("Give me a step-by-step overview of what **`" + fileName + "`** does.");
     lines.push("");
     lines.push("Format it as a numbered list in plain English \u2014 what happens in sequence from top to bottom.");
     lines.push("Keep each step concise (one sentence). Note any important conditions or branches.");
-    if (selectedCode) {
+    if (focus) {
       lines.push("");
-      lines.push("I'm also confused about " + (selStart === selEnd ? "line " + selStart : "lines " + selStart + "\u2013" + selEnd) + " specifically \u2014 please explain this section in detail:");
-      lines.push("");
-      lines.push("```");
-      lines.push(selectedCode.replace(/\n$/, ""));
-      lines.push("```");
+      lines.push("I'm also confused about " + (focus.startLine === focus.endLine ? "line " + focus.startLine : "lines " + focus.startLine + "\u2013" + focus.endLine) + " specifically \u2014 please explain this section in detail. The full file is attached below the prompt.");
     }
     return lines.join("\n");
   }
@@ -5946,10 +5951,11 @@
   function sanitizeSlackMrkdwnLinkLabel(label) {
     return String(label || "").replace(/\|/g, "\xB7").replace(/>/g, "\u203A").replace(/</g, "\u2039");
   }
-  function formatRevalBugListLineMrkdwn(num, title, reportUrl) {
+  function formatRevalBugListLineMrkdwn(num, title, reportUrl, isNew) {
     var n = String(num || "").trim();
     var t = String(title || "").trim();
     var label = (n ? n + " " : "") + (t || "Bug");
+    if (isNew) label = "NEW \u2014 " + label;
     label = sanitizeSlackMrkdwnLinkLabel(label);
     if (reportUrl && /^https?:\/\//i.test(reportUrl)) {
       return "- *<" + reportUrl + "|" + label + ">*";
@@ -5976,6 +5982,11 @@
       p.revalReportSnapshotsByClient = {};
     }
   }
+  function ensureIntroMap(p) {
+    if (!p.revalReportIntroByClient || typeof p.revalReportIntroByClient !== "object") {
+      p.revalReportIntroByClient = {};
+    }
+  }
   function getRevalReportSnapshot(clientSlug) {
     ensureSnapshots(state.store);
     var v = state.store.revalReportSnapshotsByClient[clientSlug];
@@ -5985,6 +5996,34 @@
       openIds: Array.isArray(v.openIds) ? v.openIds.map(String) : [],
       closedIds: Array.isArray(v.closedIds) ? v.closedIds.map(String) : []
     };
+  }
+  function formatRevalBaselineSavedLabel(clientSlug) {
+    var snap = getRevalReportSnapshot(clientSlug);
+    if (!snap || !snap.sentAt) return "Baseline: not saved yet";
+    try {
+      var d = new Date(snap.sentAt);
+      var yy = String(d.getFullYear()).slice(-2);
+      var t = d.toLocaleTimeString(void 0, {
+        hour: "numeric",
+        minute: "2-digit",
+        hour12: true
+      });
+      return "Baseline saved " + (d.getMonth() + 1) + "/" + d.getDate() + "/" + yy + ", " + t;
+    } catch (_e) {
+      return "Baseline saved";
+    }
+  }
+  function getRevalReportIntro(clientSlug) {
+    ensureIntroMap(state.store);
+    var v = state.store.revalReportIntroByClient[clientSlug];
+    return typeof v === "string" ? v : "";
+  }
+  function setRevalReportIntro(clientSlug, intro) {
+    ensureIntroMap(state.store);
+    var t = String(intro || "").trim();
+    if (t) state.store.revalReportIntroByClient[clientSlug] = t;
+    else delete state.store.revalReportIntroByClient[clientSlug];
+    saveStoreImmediate();
   }
   function saveBugRevalSnapshot(clientSlug, draft) {
     ensureSnapshots(state.store);
@@ -5999,78 +6038,33 @@
     };
     saveStoreImmediate();
   }
-  function buildNumberMap(draft) {
-    var m = /* @__PURE__ */ new Map();
-    draft.open.forEach(function(r) {
-      m.set(r.reportId.toLowerCase(), r.number);
-    });
-    draft.closed.forEach(function(r) {
-      m.set(r.reportId.toLowerCase(), r.number);
-    });
-    return m;
+  function defaultIntro(clientLabel) {
+    return "Hello team! Here\u2019s the latest bug revalidation report for " + clientLabel + ". Let us know if there are any questions or feedback. Always happy to help! :saluting_face:";
   }
-  function diffSection(snapshot, draft) {
-    if (!snapshot || !snapshot.sentAt) return "";
+  function resolveIntro(clientSlug, clientLabel) {
+    var custom = getRevalReportIntro(clientSlug).trim();
+    return custom || defaultIntro(clientLabel);
+  }
+  function getResolvedRevalReportIntro(clientSlug) {
+    var clientLabel = getClientDisplayName(clientSlug) || clientSlug;
+    return resolveIntro(clientSlug, clientLabel);
+  }
+  function snapshotKnownBugIds(snapshot) {
     var prevAll = /* @__PURE__ */ new Set();
+    if (!snapshot) return prevAll;
     snapshot.openIds.forEach(function(id) {
       prevAll.add(String(id).toLowerCase());
     });
     snapshot.closedIds.forEach(function(id) {
       prevAll.add(String(id).toLowerCase());
     });
-    var prevOpen = new Set(snapshot.openIds.map(function(id) {
-      return String(id).toLowerCase();
-    }));
-    var curOpen = new Set(draft.open.map(function(r) {
-      return r.reportId.toLowerCase();
-    }));
-    var curClosed = new Set(draft.closed.map(function(r) {
-      return r.reportId.toLowerCase();
-    }));
-    var curAll = /* @__PURE__ */ new Set();
-    curOpen.forEach(function(x) {
-      curAll.add(x);
-    });
-    curClosed.forEach(function(x) {
-      curAll.add(x);
-    });
-    var newlyClosed = [];
-    curClosed.forEach(function(id) {
-      if (prevOpen.has(id)) newlyClosed.push(id);
-    });
-    var newBugs = [];
-    curAll.forEach(function(id) {
-      if (!prevAll.has(id)) newBugs.push(id);
-    });
-    if (!newBugs.length && !newlyClosed.length) return "";
-    var numMap = buildNumberMap(draft);
-    function fmtIds(ids) {
-      return ids.map(function(id) {
-        return numMap.get(id.toLowerCase()) || "\u2018" + id.slice(0, 8) + "\u2026\u2019";
-      }).join(", ");
-    }
-    var when = "";
-    try {
-      when = new Date(snapshot.sentAt).toLocaleString();
-    } catch (e) {
-      when = snapshot.sentAt;
-    }
-    var lines = [
-      "",
-      "---",
-      "_Since last report (" + when + "):_"
-    ];
-    if (newBugs.length) lines.push("\u2022 New: " + fmtIds(newBugs));
-    if (newlyClosed.length) lines.push("\u2022 Moved to closed: " + fmtIds(newlyClosed));
-    return lines.join("\n");
-  }
-  function defaultIntro(clientLabel) {
-    return "Hello team! Here\u2019s the latest bug revalidation report for " + clientLabel + ". Let us know if there are any questions or feedback. Always happy to help! :saluting_face:";
+    return prevAll;
   }
   function buildBugRevalReportDraft(clientSlug, entries) {
     var clientLabel = getClientDisplayName(clientSlug) || clientSlug;
     var aggMap = aggregateBugBulletsForClient(clientSlug);
     var snapshot = getRevalReportSnapshot(clientSlug);
+    var prevAll = snapshotKnownBugIds(snapshot);
     var openLines = [];
     var closedLines = [];
     if (entries && entries.length) {
@@ -6083,8 +6077,9 @@
         var title = String(entry.title || "").trim() || agg && agg.title || "Bug";
         if (!num) num = "#?";
         var url = String(entry.reportUrl || "").trim() || agg && agg.reportUrl || "";
-        var line = formatRevalBugListLineMrkdwn(num, title, url);
-        openLines.push({ reportId: id, number: num, title, reportUrl: url, line });
+        var isNew = prevAll.size > 0 && !prevAll.has(id);
+        var line = formatRevalBugListLineMrkdwn(num, title, url, isNew);
+        openLines.push({ reportId: id, number: num, title, reportUrl: url, line, isNew });
       });
     } else {
       aggMap.forEach(function(agg, id) {
@@ -6092,8 +6087,9 @@
         var num = agg.number || "#?";
         var title = agg.title || "Bug";
         var url = agg.reportUrl || "";
-        var line = formatRevalBugListLineMrkdwn(num, title, url);
-        openLines.push({ reportId: id, number: num, title, reportUrl: url, line });
+        var isNew = prevAll.size > 0 && !prevAll.has(id);
+        var line = formatRevalBugListLineMrkdwn(num, title, url, isNew);
+        openLines.push({ reportId: id, number: num, title, reportUrl: url, line, isNew });
       });
     }
     var prevOpenIds = snapshot ? new Set(snapshot.openIds.map(function(id) {
@@ -6105,30 +6101,26 @@
       var num = agg.number || "#?";
       var title = agg.title || "Bug";
       var url = agg.reportUrl || "";
-      var line = formatRevalBugListLineMrkdwn(num, title, url);
+      var line = formatRevalBugListLineMrkdwn(num, title, url, false);
       closedLines.push({ reportId: id, number: num, title, reportUrl: url, line });
     });
     sortLines(openLines);
     sortLines(closedLines);
-    var intro = defaultIntro(clientLabel);
     var body = [];
-    body.push(intro);
+    body.push(resolveIntro(clientSlug, clientLabel));
     body.push("");
     body.push(":ladybug: Open (" + openLines.length + ")");
     openLines.forEach(function(r) {
       body.push(r.line);
     });
-    body.push("");
-    body.push(":white_check_mark: Closed (" + closedLines.length + ")");
     if (closedLines.length) {
+      body.push("");
+      body.push(":white_check_mark: Closed (" + closedLines.length + ")");
       closedLines.forEach(function(r) {
         body.push(r.line);
       });
     }
-    var draft = { open: openLines, closed: closedLines, markdown: "" };
-    var diff = diffSection(snapshot, draft);
-    draft.markdown = body.join("\n") + diff;
-    return draft;
+    return { open: openLines, closed: closedLines, markdown: body.join("\n") };
   }
   var NOTE_KEY_SEP;
   var init_bug_reval_report = __esm({
@@ -6227,6 +6219,22 @@
         hour12: true
       }).replace(/\s+/g, "");
       return md + " " + t;
+    } catch (e) {
+      return "";
+    }
+  }
+  function formatCompactDateTime(iso) {
+    if (!iso) return "";
+    try {
+      var d = new Date(iso);
+      if (Number.isNaN(d.getTime())) return "";
+      var yy = String(d.getFullYear()).slice(-2);
+      var t = d.toLocaleTimeString(void 0, {
+        hour: "numeric",
+        minute: "2-digit",
+        hour12: true
+      });
+      return d.getMonth() + 1 + "/" + d.getDate() + "/" + yy + ", " + t;
     } catch (e) {
       return "";
     }
@@ -6551,6 +6559,19 @@
     var root = document.createElement("div");
     root.style.cssText = "display:flex;flex-direction:column;gap:8px;font-family:monospace;";
     container.appendChild(root);
+    var lastCollectedHint = document.createElement("span");
+    lastCollectedHint.style.cssText = "font-size:10px;color:#64748b;";
+    var baselineHint = document.createElement("span");
+    baselineHint.style.cssText = "font-size:10px;color:#64748b;";
+    function refreshLastCollectedHint() {
+      var t = clientRow.lastCollectedAt;
+      lastCollectedHint.textContent = t ? "Last collected " + formatCompactDateTime(t) : "Last collected: never";
+    }
+    function refreshBaselineHint() {
+      baselineHint.textContent = formatRevalBaselineSavedLabel(clientSlug);
+    }
+    refreshLastCollectedHint();
+    refreshBaselineHint();
     var controls = document.createElement("div");
     controls.style.cssText = "display:flex;align-items:center;gap:8px;flex-wrap:wrap;";
     root.appendChild(controls);
@@ -6564,6 +6585,7 @@
     clearBtn.textContent = "Clear";
     clearBtn.style.cssText = "background:#3f1d1d;color:#fecaca;border:1px solid #7f1d1d;border-radius:6px;padding:5px 10px;cursor:pointer;font-size:11px;font-family:monospace;";
     controls.appendChild(clearBtn);
+    controls.appendChild(lastCollectedHint);
     var revalRow = document.createElement("div");
     revalRow.style.cssText = "display:flex;align-items:center;gap:6px;flex-wrap:wrap;width:100%;";
     root.appendChild(revalRow);
@@ -6573,12 +6595,64 @@
     dmRevalBtn.title = "Posts the reval report to your Slack DM via the bot. Does not update the baseline.";
     dmRevalBtn.style.cssText = "background:#0f172a;color:#93c5fd;border:1px solid #334155;border-radius:6px;padding:5px 10px;cursor:pointer;font-size:11px;font-family:monospace;";
     revalRow.appendChild(dmRevalBtn);
+    var editHeaderBtn = document.createElement("button");
+    editHeaderBtn.type = "button";
+    editHeaderBtn.textContent = "Edit header";
+    editHeaderBtn.title = "Customize the intro paragraph for this client\u2019s Slack reval DM";
+    editHeaderBtn.style.cssText = "background:#0f172a;color:#cbd5e1;border:1px solid #334155;border-radius:6px;padding:5px 10px;cursor:pointer;font-size:11px;font-family:monospace;";
+    revalRow.appendChild(editHeaderBtn);
+    var baselineRow = document.createElement("div");
+    baselineRow.style.cssText = "display:flex;align-items:center;gap:6px;flex-wrap:wrap;width:100%;";
+    root.appendChild(baselineRow);
     var saveBaselineBtn = document.createElement("button");
     saveBaselineBtn.type = "button";
     saveBaselineBtn.textContent = "Save baseline";
     saveBaselineBtn.title = "Saves the current open/closed bug list as the baseline for future diff summaries.";
     saveBaselineBtn.style.cssText = "background:#0f172a;color:#94a3b8;border:1px solid #334155;border-radius:6px;padding:5px 10px;cursor:pointer;font-size:11px;font-family:monospace;";
-    revalRow.appendChild(saveBaselineBtn);
+    baselineRow.appendChild(saveBaselineBtn);
+    baselineRow.appendChild(baselineHint);
+    var headerEditorWrap = document.createElement("div");
+    headerEditorWrap.style.cssText = "display:none;flex-direction:column;gap:6px;width:100%;";
+    root.appendChild(headerEditorWrap);
+    var headerEditorLabel = document.createElement("div");
+    headerEditorLabel.style.cssText = "font-size:10px;color:#94a3b8;";
+    headerEditorLabel.textContent = "Slack DM intro (per client)";
+    headerEditorWrap.appendChild(headerEditorLabel);
+    var headerEditor = document.createElement("textarea");
+    headerEditor.rows = 4;
+    headerEditor.style.cssText = "width:100%;box-sizing:border-box;background:#0b1220;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:8px;font-size:11px;font-family:monospace;resize:vertical;min-height:72px;";
+    headerEditorWrap.appendChild(headerEditor);
+    var headerEditorActions = document.createElement("div");
+    headerEditorActions.style.cssText = "display:flex;gap:6px;justify-content:flex-end;";
+    headerEditorWrap.appendChild(headerEditorActions);
+    var headerSaveBtn = document.createElement("button");
+    headerSaveBtn.type = "button";
+    headerSaveBtn.textContent = "Save header";
+    headerSaveBtn.style.cssText = "background:#14532d;color:#bbf7d0;border:1px solid #166534;border-radius:6px;padding:4px 10px;cursor:pointer;font-size:10px;font-family:monospace;";
+    headerEditorActions.appendChild(headerSaveBtn);
+    var headerCancelBtn = document.createElement("button");
+    headerCancelBtn.type = "button";
+    headerCancelBtn.textContent = "Cancel";
+    headerCancelBtn.style.cssText = "background:#0f172a;color:#94a3b8;border:1px solid #334155;border-radius:6px;padding:4px 10px;cursor:pointer;font-size:10px;font-family:monospace;";
+    headerEditorActions.appendChild(headerCancelBtn);
+    editHeaderBtn.addEventListener("click", function() {
+      var showing = headerEditorWrap.style.display !== "none";
+      if (showing) {
+        headerEditorWrap.style.display = "none";
+        return;
+      }
+      headerEditor.value = getRevalReportIntro(clientSlug) || getResolvedRevalReportIntro(clientSlug);
+      headerEditorWrap.style.display = "flex";
+      headerEditor.focus();
+    });
+    headerSaveBtn.addEventListener("click", function() {
+      setRevalReportIntro(clientSlug, headerEditor.value);
+      headerEditorWrap.style.display = "none";
+      flashNotesHint("Header saved for " + clientSlug, false);
+    });
+    headerCancelBtn.addEventListener("click", function() {
+      headerEditorWrap.style.display = "none";
+    });
     function makeRevalDraft() {
       var entries = clientRow.entries || [];
       var draft = buildBugRevalReportDraft(clientSlug, entries);
@@ -6611,10 +6685,11 @@
       var draft = makeRevalDraft();
       if (!draft) return;
       saveBugRevalSnapshot(clientSlug, draft);
+      refreshBaselineHint();
       flashNotesHint("Baseline saved", false);
     });
     var status = document.createElement("div");
-    status.style.cssText = "font-size:10px;color:#94a3b8;min-height:14px;";
+    status.style.cssText = "display:none;font-size:10px;color:#94a3b8;";
     root.appendChild(status);
     var logsWrap = document.createElement("div");
     logsWrap.style.cssText = "display:none;border:1px solid #334155;border-radius:8px;background:#0b1220;padding:8px;max-height:130px;overflow:auto;";
@@ -6635,6 +6710,9 @@
     closeLogsBtn.textContent = "Close";
     closeLogsBtn.style.cssText = "background:#0f172a;color:#94a3b8;border:1px solid #334155;border-radius:4px;padding:2px 7px;cursor:pointer;font-size:10px;font-family:monospace;";
     logsTop.appendChild(closeLogsBtn);
+    var listDivider = document.createElement("div");
+    listDivider.style.cssText = "height:1px;background:#334155;margin:0;";
+    root.appendChild(listDivider);
     var list = document.createElement("div");
     list.style.cssText = "display:flex;flex-direction:column;gap:6px;";
     root.appendChild(list);
@@ -6654,6 +6732,7 @@
       if (inProgress) {
         collectBtn.textContent = "Collecting...";
         status.textContent = st && st.status || "Collecting " + (st ? st.done : 0) + "/" + (st ? st.total : 0);
+        status.style.display = "";
         status.style.color = "#93c5fd";
         var logs = st && st.logs ? st.logs : [];
         logsWrap.style.display = state.bugsLogsHidden ? "none" : "";
@@ -6661,8 +6740,9 @@
       } else {
         collectBtn.textContent = "Collect bugs";
         status.style.color = "#94a3b8";
-        var t = clientRow.lastCollectedAt;
-        status.textContent = state.bugsCollectLastStatus || (t ? "Last collected " + new Date(t).toLocaleString() : "Collect from /" + clientSlug + "/bug-reports page.");
+        refreshLastCollectedHint();
+        status.textContent = state.bugsCollectLastStatus || "";
+        status.style.display = status.textContent ? "" : "none";
         if (state.bugsCollectLastLogs && state.bugsCollectLastLogs.length) {
           logsWrap.style.display = state.bugsLogsHidden ? "none" : "";
           logsEl.textContent = state.bugsCollectLastLogs.join("\n");
@@ -6950,6 +7030,7 @@
         state.bugsCollectLastStatus = "";
         state.bugsLogsHidden = false;
         saveStoreImmediate();
+        refreshLastCollectedHint();
         renderList();
         setCollectUi();
       });
@@ -7073,6 +7154,7 @@
           state.bugsCollectLastLogs = (state.bugsCollectState.logs || []).slice();
           state.bugsCollectLastStatus = "Last run finished: " + out.length + " bugs.";
           state.bugsCollectState = null;
+          refreshLastCollectedHint();
           renderList();
           setCollectUi();
         } catch (err) {
@@ -22943,7 +23025,7 @@ This won't delete the actual file.`)) return;
     } catch (_) {
     }
     try {
-      if ("1.485") return "1.485";
+      if ("1.489") return "1.489";
     } catch (_) {
     }
     return "unknown";
