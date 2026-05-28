@@ -113,7 +113,7 @@
   });
 
   // src/notes/01-constants.ts
-  var STORAGE_KEY, NOTE_LS_KEY_PREFIX, META_STORAGE_KEY, DEBOUNCE_MS, POLL_MS, SHIFT_BRIDGE_GM_KEY, TASK_WOLF_SHIFT_DOM_BRIDGE_DISABLED, SETTINGS_GM_KEY, TASK_WOLF_HQ_URL, RUN_CHIME_METRICS_KEY, OPEN_TABS_KEY, DAILY_CLIENT_WORK_KEY, CLIENT_SCOPE_ENV, CLIENT_NOTES_FILE, NOTES_SYNTAX_TOOLTIP, RUN_METRICS_TOOLTIP, RAW_LINE, RAW_CHAR_TO_TAG, RAW_TAG_TO_CHAR, FACET_OPTIONS, FACET_DEFINITIONS, TEAM_DEFAULT_SLACK_IMAGE_CHANNEL, TEAM_DEFAULT_CLOUDINARY_CLOUD_NAME, TEAM_DEFAULT_CLOUDINARY_UPLOAD_PRESET, Z_INV_DRAWER, Z_INV_MODAL, STATUS_OPTIONS, STATUS_CHIP_STYLE, WORK_MODE_OPTIONS;
+  var STORAGE_KEY, NOTE_LS_KEY_PREFIX, META_STORAGE_KEY, DEBOUNCE_MS, POLL_MS, SHIFT_BRIDGE_GM_KEY, TASK_WOLF_SHIFT_DOM_BRIDGE_DISABLED, SETTINGS_GM_KEY, TASK_WOLF_HQ_URL, RUN_CHIME_METRICS_KEY, OPEN_TABS_KEY, SHIFT_END_CTA_SENT_KEY, DAILY_CLIENT_WORK_KEY, CLIENT_SCOPE_ENV, CLIENT_NOTES_FILE, NOTES_SYNTAX_TOOLTIP, RUN_METRICS_TOOLTIP, RAW_LINE, RAW_CHAR_TO_TAG, RAW_TAG_TO_CHAR, FACET_OPTIONS, FACET_DEFINITIONS, TEAM_DEFAULT_SLACK_IMAGE_CHANNEL, TEAM_DEFAULT_CLOUDINARY_CLOUD_NAME, TEAM_DEFAULT_CLOUDINARY_UPLOAD_PRESET, Z_INV_DRAWER, Z_INV_MODAL, STATUS_OPTIONS, STATUS_CHIP_STYLE, WORK_MODE_OPTIONS;
   var init_constants = __esm({
     "src/notes/01-constants.ts"() {
       "use strict";
@@ -128,6 +128,7 @@
       TASK_WOLF_HQ_URL = "https://www.task-wolf.com/hq";
       RUN_CHIME_METRICS_KEY = "_qawRunChimeMetrics";
       OPEN_TABS_KEY = "_qawOpenTabs";
+      SHIFT_END_CTA_SENT_KEY = "_qawShiftEndCtaSent_v1";
       DAILY_CLIENT_WORK_KEY = "_qawDailyClientWork";
       CLIENT_SCOPE_ENV = "__client_scope__";
       CLIENT_NOTES_FILE = "__client_notes__";
@@ -1055,6 +1056,16 @@
   });
 
   // src/notes/03-shift.ts
+  function clearShiftEndCtaSent(shiftId) {
+    if (!shiftId) return;
+    try {
+      var sent = JSON.parse(localStorage.getItem(SHIFT_END_CTA_SENT_KEY) || "{}");
+      if (!sent[shiftId]) return;
+      delete sent[shiftId];
+      localStorage.setItem(SHIFT_END_CTA_SENT_KEY, JSON.stringify(sent));
+    } catch (_) {
+    }
+  }
   function tryClaimShiftModal(shiftId) {
     try {
       var raw = localStorage.getItem(SHIFT_MODAL_CLAIM_KEY);
@@ -1296,6 +1307,7 @@
       if (act) {
         var base = act.plannedEndIso ? new Date(act.plannedEndIso).getTime() : Date.now();
         act.plannedEndIso = new Date(base + 10 * 60 * 1e3).toISOString();
+        if (act.id) clearShiftEndCtaSent(String(act.id));
         saveStoreImmediate();
       }
       refreshInvestigationShiftBar();
@@ -1576,6 +1588,7 @@
         if (action === "snooze10") {
           var base = act.plannedEndIso ? new Date(act.plannedEndIso).getTime() : Date.now();
           act.plannedEndIso = new Date(base + 10 * 60 * 1e3).toISOString();
+          clearShiftEndCtaSent(String(act.id));
           saveStoreImmediate();
           releaseShiftModalClaim();
           refreshInvestigationShiftBar();
@@ -21713,13 +21726,39 @@ This won't delete the actual file.`)) return;
   init_constants();
   init_store();
   var SHIFT_NUDGE_SENT_KEY = "_qawShiftEndNudgesSent_v1";
-  var SHIFT_CTA_SENT_KEY = "_qawShiftEndCtaSent_v1";
+  var SHIFT_SLACK_CLAIM_KEY = "_qawShiftSlackClaim_v1";
   var SHIFT_NUDGE_CHECK_MS = 3e4;
   var SHIFT_NUDGE_RETRY_MS = 10 * 60 * 1e3;
+  var SHIFT_SLACK_CLAIM_TTL_MS = 2 * 60 * 1e3;
   var SHIFT_DEFAULT_DURATION_MS = 3.5 * 60 * 60 * 1e3;
   var QAW_BASE_URL = "https://app.qawolf.com";
   var nudgeInFlight = false;
   var nudgeLastAttemptAtByShiftId = {};
+  var ctaLastAttemptAtByShiftId = {};
+  function tryClaimShiftSlackSend(shiftId, kind) {
+    if (!shiftId) return false;
+    try {
+      var raw = localStorage.getItem(SHIFT_SLACK_CLAIM_KEY);
+      var existing = raw ? JSON.parse(raw) : null;
+      if (existing && existing.shiftId === shiftId && existing.kind === kind && Date.now() - Number(existing.ts || 0) < SHIFT_SLACK_CLAIM_TTL_MS) {
+        return false;
+      }
+      localStorage.setItem(SHIFT_SLACK_CLAIM_KEY, JSON.stringify({
+        shiftId,
+        kind,
+        ts: Date.now()
+      }));
+      return true;
+    } catch (_) {
+      return true;
+    }
+  }
+  function releaseShiftSlackSendClaim() {
+    try {
+      localStorage.removeItem(SHIFT_SLACK_CLAIM_KEY);
+    } catch (_) {
+    }
+  }
   function loadSentShiftIds() {
     try {
       return JSON.parse(localStorage.getItem(SHIFT_NUDGE_SENT_KEY) || "{}");
@@ -21803,10 +21842,12 @@ This won't delete the actual file.`)) return;
     if (!active) return;
     var sent = loadSentShiftIds();
     if (sent[active.id]) return;
+    if (loadCtaSentIds()[active.id]) return;
     if (Date.now() - active.dueMs < delayMin * 6e4) return;
     var lastAttempt = nudgeLastAttemptAtByShiftId[active.id] || 0;
     if (Date.now() - lastAttempt < SHIFT_NUDGE_RETRY_MS) return;
     nudgeLastAttemptAtByShiftId[active.id] = Date.now();
+    if (!tryClaimShiftSlackSend(active.id, "nudge")) return;
     nudgeInFlight = true;
     try {
       var beforeSend = activeInvestigationShiftForNudge();
@@ -21816,12 +21857,13 @@ This won't delete the actual file.`)) return;
       if (afterSend && afterSend.id === active.id) markShiftNudgeSent(active.id);
     } catch (e) {
     } finally {
+      releaseShiftSlackSendClaim();
       nudgeInFlight = false;
     }
   }
   function loadCtaSentIds() {
     try {
-      return JSON.parse(localStorage.getItem(SHIFT_CTA_SENT_KEY) || "{}");
+      return JSON.parse(localStorage.getItem(SHIFT_END_CTA_SENT_KEY) || "{}");
     } catch (_) {
       return {};
     }
@@ -21831,7 +21873,7 @@ This won't delete the actual file.`)) return;
     var sent = loadCtaSentIds();
     sent[shiftId] = (/* @__PURE__ */ new Date()).toISOString();
     try {
-      localStorage.setItem(SHIFT_CTA_SENT_KEY, JSON.stringify(sent));
+      localStorage.setItem(SHIFT_END_CTA_SENT_KEY, JSON.stringify(sent));
     } catch (_) {
     }
   }
@@ -21874,6 +21916,10 @@ This won't delete the actual file.`)) return;
     if (Date.now() < active.dueMs) return;
     var sent = loadCtaSentIds();
     if (sent[active.id]) return;
+    var lastCtaAttempt = ctaLastAttemptAtByShiftId[active.id] || 0;
+    if (Date.now() - lastCtaAttempt < SHIFT_NUDGE_RETRY_MS) return;
+    ctaLastAttemptAtByShiftId[active.id] = Date.now();
+    if (!tryClaimShiftSlackSend(active.id, "cta")) return;
     ctaInFlight = true;
     try {
       var beforeSend = activeInvestigationShiftForNudge();
@@ -21882,6 +21928,7 @@ This won't delete the actual file.`)) return;
       if (((_a = activeInvestigationShiftForNudge()) == null ? void 0 : _a.id) === active.id) markCtaSent(active.id);
     } catch (_) {
     } finally {
+      releaseShiftSlackSendClaim();
       ctaInFlight = false;
     }
   }
