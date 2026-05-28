@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         QA Wolf Investigation Notes
 // @namespace    http://tampermonkey.net/
-// @version      1.479
+// @version      1.481
 // @description  Per-file investigation notes: quick links (new-tab opens, PoC textarea, client-wide notes), client/env chips, instant tooltips, run timing, shift sync, work mode, export, search. data-e2e investigation-* hooks.
 // @author       You
 // @match        https://app.qawolf.com/*
@@ -2389,7 +2389,7 @@
       } catch (e) {
       }
       try {
-        if ("1.479") return "1.479";
+        if ("1.481") return "1.481";
       } catch (e2) {
       }
       return "unknown";
@@ -8954,6 +8954,153 @@
       searchInput.focus();
     }, 0);
   }
+  function openMaintenanceReportDropdown(anchor, b, editKey, persist, redraw) {
+    document.querySelectorAll("[data-qaw-maint-report-drop]").forEach(function(el) {
+      el.remove();
+    });
+    var noteMeta = parseNoteKey(editKey);
+    var clientSlug = noteMeta ? noteMeta.client : "";
+    var urlClientSlug = function() {
+      var m = (window.location.pathname || "").match(/^\/([^/]+)\//);
+      return m && m[1] ? m[1] : "";
+    }();
+    var byClient = state.store.maintenanceDashboardByClient && typeof state.store.maintenanceDashboardByClient === "object" ? state.store.maintenanceDashboardByClient : {};
+    var clientRow = byClient[clientSlug] || byClient[urlClientSlug];
+    var knownReports = clientRow && Array.isArray(clientRow.entries) ? clientRow.entries : [];
+    function promptForReport() {
+      var url = window.prompt("Paste Maintenance Report URL:");
+      if (url) {
+        try {
+          triggerMaintenanceScrape(editKey, url, b.id, function() {
+            redraw({});
+          });
+        } catch (err) {
+          console.error("[qaw] triggerMaintenanceScrape failed", err);
+        }
+      }
+    }
+    if (!knownReports.length) {
+      promptForReport();
+      return;
+    }
+    var drop = document.createElement("div");
+    drop.setAttribute("data-qaw-maint-report-drop", "1");
+    drop.style.cssText = "position:fixed;background:#0f172a;border:1px solid #334155;border-radius:8px;min-width:260px;max-width:320px;z-index:2147483647;box-shadow:0 4px 20px rgba(0,0,0,0.7);font-family:monospace;overflow:hidden;";
+    function closeDropdown() {
+      drop.remove();
+      document.removeEventListener("mousedown", onOutside, true);
+      document.removeEventListener("keydown", onKey, true);
+    }
+    function onOutside(e) {
+      if (!drop.contains(e.target)) closeDropdown();
+    }
+    function onKey(e) {
+      if (e.key === "Escape") closeDropdown();
+    }
+    var searchWrap = document.createElement("div");
+    searchWrap.style.cssText = "padding:7px 9px;border-bottom:1px solid #1e293b;";
+    var searchInput = document.createElement("input");
+    searchInput.type = "search";
+    searchInput.placeholder = "Search maintenance\u2026";
+    searchInput.style.cssText = "width:100%;box-sizing:border-box;background:#020617;color:#f1f5f9;border:1px solid #475569;border-radius:5px;padding:4px 8px;font-family:monospace;font-size:11px;";
+    searchWrap.appendChild(searchInput);
+    drop.appendChild(searchWrap);
+    var list = document.createElement("div");
+    list.style.cssText = "max-height:220px;overflow-y:auto;padding:4px;display:flex;flex-direction:column;gap:2px;";
+    drop.appendChild(list);
+    var divider = document.createElement("div");
+    divider.style.cssText = "height:1px;background:#1e293b;margin:0 6px;";
+    drop.appendChild(divider);
+    var newReportBtn = document.createElement("button");
+    newReportBtn.type = "button";
+    newReportBtn.textContent = "+ Add new report (URL)\u2026";
+    newReportBtn.style.cssText = "display:block;width:100%;text-align:left;padding:7px 10px;border:none;background:transparent;color:#94a3b8;cursor:pointer;font-size:11px;font-family:monospace;";
+    newReportBtn.addEventListener("mouseenter", function() {
+      newReportBtn.style.background = "#1e293b";
+    });
+    newReportBtn.addEventListener("mouseleave", function() {
+      newReportBtn.style.background = "transparent";
+    });
+    newReportBtn.addEventListener("click", function() {
+      closeDropdown();
+      promptForReport();
+    });
+    drop.appendChild(newReportBtn);
+    function truncateTitle(t, max) {
+      if (!t) return "";
+      return t.length > max ? t.slice(0, max - 1) + "\u2026" : t;
+    }
+    function rebuildList() {
+      list.innerHTML = "";
+      var q = String(searchInput.value || "").trim().toLowerCase();
+      var filtered = q ? knownReports.filter(function(entry) {
+        var hay = (String(entry.number || entry.reportId || "") + " " + String(entry.title || "")).toLowerCase();
+        return hay.indexOf(q) !== -1;
+      }) : knownReports;
+      if (!filtered.length) {
+        var empty = document.createElement("div");
+        empty.style.cssText = "padding:8px 10px;color:#64748b;font-size:11px;";
+        empty.textContent = "No matching maintenance reports";
+        list.appendChild(empty);
+        return;
+      }
+      filtered.forEach(function(entry) {
+        var row2 = document.createElement("button");
+        row2.type = "button";
+        row2.style.cssText = "display:flex;align-items:baseline;gap:8px;width:100%;text-align:left;border:none;background:transparent;border-radius:5px;padding:5px 8px;cursor:pointer;";
+        row2.addEventListener("mouseenter", function() {
+          row2.style.background = "#1e293b";
+        });
+        row2.addEventListener("mouseleave", function() {
+          row2.style.background = "transparent";
+        });
+        var num = document.createElement("span");
+        num.style.cssText = "font-size:11px;font-weight:700;color:#67e8f9;flex-shrink:0;";
+        num.textContent = String(entry.number || (entry.reportId ? "#" + String(entry.reportId).slice(0, 6) : ""));
+        row2.appendChild(num);
+        var title = document.createElement("span");
+        title.style.cssText = "font-size:10px;color:#94a3b8;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;";
+        title.textContent = truncateTitle(String(entry.title || ""), 40);
+        row2.appendChild(title);
+        row2.addEventListener("click", function() {
+          closeDropdown();
+          var url = String(entry.reportUrl || "");
+          if (!url) return;
+          b.maintenanceReport = {
+            url,
+            number: String(entry.number || ""),
+            title: String(entry.title || "")
+          };
+          b.favorite = true;
+          var maintNote = state.store && state.store.notes ? state.store.notes[editKey] : null;
+          if (maintNote) autoSetStatusMaintenance(maintNote);
+          persist();
+          recordHistoryEvent(editKey, {
+            type: "maintenance_add",
+            bulletId: String(b.id || ""),
+            bulletText: String(b.text || "").slice(0, 80),
+            bugUrl: url,
+            bugId: entry.number || void 0,
+            bugTitle: entry.title || void 0
+          });
+          redraw({});
+          if (state.refreshPanelMaintenanceSummaryFn) state.refreshPanelMaintenanceSummaryFn();
+        });
+        list.appendChild(row2);
+      });
+    }
+    searchInput.addEventListener("input", rebuildList);
+    rebuildList();
+    document.body.appendChild(drop);
+    var rect = anchor.getBoundingClientRect();
+    drop.style.left = Math.min(rect.left, window.innerWidth - 330) + "px";
+    drop.style.top = rect.bottom + 4 + "px";
+    setTimeout(function() {
+      document.addEventListener("mousedown", onOutside, true);
+      document.addEventListener("keydown", onKey, true);
+      searchInput.focus();
+    }, 0);
+  }
   function openBugActionsDropdown(anchor, b, persist, redraw, editKey) {
     document.querySelectorAll("[data-qaw-bug-actions-drop]").forEach(function(el) {
       el.remove();
@@ -10808,16 +10955,7 @@
           addMaintBtn.style.cssText = "font-size:10px;color:#64748b;background:none;border:1px dashed #475569;border-radius:12px;cursor:pointer;padding:2px 8px;font-family:monospace;";
           addMaintBtn.addEventListener("click", function(e) {
             e.stopPropagation();
-            var url = window.prompt("Paste Maintenance Report URL:");
-            if (url) {
-              try {
-                triggerMaintenanceScrape(editKey, url, b.id, function() {
-                  redraw({});
-                });
-              } catch (err) {
-                console.error("[qaw] triggerMaintenanceScrape failed", err);
-              }
-            }
+            openMaintenanceReportDropdown(addMaintBtn, b, editKey, persist, redraw);
           });
           maintWrap.appendChild(addMaintBtn);
         }
@@ -12886,7 +13024,7 @@
   }
   function parserBadgeTone(label) {
     if (/^\[(strict|Matches)\]$/i.test(label)) return "amber";
-    if (/^\[(click|dblclick|hover|check|uncheck|textContent|waitFor|scrollIntoViewIfNeeded|goto|reload|waitForLoadState|toHaveText|toContainText|visible|load|domcontentloaded|networkidle|commit)\b/i.test(label)) return "blue";
+    if (/^\[(click|dblclick|hover|fill|check|uncheck|textContent|waitFor|scrollIntoViewIfNeeded|goto|reload|waitForLoadState|toHaveText|toContainText|visible|load|domcontentloaded|networkidle|commit)\b/i.test(label)) return "blue";
     return "slate";
   }
   function parserToneColors(tone) {
@@ -12900,7 +13038,7 @@
     while (idx < text.length) {
       var spacer = text.slice(idx).match(/^[ \t]*/);
       var afterSpace = idx + (spacer ? spacer[0].length : 0);
-      var m = text.slice(afterSpace).match(/^\[(click|dblclick|hover|check|uncheck|textContent|waitFor|scrollIntoViewIfNeeded|goto|reload|waitForLoadState|toHaveText|toContainText|visible|strict|Matches|load|domcontentloaded|networkidle|commit)(?:\s+[^\]\n]+)?\]/);
+      var m = text.slice(afterSpace).match(/^\[(click|dblclick|hover|fill|check|uncheck|textContent|waitFor|scrollIntoViewIfNeeded|goto|reload|waitForLoadState|toHaveText|toContainText|visible|strict|Matches|load|domcontentloaded|networkidle|commit)(?:\s+[^\]\n]+)?\]/);
       if (!m) break;
       labels.push(m[0]);
       idx = afterSpace + m[0].length;
@@ -13476,7 +13614,7 @@
       _slackPreviewCache = /* @__PURE__ */ new Map();
       _slackRenderGroups = {};
       INLINE_LINE_REF_RE = /\bline(\d{1,7})\b/gi;
-      PARSER_BADGE_RE = /\[(click|dblclick|hover|check|uncheck|textContent|waitFor|scrollIntoViewIfNeeded|goto|reload|waitForLoadState|toHaveText|toContainText|visible|strict|Matches|load|domcontentloaded|networkidle|commit)(?:\s+[^\]\n]+)?\]/g;
+      PARSER_BADGE_RE = /\[(click|dblclick|hover|fill|check|uncheck|textContent|waitFor|scrollIntoViewIfNeeded|goto|reload|waitForLoadState|toHaveText|toContainText|visible|strict|Matches|load|domcontentloaded|networkidle|commit)(?:\s+[^\]\n]+)?\]/g;
     }
   });
 
@@ -22705,7 +22843,7 @@ This won't delete the actual file.`)) return;
     } catch (_) {
     }
     try {
-      if ("1.479") return "1.479";
+      if ("1.481") return "1.481";
     } catch (_) {
     }
     return "unknown";
