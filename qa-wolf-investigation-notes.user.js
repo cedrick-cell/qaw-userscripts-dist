@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         QA Wolf Investigation Notes
 // @namespace    http://tampermonkey.net/
-// @version      1.489
+// @version      1.490
 // @description  Per-file investigation notes: quick links (new-tab opens, PoC textarea, client-wide notes), client/env chips, instant tooltips, run timing, shift sync, work mode, export, search. data-e2e investigation-* hooks.
 // @author       You
 // @match        https://app.qawolf.com/*
@@ -102,6 +102,8 @@
         pendingProtectedPanelRenderReason: "",
         /** In-memory LLM conversations keyed by bullet id. Lost on tab close. */
         llmConversations: /* @__PURE__ */ new Map(),
+        /** Slack message preview expansion state keyed by permalink. Preserved across panel re-renders. */
+        slackPreviewExpanded: {},
         /** Bullet ids with an LLM request currently in flight. */
         llmPendingBullets: /* @__PURE__ */ new Set(),
         /** Callbacks registered by a reopened modal to receive a background reply. */
@@ -1438,6 +1440,7 @@
       }
     }
     if (!state.panelEl) return;
+    updateShiftProgressChip();
     var el = state.panelEl.querySelector("[data-qaw-shift-remain]");
     if (!el) return;
     if (!act || !act.startIso) {
@@ -1469,6 +1472,32 @@
         el.textContent = remH2 > 0 ? remH2 + "h " + remM2 + "m left" : remM2 + "m left";
       }
     }
+  }
+  function shiftElapsedProgressPct(act, nowMs) {
+    if (!act || !act.startIso) return 0;
+    var startMs = new Date(act.startIso).getTime();
+    if (!Number.isFinite(startMs)) return 0;
+    var endMs;
+    if (act.plannedEndIso) {
+      endMs = new Date(act.plannedEndIso).getTime();
+    } else {
+      endMs = startMs + SHIFT_DURATION_MS;
+    }
+    if (!Number.isFinite(endMs) || endMs <= startMs) return 1;
+    var n = nowMs != null && Number.isFinite(nowMs) ? Number(nowMs) : Date.now();
+    return Math.max(0, Math.min(1, (n - startMs) / (endMs - startMs)));
+  }
+  function applyShiftProgressChipVisual(chip, act) {
+    var pctStr = Math.round(shiftElapsedProgressPct(act) * 100) + "%";
+    chip.style.background = "linear-gradient(to right,#14532d " + pctStr + ",#0a1f13 " + pctStr + ")";
+  }
+  function updateShiftProgressChip() {
+    if (!state.panelEl) return;
+    var chip = state.panelEl.querySelector("[data-qaw-head-ctx-chip]");
+    if (!chip) return;
+    var act = state.store && state.store.investigationShift;
+    if (!act || !act.id) return;
+    applyShiftProgressChipVisual(chip, act);
   }
   function flashNotesHint(msg, warn) {
     if (!state.panelEl) return;
@@ -2398,7 +2427,7 @@
       } catch (e) {
       }
       try {
-        if ("1.489") return "1.489";
+        if ("1.490") return "1.490";
       } catch (e2) {
       }
       return "unknown";
@@ -2713,10 +2742,7 @@
         var s2 = state.store.investigationShift;
         var active = !!(s2 && s2.id);
         if (active) {
-          var elapsed = s2.startIso ? Date.now() - new Date(s2.startIso).getTime() : 0;
-          var pct = Math.max(0, Math.min(1, 1 - elapsed / SHIFT_DURATION_MS_LOCAL));
-          var pctStr = Math.round(pct * 100) + "%";
-          ctxChip.style.background = "linear-gradient(to right,#14532d " + pctStr + ",#0a1f13 " + pctStr + ")";
+          applyShiftProgressChipVisual(ctxChip, s2);
           ctxChip.style.color = "#bbf7d0";
           ctxChip.style.border = "1px solid #22c55e";
           ctxChip.title = "Investigation shift active \u2014 click for shift options";
@@ -12928,9 +12954,13 @@
       renderSlackMrkdwnInto(refs.contentEl, meta.rawText);
       _slackRenderGroups = {};
       requestAnimationFrame(function() {
-        if (refs.contentEl.scrollHeight > refs.contentEl.clientHeight + 2) {
-          refs.fadeEl.style.display = "block";
+        var isExpanded = !!state.slackPreviewExpanded[refs.contentEl.getAttribute("data-qaw-slack-preview-url") || ""];
+        var overflowsCollapsed = refs.contentEl.scrollHeight > 86;
+        if (overflowsCollapsed || isExpanded) {
+          refs.contentEl.style.maxHeight = isExpanded ? "none" : "84px";
+          refs.fadeEl.style.display = isExpanded ? "none" : "block";
           refs.moreBtn.style.display = "inline-block";
+          refs.moreBtn.textContent = isExpanded ? "Show less" : "Show more";
         }
       });
     }
@@ -13002,6 +13032,7 @@
     var contentWrap = document.createElement("div");
     contentWrap.style.cssText = "position:relative;margin-top:6px;";
     var contentEl = document.createElement("div");
+    contentEl.setAttribute("data-qaw-slack-preview-url", url);
     contentEl.style.cssText = "font-size:12px;color:#cbd5e1;line-height:1.5;word-break:break-word;white-space:pre-wrap;max-height:84px;overflow:hidden;display:none;";
     var fadeEl = document.createElement("div");
     fadeEl.style.cssText = "position:absolute;bottom:0;left:0;right:0;height:28px;background:linear-gradient(transparent,#0f172a);pointer-events:none;display:none;";
@@ -13012,10 +13043,16 @@
     moreBtn.type = "button";
     moreBtn.textContent = "Show more";
     moreBtn.style.cssText = "display:none;margin-top:3px;background:none;border:none;color:#38bdf8;font-size:11px;cursor:pointer;padding:0;font-family:inherit;";
-    var _expanded = false;
+    var _expanded = !!state.slackPreviewExpanded[url];
+    if (_expanded) {
+      contentEl.style.maxHeight = "none";
+      fadeEl.style.display = "none";
+      moreBtn.textContent = "Show less";
+    }
     moreBtn.addEventListener("click", function(e) {
       e.stopPropagation();
       _expanded = !_expanded;
+      state.slackPreviewExpanded[url] = _expanded;
       contentEl.style.maxHeight = _expanded ? "none" : "84px";
       fadeEl.style.display = _expanded ? "none" : "block";
       moreBtn.textContent = _expanded ? "Show less" : "Show more";
@@ -23025,7 +23062,7 @@ This won't delete the actual file.`)) return;
     } catch (_) {
     }
     try {
-      if ("1.489") return "1.489";
+      if ("1.490") return "1.490";
     } catch (_) {
     }
     return "unknown";
