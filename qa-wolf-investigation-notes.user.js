@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         QA Wolf Investigation Notes
 // @namespace    http://tampermonkey.net/
-// @version      1.509
+// @version      1.513
 // @description  Per-file investigation notes: quick links (new-tab opens, PoC textarea, client-wide notes), client/env chips, instant tooltips, run timing, shift sync, work mode, export, search. data-e2e investigation-* hooks.
 // @author       You
 // @match        https://app.qawolf.com/*
@@ -115,7 +115,7 @@
   });
 
   // src/notes/01-constants.ts
-  var STORAGE_KEY, NOTE_LS_KEY_PREFIX, META_STORAGE_KEY, DEBOUNCE_MS, POLL_MS, SHIFT_BRIDGE_GM_KEY, TASK_WOLF_SHIFT_DOM_BRIDGE_DISABLED, SETTINGS_GM_KEY, TASK_WOLF_HQ_URL, RUN_CHIME_METRICS_KEY, OPEN_TABS_KEY, SHIFT_END_CTA_SENT_KEY, DAILY_CLIENT_WORK_KEY, CLIENT_SCOPE_ENV, CLIENT_NOTES_FILE, NOTES_SYNTAX_TOOLTIP, RUN_METRICS_TOOLTIP, RAW_LINE, RAW_CHAR_TO_TAG, RAW_TAG_TO_CHAR, FACET_OPTIONS, FACET_DEFINITIONS, TEAM_DEFAULT_SLACK_IMAGE_CHANNEL, TEAM_DEFAULT_CLOUDINARY_CLOUD_NAME, TEAM_DEFAULT_CLOUDINARY_UPLOAD_PRESET, Z_INV_DRAWER, Z_INV_MODAL, STATUS_OPTIONS, STATUS_CHIP_STYLE, WORK_MODE_OPTIONS;
+  var STORAGE_KEY, NOTE_LS_KEY_PREFIX, META_STORAGE_KEY, DEBOUNCE_MS, POLL_MS, SHIFT_BRIDGE_GM_KEY, TASK_WOLF_SHIFT_DOM_BRIDGE_DISABLED, SETTINGS_GM_KEY, TASK_WOLF_HQ_URL, RUN_CHIME_METRICS_KEY, OPEN_TABS_KEY, SHIFT_END_CTA_SENT_KEY, DAILY_CLIENT_WORK_KEY, CLIENT_SCOPE_ENV, CLIENT_NOTES_FILE, PENDING_HELPER_FN_KEY, NOTES_SYNTAX_TOOLTIP, RUN_METRICS_TOOLTIP, RAW_LINE, RAW_CHAR_TO_TAG, RAW_TAG_TO_CHAR, FACET_OPTIONS, FACET_DEFINITIONS, TEAM_DEFAULT_SLACK_IMAGE_CHANNEL, TEAM_DEFAULT_CLOUDINARY_CLOUD_NAME, TEAM_DEFAULT_CLOUDINARY_UPLOAD_PRESET, Z_INV_DRAWER, Z_INV_MODAL, STATUS_OPTIONS, STATUS_CHIP_STYLE, WORK_MODE_OPTIONS;
   var init_constants = __esm({
     "src/notes/01-constants.ts"() {
       "use strict";
@@ -134,6 +134,7 @@
       DAILY_CLIENT_WORK_KEY = "_qawDailyClientWork";
       CLIENT_SCOPE_ENV = "__client_scope__";
       CLIENT_NOTES_FILE = "__client_notes__";
+      PENDING_HELPER_FN_KEY = "_qawPendingHelperFn";
       NOTES_SYNTAX_TOOLTIP = "Line prefixes: /f flake, /l locator, /h helper, /u unknown, /n note, /b bug, /m maintenance, /- untagged. For /h use an optional name then line + body, e.g. /h waitFor 138 x2 flaky. Add a line number after the tag (e.g. /u 138) and optional x4 for occurrences. In card edit mode, add root-cause facets as #tokens (e.g. #env #auth #image). Notes are cards; tag chip opens a dropdown, context chip cycles, time chip stamps (Alt+click clear). Line chip jumps in Monaco (active tab only). In the body, type line295 (word line + digits) for extra line chips inline. Per-note edit saves on blur when valid.";
       RUN_METRICS_TOOLTIP = "From the \u201CQA Wolf \u2014 run finished chime\u201D userscript. While a run is in progress (Stop visible), shows live elapsed time. After it finishes, shows how long that run took. Requires both scripts on app.qawolf.com.";
       RAW_LINE = /^\/(f|l|h|u|n|b|m|-)\s*(.*)$/i;
@@ -1744,6 +1745,1356 @@
     }
   });
 
+  // src/notes/19-map-tab.ts
+  function isMonacoVirtualBasename(fileName) {
+    var base = String(fileName || "").replace(/\\/g, "/").split("/").pop() || String(fileName || "");
+    return /^\d+\.[a-z]+$/i.test(base);
+  }
+  function getCategory(fileName) {
+    var base = fileName.split("/").pop() || fileName;
+    if (/\.flow\.(js|ts)$/i.test(base)) return "flow";
+    if (base === "types.ts" || /\.types\.ts$/i.test(base)) return "types";
+    if (/\.json$/i.test(base)) return "config";
+    if (/\.(js|ts)$/i.test(base)) return "helper";
+    return "config";
+  }
+  function readFileIndex() {
+    try {
+      return JSON.parse(localStorage.getItem(FILE_INDEX_KEY) || "{}");
+    } catch (e) {
+      return {};
+    }
+  }
+  function readPathIndex() {
+    try {
+      return JSON.parse(localStorage.getItem(FILE_PATH_INDEX_KEY) || "{}");
+    } catch (e) {
+      return {};
+    }
+  }
+  function fileIndexKey(client, envId, fileName) {
+    var base = String(fileName || "").replace(/\\/g, "/").split("/").pop() || String(fileName || "");
+    return client + SEP + envId + SEP + base;
+  }
+  function hasAnyIndexedFilesForEnv(client, envId) {
+    var prefix = client + SEP + envId + SEP;
+    var idx = readFileIndex();
+    var pidx = readPathIndex();
+    var keys = Object.keys(idx).concat(Object.keys(pidx));
+    for (var i = 0; i < keys.length; i++) {
+      if (keys[i].indexOf(prefix) !== 0) continue;
+      var parts = keys[i].split(SEP);
+      if (parts.length === 3 && isMonacoVirtualBasename(parts[2])) continue;
+      return true;
+    }
+    return false;
+  }
+  function purgeVirtualIndexEntriesForEnv(client, envId) {
+    var prefix = client + SEP + envId + SEP;
+    var removed = 0;
+    var index = readFileIndex();
+    var pathIndex = readPathIndex();
+    var meta = readFileIndexMeta();
+    var cache = readExportsCache();
+    var indexDirty = false;
+    var pathDirty = false;
+    var metaDirty = false;
+    var cacheDirty = false;
+    function dropKey(key) {
+      if (index[key] != null) {
+        delete index[key];
+        indexDirty = true;
+      }
+      if (pathIndex[key] != null) {
+        delete pathIndex[key];
+        pathDirty = true;
+      }
+      if (meta[key] != null) {
+        delete meta[key];
+        metaDirty = true;
+      }
+      if (cache[key] != null) {
+        delete cache[key];
+        cacheDirty = true;
+      }
+      removed++;
+    }
+    var seen = {};
+    Object.keys(index).forEach(function(k) {
+      if (k.indexOf(prefix) !== 0) return;
+      var parts = k.split(SEP);
+      if (parts.length !== 3) return;
+      if (!isMonacoVirtualBasename(parts[2])) return;
+      if (seen[k]) return;
+      seen[k] = true;
+      dropKey(k);
+    });
+    Object.keys(pathIndex).forEach(function(k) {
+      if (k.indexOf(prefix) !== 0 || seen[k]) return;
+      var parts = k.split(SEP);
+      if (parts.length !== 3 || !isMonacoVirtualBasename(parts[2])) return;
+      seen[k] = true;
+      dropKey(k);
+    });
+    if (indexDirty) {
+      try {
+        localStorage.setItem(FILE_INDEX_KEY, JSON.stringify(index));
+      } catch (_e) {
+      }
+    }
+    if (pathDirty) writePathIndex(pathIndex);
+    if (metaDirty) writeFileIndexMeta(meta);
+    if (cacheDirty) {
+      try {
+        localStorage.setItem(EXPORTS_CACHE_KEY, JSON.stringify(cache));
+      } catch (_e2) {
+      }
+    }
+    return removed;
+  }
+  function resolveIndexedFilePath(client, envId, fileName) {
+    var key = fileIndexKey(client, envId, fileName);
+    var pidx = readPathIndex();
+    var idx = readFileIndex();
+    var raw = pidx[key] || idx[key] || "";
+    if (!raw) return null;
+    return normalisePath(raw) || String(raw || "").replace(/\\/g, "/");
+  }
+  function hasIndexedFileEntry(client, envId, fileName) {
+    return resolveIndexedFilePath(client, envId, fileName) != null;
+  }
+  function writePathIndex(idx) {
+    try {
+      localStorage.setItem(FILE_PATH_INDEX_KEY, JSON.stringify(idx));
+    } catch (e) {
+    }
+  }
+  function readFileIndexMeta() {
+    try {
+      return JSON.parse(localStorage.getItem(FILE_INDEX_META_KEY) || "{}");
+    } catch (e) {
+      return {};
+    }
+  }
+  function writeFileIndexMeta(meta) {
+    try {
+      localStorage.setItem(FILE_INDEX_META_KEY, JSON.stringify(meta));
+    } catch (e) {
+    }
+  }
+  function removeFileIndexEntry(client, envId, base) {
+    var key = client + SEP + envId + SEP + base;
+    try {
+      var idx = readFileIndex();
+      if (idx[key] != null) {
+        delete idx[key];
+        localStorage.setItem(FILE_INDEX_KEY, JSON.stringify(idx));
+      }
+    } catch (_e) {
+    }
+    try {
+      var pidx = readPathIndex();
+      if (pidx[key] != null) {
+        delete pidx[key];
+        writePathIndex(pidx);
+      }
+    } catch (_e2) {
+    }
+    try {
+      var cache = readExportsCache();
+      if (cache[key] != null) {
+        delete cache[key];
+        localStorage.setItem(EXPORTS_CACHE_KEY, JSON.stringify(cache));
+      }
+    } catch (_e3) {
+    }
+  }
+  function normalisePath(raw) {
+    if (!raw) return null;
+    var p = raw.replace(/^[a-z][a-z0-9+\-.]*:\/\/[^/]*/i, "");
+    p = p.replace(/^\/+/, "");
+    if (!p) return null;
+    var base = p.split("/").pop() || "";
+    if (!/\.[a-z]{1,6}$/i.test(base)) return null;
+    return p;
+  }
+  function buildMonacoPathMap() {
+    var result = /* @__PURE__ */ new Map();
+    try {
+      var m = _uw.monaco;
+      if (!m || !m.editor || typeof m.editor.getModels !== "function") return result;
+      var models = m.editor.getModels();
+      for (var i = 0; i < models.length; i++) {
+        var fullPath = normalisePath(String(models[i].uri));
+        if (!fullPath) continue;
+        var base = fullPath.split("/").pop() || "";
+        if (!base) continue;
+        if (isMonacoVirtualBasename(base)) continue;
+        if (/\.d\.ts$/i.test(base) && fullPath.indexOf("/") === -1) continue;
+        var existing = result.get(base);
+        if (!existing || fullPath.length > existing.length) result.set(base, fullPath);
+      }
+    } catch (e) {
+    }
+    return result;
+  }
+  function getMonacoModelContent(basename) {
+    var base = basename.split("/").pop() || basename;
+    try {
+      var m = _uw.monaco;
+      if (!m || !m.editor || typeof m.editor.getModels !== "function") return null;
+      var models = m.editor.getModels();
+      var best = null;
+      for (var i = 0; i < models.length; i++) {
+        var uriStr = String(models[i].uri);
+        var uriBase = uriStr.split("/").pop() || "";
+        if (uriBase === base) {
+          if (!best || uriStr.length > String(best.uri).length) best = models[i];
+        }
+      }
+      return best ? best.getValue() : null;
+    } catch (e) {
+      return null;
+    }
+  }
+  function readExportsCache() {
+    try {
+      return JSON.parse(localStorage.getItem(EXPORTS_CACHE_KEY) || "{}");
+    } catch (e) {
+      return {};
+    }
+  }
+  function saveExportsCache(key, entries) {
+    try {
+      var cache = readExportsCache();
+      cache[key] = entries;
+      localStorage.setItem(EXPORTS_CACHE_KEY, JSON.stringify(cache));
+    } catch (e) {
+    }
+  }
+  function parseExports(content) {
+    var lines = content.split("\n");
+    var results = [];
+    var seen = /* @__PURE__ */ new Set();
+    var fnPat = /^\s*export\s+(async\s+)?function\s+(\w+)/;
+    var constPat = /^\s*export\s+(const|let|var)\s+(\w+)/;
+    var namedOpenPat = /^\s*export\s+\{/;
+    var hasDefaultFactory = /\bexport\s+default\s+(async\s+)?function\b/.test(content);
+    var inReturnObject = false;
+    var returnObjectDepth = 0;
+    function addExportName(name, line2) {
+      var clean = String(name || "").trim();
+      if (!/^[A-Za-z_$][\w$]*$/.test(clean)) return;
+      if (seen.has(clean)) return;
+      seen.add(clean);
+      results.push({ name: clean, line: line2 });
+    }
+    function braceDelta(text) {
+      var delta = 0;
+      for (var j = 0; j < text.length; j++) {
+        var ch = text.charAt(j);
+        if (ch === "{") delta++;
+        else if (ch === "}") delta--;
+      }
+      return delta;
+    }
+    function collectReturnObjectKeys(text, line2) {
+      text.split(",").forEach(function(part) {
+        var trimmed = part.replace(/\/\/.*$/, "").trim();
+        if (!trimmed) return;
+        trimmed = trimmed.replace(/^\.\.\./, "").trim();
+        var keyMatch = trimmed.match(/^([A-Za-z_$][\w$]*)\s*(?::|$)/);
+        if (keyMatch && keyMatch[1]) addExportName(keyMatch[1], line2);
+      });
+    }
+    var inNamedBlock = false;
+    var namedBlockStart = -1;
+    var namedBlockBuf = "";
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i];
+      var mm;
+      if (/^\s*export\s+type\b/.test(line)) continue;
+      if (hasDefaultFactory) {
+        if (!inReturnObject) {
+          var returnObjectMatch = line.match(/^\s*return\s*\{/);
+          if (returnObjectMatch) {
+            var openIdx = line.indexOf("{");
+            inReturnObject = true;
+            returnObjectDepth = 1;
+            var afterOpen = line.slice(openIdx + 1);
+            var closeIdx0 = afterOpen.indexOf("}");
+            var keyText0 = closeIdx0 === -1 ? afterOpen : afterOpen.slice(0, closeIdx0);
+            collectReturnObjectKeys(keyText0, i + 1);
+            returnObjectDepth += braceDelta(afterOpen);
+            if (returnObjectDepth <= 0) inReturnObject = false;
+            continue;
+          }
+        } else {
+          var beforeClose = line;
+          var closeIdx = line.indexOf("}");
+          if (closeIdx !== -1) beforeClose = line.slice(0, closeIdx);
+          if (returnObjectDepth === 1) collectReturnObjectKeys(beforeClose, i + 1);
+          returnObjectDepth += braceDelta(line);
+          if (returnObjectDepth <= 0) inReturnObject = false;
+          continue;
+        }
+      }
+      if (inNamedBlock) {
+        namedBlockBuf += " " + line;
+        var closeIdx = namedBlockBuf.indexOf("}");
+        if (closeIdx !== -1) {
+          inNamedBlock = false;
+          var inner = namedBlockBuf.slice(namedBlockBuf.indexOf("{") + 1, closeIdx);
+          inner.split(",").forEach(function(part) {
+            var name = part.replace(/\s+as\s+\w+/, "").trim();
+            addExportName(name, namedBlockStart + 1);
+          });
+        }
+        continue;
+      }
+      mm = line.match(fnPat);
+      if (mm && mm[2]) {
+        addExportName(mm[2], i + 1);
+        continue;
+      }
+      mm = line.match(constPat);
+      if (mm && mm[2]) {
+        addExportName(mm[2], i + 1);
+        continue;
+      }
+      if (namedOpenPat.test(line)) {
+        if (line.indexOf("}") !== -1) {
+          var inner2 = line.slice(line.indexOf("{") + 1, line.indexOf("}"));
+          inner2.split(",").forEach(function(part) {
+            var name = part.replace(/\s+as\s+\w+/, "").trim();
+            addExportName(name, i + 1);
+          });
+        } else {
+          inNamedBlock = true;
+          namedBlockStart = i;
+          namedBlockBuf = line;
+        }
+      }
+    }
+    return results;
+  }
+  function fileUrl(client, envId, fullPath) {
+    return "https://app.qawolf.com/" + client + "/environments/" + envId + "/automate/ide?file=" + encodeURIComponent(fullPath);
+  }
+  function mountMapView(container) {
+    container.innerHTML = "";
+    var ctx = parseContext();
+    if (!ctx) {
+      var msg = document.createElement("div");
+      msg.style.cssText = "color:#64748b;font-size:11px;padding:4px 0;";
+      msg.textContent = "Navigate to a QA Wolf environment to use the Map tab.";
+      container.appendChild(msg);
+      return;
+    }
+    var client = ctx.client;
+    var envIds = (state.store.clientEnvOrder[client] || []).slice();
+    if (!envIds.length) envIds = [ctx.envId];
+    var selectedEnvId = envIds.indexOf(ctx.envId) !== -1 ? ctx.envId : envIds[0];
+    var headerRow = document.createElement("div");
+    headerRow.style.cssText = "display:flex;align-items:center;gap:6px;margin-bottom:10px;flex-shrink:0;";
+    var envSelect = document.createElement("select");
+    envSelect.style.cssText = "flex:1;background:#0f172a;color:#e2e8f0;border:1px solid #475569;border-radius:4px;padding:4px 8px;font-family:monospace;font-size:11px;min-width:0;";
+    envIds.forEach(function(eid) {
+      var opt = document.createElement("option");
+      opt.value = eid;
+      opt.textContent = getEnvDisplayName(eid);
+      if (eid === selectedEnvId) opt.selected = true;
+      envSelect.appendChild(opt);
+    });
+    var refreshBtn = document.createElement("button");
+    refreshBtn.type = "button";
+    refreshBtn.title = "Refresh";
+    refreshBtn.textContent = "\u21BA";
+    refreshBtn.style.cssText = "background:none;border:1px solid #334155;border-radius:4px;color:#64748b;cursor:pointer;font-size:13px;padding:2px 8px;line-height:1;flex-shrink:0;";
+    refreshBtn.addEventListener("mouseenter", function() {
+      refreshBtn.style.color = "#e2e8f0";
+    });
+    refreshBtn.addEventListener("mouseleave", function() {
+      refreshBtn.style.color = "#64748b";
+    });
+    if (envIds.length > 1) headerRow.appendChild(envSelect);
+    headerRow.appendChild(refreshBtn);
+    container.appendChild(headerRow);
+    var treeEl = document.createElement("div");
+    treeEl.style.cssText = "flex:1;overflow-y:auto;";
+    container.appendChild(treeEl);
+    var expandedFiles = /* @__PURE__ */ new Set();
+    function renderTree() {
+      treeEl.innerHTML = "";
+      purgeVirtualIndexEntriesForEnv(client, selectedEnvId);
+      var index = readFileIndex();
+      var files = [];
+      var monacoMap = buildMonacoPathMap();
+      var pathIndex = readPathIndex();
+      var pathIndexDirty = false;
+      var seenBases = /* @__PURE__ */ new Set();
+      Object.keys(index).forEach(function(k) {
+        var parts = k.split(SEP);
+        if (parts.length !== 3 || parts[0] !== client || parts[1] !== selectedEnvId) return;
+        var base = parts[2];
+        if (isMonacoVirtualBasename(base)) return;
+        var modelKey = index[k];
+        seenBases.add(base);
+        var monacoPath = monacoMap.get(base);
+        var storedPath = pathIndex[k];
+        var fullPath = monacoPath || normalisePath(storedPath || "") || normalisePath(modelKey || "") || base;
+        if (monacoPath && monacoPath !== storedPath) {
+          pathIndex[k] = monacoPath;
+          pathIndexDirty = true;
+        }
+        var dir = fullPath.indexOf("/") !== -1 ? fullPath.slice(0, fullPath.lastIndexOf("/")) : "";
+        files.push({ base, modelKey: fullPath, fullPath, dir, category: getCategory(base) });
+      });
+      monacoMap.forEach(function(fullPath, base) {
+        if (seenBases.has(base)) return;
+        var k = client + SEP + selectedEnvId + SEP + base;
+        index[k] = fullPath;
+        pathIndex[k] = fullPath;
+        pathIndexDirty = true;
+        seenBases.add(base);
+        var dir = fullPath.indexOf("/") !== -1 ? fullPath.slice(0, fullPath.lastIndexOf("/")) : "";
+        files.push({ base, modelKey: fullPath, fullPath, dir, category: getCategory(base) });
+      });
+      if (pathIndexDirty) {
+        try {
+          localStorage.setItem(FILE_INDEX_KEY, JSON.stringify(index));
+        } catch (e) {
+        }
+        writePathIndex(pathIndex);
+      }
+      var nowTs = Date.now();
+      var metaDirty = false;
+      var meta = readFileIndexMeta();
+      monacoMap.forEach(function(_fullPath, base) {
+        var k = client + SEP + selectedEnvId + SEP + base;
+        if (!meta[k]) meta[k] = {};
+        meta[k].lastSeen = nowTs;
+        metaDirty = true;
+      });
+      if (metaDirty) writeFileIndexMeta(meta);
+      if (!files.length) {
+        var empty = document.createElement("div");
+        empty.style.cssText = "color:#475569;font-size:11px;padding:4px 0;";
+        empty.textContent = "No files indexed yet \u2014 open files in the IDE to populate.";
+        treeEl.appendChild(empty);
+        return;
+      }
+      var helperFiles = files.filter(function(f) {
+        return f.category === "helper" && !isMonacoVirtualBasename(f.base);
+      }).sort(function(a, b) {
+        var da = a.dir, db = b.dir;
+        if (da !== db) return da.localeCompare(db);
+        return a.base.localeCompare(b.base);
+      });
+      if (!helperFiles.length) {
+        var empty2 = document.createElement("div");
+        empty2.style.cssText = "color:#475569;font-size:11px;padding:4px 0;";
+        empty2.textContent = "No helper files indexed yet. Open helper files in the IDE to populate.";
+        treeEl.appendChild(empty2);
+        return;
+      }
+      var OPEN_LINK_CSS = "flex-shrink:0;font-size:11px;color:#475569;text-decoration:none;padding:0 2px;line-height:1;";
+      var groups = [];
+      helperFiles.forEach(function(f) {
+        var last = groups[groups.length - 1];
+        if (last && last.dir === f.dir) {
+          last.files.push(f);
+        } else {
+          groups.push({ dir: f.dir, files: [f] });
+        }
+      });
+      groups.forEach(function(g) {
+        if (g.dir) {
+          var dirLbl = document.createElement("div");
+          var shortDir = g.dir.split("/").pop() || g.dir;
+          dirLbl.style.cssText = "font-size:10px;color:#475569;padding:4px 0 2px 2px;user-select:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
+          dirLbl.textContent = shortDir + "/";
+          if (g.dir !== shortDir) dirLbl.title = g.dir;
+          treeEl.appendChild(dirLbl);
+        }
+        g.files.forEach(function(f) {
+          var isHelper = f.category === "helper";
+          var expanded = expandedFiles.has(f.base);
+          var indent = g.dir ? "14px" : "2px";
+          var row2 = document.createElement("div");
+          row2.style.cssText = "display:flex;align-items:center;gap:5px;padding:2px 0;min-height:22px;padding-left:" + indent + ";";
+          var toggle = document.createElement("span");
+          toggle.style.cssText = "width:12px;flex-shrink:0;font-size:9px;color:#64748b;user-select:none;cursor:" + (isHelper ? "pointer" : "default") + ";";
+          toggle.textContent = isHelper ? expanded ? "\u25BC" : "\u25B6" : "\xB7";
+          var nameEl = document.createElement("span");
+          nameEl.style.cssText = "font-size:11px;color:#cbd5e1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:320px;" + (isHelper ? "cursor:pointer;" : "");
+          nameEl.textContent = f.base;
+          if (f.dir) nameEl.title = f.fullPath;
+          var openLink = document.createElement("button");
+          openLink.type = "button";
+          openLink.title = f.fullPath || f.base;
+          openLink.textContent = "\u2197";
+          openLink.style.cssText = OPEN_LINK_CSS + "background:none;border:none;cursor:pointer;";
+          openLink.addEventListener("mouseenter", function() {
+            openLink.style.color = "#94a3b8";
+          });
+          openLink.addEventListener("mouseleave", function() {
+            openLink.style.color = "#475569";
+          });
+          (function(stem) {
+            openLink.addEventListener("click", function(e) {
+              e.stopPropagation();
+              navigateToHelperFile(stem, "");
+            });
+          })(f.base.replace(/\.(js|ts)$/, ""));
+          var delBtn = document.createElement("button");
+          delBtn.type = "button";
+          delBtn.title = "Remove stale map entry";
+          delBtn.textContent = "\u2715";
+          delBtn.style.cssText = "flex-shrink:0;font-size:11px;color:#475569;background:none;border:none;cursor:pointer;padding:0 2px;line-height:1;";
+          delBtn.addEventListener("mouseenter", function() {
+            delBtn.style.color = "#fca5a5";
+          });
+          delBtn.addEventListener("mouseleave", function() {
+            delBtn.style.color = "#475569";
+          });
+          delBtn.addEventListener("click", function(e) {
+            e.stopPropagation();
+            var typed = window.prompt(
+              'Remove map entry for "' + f.base + '"?\nType the exact file name to confirm.',
+              ""
+            );
+            if (typed == null) return;
+            if (typed.trim() !== f.base) {
+              window.alert("File name did not match. Entry was not removed.");
+              return;
+            }
+            removeFileIndexEntry(client, selectedEnvId, f.base);
+            expandedFiles.delete(f.base);
+            renderTree();
+          });
+          var nameGroup = document.createElement("div");
+          nameGroup.style.cssText = "display:inline-flex;align-items:center;gap:3px;min-width:0;";
+          nameGroup.appendChild(nameEl);
+          nameGroup.appendChild(openLink);
+          nameGroup.appendChild(delBtn);
+          row2.appendChild(toggle);
+          row2.appendChild(nameGroup);
+          treeEl.appendChild(row2);
+          if (!isHelper) return;
+          var fnContainer = document.createElement("div");
+          fnContainer.style.cssText = "padding-left:" + (parseInt(indent, 10) + 17) + "px;display:" + (expanded ? "block" : "none") + ";";
+          treeEl.appendChild(fnContainer);
+          function populateFns() {
+            fnContainer.innerHTML = "";
+            var cacheKey = client + SEP + selectedEnvId + SEP + f.base;
+            var content = getMonacoModelContent(f.base);
+            var exports;
+            if (content) {
+              exports = parseExports(content);
+              if (exports.length) saveExportsCache(cacheKey, exports);
+            } else {
+              var cached = readExportsCache()[cacheKey];
+              exports = cached || [];
+            }
+            if (!exports.length) {
+              var hint = document.createElement("div");
+              hint.style.cssText = "font-size:10px;color:#475569;padding:2px 0 3px 4px;";
+              hint.textContent = content ? "No exports found" : "Open file once to cache exports";
+              fnContainer.appendChild(hint);
+              return;
+            }
+            exports.forEach(function(exp) {
+              var fnRow = document.createElement("div");
+              fnRow.style.cssText = "display:flex;align-items:center;gap:5px;padding:2px 4px;border-radius:3px;cursor:pointer;";
+              fnRow.addEventListener("mouseenter", function() {
+                fnRow.style.background = "#1e293b";
+              });
+              fnRow.addEventListener("mouseleave", function() {
+                fnRow.style.background = "";
+              });
+              var tag = document.createElement("span");
+              tag.style.cssText = "font-size:9px;color:#475569;flex-shrink:0;font-family:monospace;";
+              tag.textContent = "fn";
+              var fnName = document.createElement("span");
+              fnName.style.cssText = "font-size:11px;color:#7dd3fc;font-family:monospace;";
+              fnName.textContent = exp.name;
+              fnRow.appendChild(tag);
+              fnRow.appendChild(fnName);
+              (function(stem, fnN) {
+                fnRow.addEventListener("click", function() {
+                  navigateToHelperFile(stem, fnN);
+                });
+              })(f.base.replace(/\.(js|ts)$/, ""), exp.name);
+              fnContainer.appendChild(fnRow);
+            });
+          }
+          if (expanded) populateFns();
+          function doToggle() {
+            expanded = !expanded;
+            if (expanded) {
+              expandedFiles.add(f.base);
+              toggle.textContent = "\u25BC";
+              fnContainer.style.display = "block";
+              populateFns();
+            } else {
+              expandedFiles.delete(f.base);
+              toggle.textContent = "\u25B6";
+              fnContainer.style.display = "none";
+            }
+          }
+          toggle.addEventListener("click", doToggle);
+          nameEl.addEventListener("click", doToggle);
+        });
+      });
+    }
+    envSelect.addEventListener("change", function() {
+      selectedEnvId = envSelect.value;
+      expandedFiles.clear();
+      renderTree();
+    });
+    refreshBtn.addEventListener("click", renderTree);
+    renderTree();
+  }
+  var FILE_INDEX_KEY, FILE_PATH_INDEX_KEY, EXPORTS_CACHE_KEY, FILE_INDEX_META_KEY, FILE_INDEX_SEP, SEP, _uw;
+  var init_map_tab = __esm({
+    "src/notes/19-map-tab.ts"() {
+      "use strict";
+      init_state();
+      init_context();
+      FILE_INDEX_KEY = "_qawFileIndex";
+      FILE_PATH_INDEX_KEY = "_qawFilePathIndex";
+      EXPORTS_CACHE_KEY = "_qawExportsCache";
+      FILE_INDEX_META_KEY = "_qawFileIndexMeta";
+      FILE_INDEX_SEP = "";
+      SEP = FILE_INDEX_SEP;
+      _uw = typeof globalThis.unsafeWindow !== "undefined" ? globalThis.unsafeWindow : window;
+    }
+  });
+
+  // src/notes/22-slack-self-dm.ts
+  function gmRequestJson(url, token, body) {
+    return new Promise(function(resolve, reject) {
+      var gmReq = globalThis.GM_xmlhttpRequest;
+      if (typeof gmReq !== "function") {
+        reject(new Error("GM_xmlhttpRequest unavailable"));
+        return;
+      }
+      gmReq({
+        method: "POST",
+        url,
+        headers: {
+          Authorization: "Bearer " + token,
+          "Content-Type": "application/json;charset=UTF-8"
+        },
+        data: JSON.stringify(body || {}),
+        onload: function(res) {
+          try {
+            resolve(JSON.parse(res && res.responseText || "{}"));
+          } catch (_e) {
+            reject(new Error("Invalid JSON from Slack API"));
+          }
+        },
+        onerror: function() {
+          reject(new Error("Slack API request failed"));
+        },
+        ontimeout: function() {
+          reject(new Error("Slack API request timed out"));
+        }
+      });
+    });
+  }
+  function hardSliceLine(s, maxLen) {
+    var parts = [];
+    var i = 0;
+    while (i < s.length) {
+      parts.push(s.slice(i, i + maxLen));
+      i += maxLen;
+    }
+    return parts.length ? parts : [""];
+  }
+  function isLikelySlackImageUrl(u) {
+    if (!/^https:\/\//i.test(u)) return false;
+    if (/\.(png|jpg|jpeg|gif|webp|avif)(\?|#|$)/i.test(u)) return true;
+    if (/^https:\/\/[^/]+\.cloudinary\.com\//i.test(u)) return true;
+    if (/\/image\/upload\//i.test(u)) return true;
+    return false;
+  }
+  function splitExportIntoSequence(fullText) {
+    var lines = fullText.split("\n");
+    var out = [];
+    var buf = [];
+    function flushText() {
+      if (buf.length) {
+        out.push({ kind: "text", text: buf.join("\n") });
+        buf = [];
+      }
+    }
+    var onlyUrl = /^\s*(https?:\/\/\S+)\s*$/;
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i];
+      var m = onlyUrl.exec(line);
+      if (m && isLikelySlackImageUrl(m[1])) {
+        flushText();
+        out.push({ kind: "image", url: m[1] });
+      } else {
+        buf.push(line);
+      }
+    }
+    flushText();
+    return out;
+  }
+  function chunkTextForSlackDm(text, maxLen) {
+    if (maxLen < 500) maxLen = SLACK_CHUNK_SAFE;
+    if (text.length <= maxLen) return [text];
+    var lines = text.split("\n");
+    var chunks = [];
+    var cur = "";
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i];
+      var trial = cur ? cur + "\n" + line : line;
+      if (trial.length <= maxLen) {
+        cur = trial;
+        continue;
+      }
+      if (cur) {
+        chunks.push(cur);
+        cur = "";
+      }
+      if (line.length <= maxLen) {
+        cur = line;
+      } else {
+        var slices = hardSliceLine(line, maxLen);
+        for (var j = 0; j < slices.length - 1; j++) {
+          chunks.push(slices[j]);
+        }
+        cur = slices[slices.length - 1];
+      }
+    }
+    if (cur) chunks.push(cur);
+    return chunks.length ? chunks : [""];
+  }
+  async function slackOpenSelfDmChannel(token, memberUserId) {
+    var uid3 = String(memberUserId || "").trim();
+    if (!uid3) {
+      throw new Error("Missing your Slack member ID. Open Settings \u2192 SLACK and paste your U\u2026 ID.");
+    }
+    var tok = String(token || "").trim();
+    if (!tok) {
+      throw new Error("Missing Slack bot token (Settings \u2192 SLACK).");
+    }
+    var open = await gmRequestJson("https://slack.com/api/conversations.open", tok, { users: uid3 });
+    if (!open || !open.ok || !open.channel || !open.channel.id) {
+      var openErr = String(open && open.error ? open.error : "unknown");
+      if (openErr === "missing_scope") throw new Error("missing_scope (add im:write to the Slack app and reinstall)");
+      if (openErr === "cannot_dm_bot") throw new Error("cannot_dm_bot (member ID must be your user id, not the bot)");
+      if (openErr === "user_not_found") throw new Error("user_not_found \u2014 check Settings \u2192 SLACK \u2192 Your Slack member ID");
+      throw new Error("conversations.open failed: " + openErr);
+    }
+    return String(open.channel.id);
+  }
+  async function slackPostKitToSelfDm(token, memberUserId, notifyText, blocks, imageUrls) {
+    var channelId = await slackOpenSelfDmChannel(token, memberUserId);
+    var tok = String(token || "").trim();
+    var threadTs = null;
+    var textFallback = String(notifyText || "").trim() || "QA Wolf note";
+    var main = await gmRequestJson("https://slack.com/api/chat.postMessage", tok, {
+      channel: channelId,
+      text: textFallback,
+      blocks: blocks.length ? blocks : void 0,
+      unfurl_links: false,
+      unfurl_media: false
+    });
+    if (!main || !main.ok || !main.ts) {
+      throw new Error("chat.postMessage failed: " + String(main && main.error ? main.error : "unknown"));
+    }
+    threadTs = String(main.ts);
+    for (var ii = 0; ii < imageUrls.length; ii++) {
+      var u = String(imageUrls[ii] || "").trim();
+      if (!u) continue;
+      if (isLikelySlackImageUrl(u)) {
+        var imgRes = await gmRequestJson("https://slack.com/api/chat.postMessage", tok, {
+          channel: channelId,
+          thread_ts: threadTs,
+          text: "Image attachment",
+          blocks: [
+            {
+              type: "image",
+              image_url: u,
+              alt_text: "QA Wolf note image"
+            }
+          ],
+          unfurl_links: true,
+          unfurl_media: true
+        });
+        if (!imgRes || !imgRes.ok) {
+          throw new Error("chat.postMessage (image) failed: " + String(imgRes && imgRes.error ? imgRes.error : "unknown"));
+        }
+      } else {
+        var linkRes = await gmRequestJson("https://slack.com/api/chat.postMessage", tok, {
+          channel: channelId,
+          thread_ts: threadTs,
+          text: "Attachment: " + u,
+          unfurl_links: true,
+          unfurl_media: true
+        });
+        if (!linkRes || !linkRes.ok) {
+          throw new Error("chat.postMessage (attachment) failed: " + String(linkRes && linkRes.error ? linkRes.error : "unknown"));
+        }
+      }
+    }
+  }
+  async function slackPostTextToSelfDm(token, memberUserId, fullText) {
+    var channelId = await slackOpenSelfDmChannel(token, memberUserId);
+    var tok = String(token || "").trim();
+    var seq = splitExportIntoSequence(fullText);
+    var threadTs = null;
+    var globalChunkIdx = 0;
+    async function postTextChunks(text) {
+      var chunks = chunkTextForSlackDm(text, SLACK_CHUNK_SAFE);
+      for (var c = 0; c < chunks.length; c++) {
+        var payload = {
+          channel: channelId,
+          text: globalChunkIdx === 0 ? chunks[c] : "(continued)\n" + chunks[c],
+          unfurl_links: true,
+          unfurl_media: true
+        };
+        if (threadTs) payload.thread_ts = threadTs;
+        var res = await gmRequestJson("https://slack.com/api/chat.postMessage", tok, payload);
+        if (!res || !res.ok || !res.ts) {
+          throw new Error("chat.postMessage failed: " + String(res && res.error ? res.error : "unknown"));
+        }
+        if (!threadTs) threadTs = String(res.ts);
+        globalChunkIdx++;
+      }
+    }
+    for (var si = 0; si < seq.length; si++) {
+      var seg = seq[si];
+      if (seg.kind === "text") {
+        if (!seg.text.trim()) continue;
+        await postTextChunks(seg.text);
+        continue;
+      }
+      var imgPayload = {
+        channel: channelId,
+        text: "Image attachment",
+        blocks: [
+          {
+            type: "image",
+            image_url: seg.url,
+            alt_text: "QA Wolf note image"
+          }
+        ],
+        unfurl_links: true,
+        unfurl_media: true
+      };
+      if (threadTs) imgPayload.thread_ts = threadTs;
+      var imgRes = await gmRequestJson("https://slack.com/api/chat.postMessage", tok, imgPayload);
+      if (!imgRes || !imgRes.ok || !imgRes.ts) {
+        throw new Error("chat.postMessage (image) failed: " + String(imgRes && imgRes.error ? imgRes.error : "unknown"));
+      }
+      if (!threadTs) threadTs = String(imgRes.ts);
+    }
+  }
+  var SLACK_CHUNK_SAFE;
+  var init_slack_self_dm = __esm({
+    "src/notes/22-slack-self-dm.ts"() {
+      "use strict";
+      SLACK_CHUNK_SAFE = 3200;
+    }
+  });
+
+  // src/notes/44-client-note-refs.ts
+  function slugifyClientNoteTitle(title) {
+    return String(title || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64);
+  }
+  function normalizeClientNoteItem(raw, fallbackTitle) {
+    if (!raw || typeof raw !== "object") return null;
+    var title = String(raw.title || fallbackTitle || "").trim();
+    var body = String(raw.body || "").trim();
+    if (!title && !body) return null;
+    if (!title) title = "Client note";
+    var slug = String(raw.slug || "").trim().toLowerCase();
+    if (!slug) slug = slugifyClientNoteTitle(title) || "client-note";
+    var now = (/* @__PURE__ */ new Date()).toISOString();
+    var out = {
+      id: String(raw.id || uid()),
+      slug,
+      title,
+      body,
+      createdAt: String(raw.createdAt || now),
+      updatedAt: String(raw.updatedAt || raw.createdAt || now)
+    };
+    if (raw.favorite) out.favorite = true;
+    return out;
+  }
+  function normalizeClientNoteItems(note) {
+    if (!note || typeof note !== "object") return [];
+    var out = [];
+    var seen = {};
+    var hasStructuredClientNotes = Array.isArray(note.clientNotes);
+    var list = hasStructuredClientNotes ? note.clientNotes : [];
+    list.forEach(function(raw) {
+      var item = normalizeClientNoteItem(raw);
+      if (!item) return;
+      var baseSlug = item.slug;
+      if (seen[item.slug] != null) {
+        seen[item.slug] += 1;
+        item.slug = baseSlug + "-" + seen[baseSlug];
+      } else {
+        seen[item.slug] = 1;
+      }
+      out.push(item);
+    });
+    if (!hasStructuredClientNotes && !out.length) {
+      var legacy = String(note.clientPlain || "").trim();
+      if (!legacy && note.bullets && note.bullets[0]) legacy = String(note.bullets[0].text || "").trim();
+      if (legacy) {
+        var migrated = normalizeClientNoteItem({
+          title: "Migrated client note",
+          slug: "migrated-client-note",
+          body: legacy,
+          createdAt: note.updatedAt || (/* @__PURE__ */ new Date()).toISOString(),
+          updatedAt: note.updatedAt || (/* @__PURE__ */ new Date()).toISOString()
+        });
+        if (migrated) out.push(migrated);
+      }
+    }
+    note.clientNotes = out;
+    note.clientPlain = "";
+    return out;
+  }
+  function serializeClientNotesMarkdown(items) {
+    var out = [];
+    items.forEach(function(item, idx) {
+      if (idx > 0) out.push("");
+      out.push("## " + item.title + " [" + item.slug + "]");
+      if (item.body) out.push(item.body);
+    });
+    return out.join("\n");
+  }
+  function syncClientNotePlain(note) {
+    if (!note) return;
+    normalizeClientNoteItems(note);
+    note.clientPlain = "";
+    note.bullets = [];
+  }
+  function clientNotePlainForNote(note) {
+    if (!note || typeof note !== "object") return "";
+    return serializeClientNotesMarkdown(normalizeClientNoteItems(note));
+  }
+  function clientNoteItemsForClient(clientSlug) {
+    var key = clientScopedNotesKey(clientSlug);
+    var note = state.store && state.store.notes ? state.store.notes[key] : null;
+    if (!note) return [];
+    return normalizeClientNoteItems(note);
+  }
+  function clientNoteMapForClient(clientSlug) {
+    var map = {};
+    clientNoteItemsForClient(clientSlug).forEach(function(ref) {
+      map[ref.slug] = ref;
+    });
+    return map;
+  }
+  function referencedClientNotesForText(clientSlug, text) {
+    var map = clientNoteMapForClient(clientSlug);
+    var out = [];
+    var seen = {};
+    CLIENT_NOTE_REF_RE.lastIndex = 0;
+    var match;
+    while ((match = CLIENT_NOTE_REF_RE.exec(String(text || ""))) !== null) {
+      var slug = String(match[1] || "").toLowerCase();
+      if (seen[slug] || !map[slug]) continue;
+      seen[slug] = true;
+      out.push(map[slug]);
+    }
+    return out;
+  }
+  function referencedClientNotesForBullets(clientSlug, bullets) {
+    var out = [];
+    var seen = {};
+    (bullets || []).forEach(function(b) {
+      referencedClientNotesForText(clientSlug, String(b && b.text || "")).forEach(function(ref) {
+        if (seen[ref.slug]) return;
+        seen[ref.slug] = true;
+        out.push(ref);
+      });
+    });
+    return out;
+  }
+  function replaceClientNoteRefTokens(clientSlug, text) {
+    var map = clientNoteMapForClient(clientSlug);
+    return String(text || "").replace(CLIENT_NOTE_REF_RE, function(_m, slug) {
+      var ref = map[String(slug || "").toLowerCase()];
+      return ref ? "Client note: " + ref.title : "Client note: " + slug;
+    });
+  }
+  function clientNoteToken(slug) {
+    return "[[client-note:" + String(slug || "").trim().toLowerCase() + "]]";
+  }
+  function formatReferencedClientNotesMarkdown(refs) {
+    if (!refs.length) return [];
+    var lines = ["Referenced client notes", ""];
+    refs.forEach(function(ref) {
+      lines.push("### " + ref.title + " (`" + ref.slug + "`)");
+      lines.push(ref.body || "_(empty)_");
+      lines.push("");
+    });
+    return lines;
+  }
+  var CLIENT_NOTE_REF_RE;
+  var init_client_note_refs = __esm({
+    "src/notes/44-client-note-refs.ts"() {
+      "use strict";
+      init_state();
+      init_context();
+      init_store();
+      CLIENT_NOTE_REF_RE = /\[\[client-note:([a-z0-9-]+)\]\]/gi;
+    }
+  });
+
+  // src/notes/45-client-notes-view.ts
+  function buttonStyle(kind) {
+    if (kind === "primary") {
+      return "background:#0c4a6e;color:#bae6fd;border:1px solid #0ea5e9;border-radius:6px;padding:5px 10px;cursor:pointer;font:11px monospace;";
+    }
+    if (kind === "danger") {
+      return "background:#3f1d1d;color:#fecaca;border:1px solid #7f1d1d;border-radius:6px;padding:4px 9px;cursor:pointer;font:10px monospace;";
+    }
+    return "background:#0f172a;color:#94a3b8;border:1px solid #334155;border-radius:6px;padding:4px 9px;cursor:pointer;font:10px monospace;";
+  }
+  function persistClientNotes(editKey, note) {
+    if (state.store && state.store.notes) state.store.notes[editKey] = note;
+    syncClientNotePlain(note);
+    touchNote(editKey);
+    saveStoreImmediate();
+  }
+  function ensureClientNotesCss() {
+    if (document.getElementById("qaw-client-notes-view-css")) return;
+    var st = document.createElement("style");
+    st.id = "qaw-client-notes-view-css";
+    st.textContent = "[data-qaw-client-notes-view] .qaw-note-kebab{position:relative;flex-shrink:0;}[data-qaw-client-notes-view] .qaw-note-kebab-btn{background:none;border:none;color:#475569;font-size:15px;cursor:pointer;padding:0 3px;line-height:1;border-radius:3px;transition:color .1s;}[data-qaw-client-notes-view] .qaw-note-kebab-btn:hover{color:#94a3b8;background:#334155;}[data-qaw-client-notes-view] .qaw-note-kebab-menu{display:none;position:fixed;background:#0f172a;border:1px solid #475569;border-radius:6px;padding:3px;min-width:130px;z-index:2147483647;box-shadow:0 4px 12px rgba(0,0,0,0.5);}[data-qaw-client-notes-view] .qaw-note-kebab-menu.open{display:block;}[data-qaw-client-notes-view] .qaw-note-kebab-menu button{display:block;width:100%;text-align:left;padding:5px 9px;border:none;background:transparent;color:#e2e8f0;cursor:pointer;font-size:11px;font-family:monospace;border-radius:3px;}[data-qaw-client-notes-view] .qaw-note-kebab-menu button:hover{background:#1e293b;}";
+    document.head.appendChild(st);
+  }
+  function escapeSlack(s) {
+    return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+  async function sendClientNoteToSlack(item) {
+    var settings = loadSettings();
+    var token = String(settings.slackToken || "").trim();
+    var memberId = String(settings.slackMemberUserId || "").trim();
+    if (!token || !memberId) {
+      alert("Slack bot token and your Slack member ID are required. Open Settings -> SLACK.");
+      return;
+    }
+    var title = String(item.title || "Client note");
+    var body = String(item.body || "").trim() || "(empty)";
+    var blocks = [
+      { type: "section", text: { type: "mrkdwn", text: "*Client note* \xB7 `" + escapeSlack(item.slug) + "`" } },
+      { type: "section", text: { type: "mrkdwn", text: "*" + escapeSlack(title) + "*\n" + escapeSlack(body).slice(0, 2800) } }
+    ];
+    await slackPostKitToSelfDm(token, memberId, "QA Wolf client note \xB7 " + title, blocks, []);
+  }
+  function flushPendingClientNoteEdits(editKey) {
+    var fn = pendingClientNoteFlush[editKey];
+    if (fn) {
+      delete pendingClientNoteFlush[editKey];
+      fn();
+    }
+  }
+  function storeNoteForEditKey(editKey) {
+    return state.store && state.store.notes ? state.store.notes[editKey] : null;
+  }
+  function mountClientNotesView(container, editKey, note) {
+    ensureClientNotesCss();
+    flushPendingClientNoteEdits(editKey);
+    var needsLegacyPersist = !Array.isArray(note.clientNotes) && (!!String(note.clientPlain || "").trim() || !!(note.bullets && note.bullets[0] && String(note.bullets[0].text || "").trim()));
+    container.innerHTML = "";
+    container.style.cssText = "display:flex;flex-direction:column;gap:10px;";
+    var items = normalizeClientNoteItems(note);
+    if (needsLegacyPersist) persistClientNotes(editKey, note);
+    var header = document.createElement("div");
+    header.style.cssText = "display:flex;align-items:center;gap:8px;flex-wrap:wrap;";
+    var title = document.createElement("div");
+    title.style.cssText = "flex:1;min-width:180px;";
+    title.innerHTML = '<div style="font-size:12px;font-weight:700;color:#e2e8f0;">Client notes</div><div style="font-size:10px;color:#64748b;margin-top:2px;">Reusable client knowledge. Reference from file notes with <code>[[client-note:slug]]</code>.</div>';
+    header.appendChild(title);
+    var addBtn = document.createElement("button");
+    addBtn.type = "button";
+    addBtn.textContent = "+ Client note";
+    addBtn.style.cssText = buttonStyle("primary");
+    header.appendChild(addBtn);
+    container.appendChild(header);
+    var list = document.createElement("div");
+    list.style.cssText = "display:flex;flex-direction:column;gap:8px;";
+    container.appendChild(list);
+    var cardSavers = [];
+    var saveTimers = {};
+    function saveAndRender() {
+      flushPendingClientNoteEdits(editKey);
+      var latest = storeNoteForEditKey(editKey) || note;
+      mountClientNotesView(container, editKey, latest);
+    }
+    function renderItem(item) {
+      var slugManual = item.slug !== "new-client-note" && item.slug !== slugifyClientNoteTitle(item.title);
+      var card = document.createElement("div");
+      card.setAttribute("data-qaw-client-note-card", item.slug);
+      card.style.cssText = "border:1px solid #334155;border-radius:10px;background:#0f172a;padding:10px;display:flex;flex-direction:column;gap:8px;box-shadow:inset 0 1px 0 rgba(255,255,255,0.03);";
+      if (item.favorite) card.style.borderColor = "#ca8a04";
+      var top = document.createElement("div");
+      top.style.cssText = "display:flex;align-items:center;gap:8px;";
+      if (item.favorite) {
+        var fav = document.createElement("span");
+        fav.style.cssText = "display:inline-block;font-size:10px;padding:3px 6px;border-radius:999px;background:#713f12;color:#fef08a;border:1px solid #ca8a04;";
+        fav.textContent = "\u2605";
+        top.appendChild(fav);
+      }
+      var titleInput = document.createElement("input");
+      titleInput.value = item.title;
+      titleInput.placeholder = "Client note title";
+      titleInput.style.cssText = "flex:1;min-width:0;background:#020617;color:#f8fafc;border:1px solid #334155;border-radius:6px;padding:6px 8px;font:12px monospace;font-weight:700;";
+      top.appendChild(titleInput);
+      var kebab = document.createElement("div");
+      kebab.className = "qaw-note-kebab";
+      var kebabBtn = document.createElement("button");
+      kebabBtn.type = "button";
+      kebabBtn.className = "qaw-note-kebab-btn";
+      kebabBtn.title = "More actions";
+      kebabBtn.textContent = "\u22EE";
+      var kebabMenu = document.createElement("div");
+      kebabMenu.className = "qaw-note-kebab-menu";
+      var pinItem = document.createElement("button");
+      pinItem.type = "button";
+      pinItem.textContent = item.favorite ? "\u2605 Unpin" : "\u2606 Pin";
+      pinItem.addEventListener("click", function(e) {
+        e.stopPropagation();
+        item.favorite = !item.favorite;
+        kebabMenu.classList.remove("open");
+        saveAndRender();
+      });
+      kebabMenu.appendChild(pinItem);
+      var copyItem = document.createElement("button");
+      copyItem.type = "button";
+      copyItem.textContent = "Copy token";
+      copyItem.addEventListener("click", function(e) {
+        e.stopPropagation();
+        saveItem();
+        var token = clientNoteToken(item.slug);
+        kebabMenu.classList.remove("open");
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(token).catch(function() {
+            window.prompt("Copy client note token:", token);
+          });
+        } else {
+          window.prompt("Copy client note token:", token);
+        }
+      });
+      kebabMenu.appendChild(copyItem);
+      var slackRule = document.createElement("hr");
+      slackRule.style.cssText = "border:none;border-top:1px solid #1e293b;margin:2px 0;";
+      kebabMenu.appendChild(slackRule);
+      var slackItem = document.createElement("button");
+      slackItem.type = "button";
+      slackItem.textContent = "Send to Slack";
+      slackItem.addEventListener("click", function(e) {
+        e.stopPropagation();
+        saveItem();
+        kebabMenu.classList.remove("open");
+        sendClientNoteToSlack(item).catch(function(err) {
+          alert(err && err.message ? String(err.message) : String(err));
+        });
+      });
+      kebabMenu.appendChild(slackItem);
+      var delRule = document.createElement("hr");
+      delRule.style.cssText = "border:none;border-top:1px solid #1e293b;margin:2px 0;";
+      kebabMenu.appendChild(delRule);
+      var delItem = document.createElement("button");
+      delItem.type = "button";
+      delItem.style.color = "#fca5a5";
+      delItem.textContent = "Delete";
+      var confirming = false;
+      var confirmTimer = null;
+      delItem.addEventListener("click", function(e) {
+        e.stopPropagation();
+        if (!confirming) {
+          confirming = true;
+          delItem.textContent = "Sure? Click again";
+          delItem.style.color = "#f87171";
+          confirmTimer = setTimeout(function() {
+            confirming = false;
+            delItem.textContent = "Delete";
+            delItem.style.color = "#fca5a5";
+          }, 3e3);
+          return;
+        }
+        if (confirmTimer) clearTimeout(confirmTimer);
+        note.clientNotes = (note.clientNotes || []).filter(function(x) {
+          return x.id !== item.id;
+        });
+        kebabMenu.classList.remove("open");
+        saveAndRender();
+      });
+      kebabMenu.appendChild(delItem);
+      kebab.appendChild(kebabBtn);
+      kebab.appendChild(kebabMenu);
+      var kbDocCloser = null;
+      kebabBtn.addEventListener("click", function(e) {
+        e.stopPropagation();
+        var wasOpen = kebabMenu.classList.contains("open");
+        container.querySelectorAll(".qaw-note-kebab-menu.open").forEach(function(m) {
+          m.classList.remove("open");
+        });
+        if (kbDocCloser) {
+          document.removeEventListener("mousedown", kbDocCloser);
+          kbDocCloser = null;
+        }
+        if (!wasOpen) {
+          kebabMenu.classList.add("open");
+          var btnR = kebabBtn.getBoundingClientRect();
+          var mw = kebabMenu.offsetWidth || 130;
+          kebabMenu.style.top = btnR.bottom + 2 + "px";
+          kebabMenu.style.left = Math.max(8, Math.min(btnR.right - mw, window.innerWidth - mw - 8)) + "px";
+          kbDocCloser = function(ev) {
+            if (kebabMenu.contains(ev.target) || ev.target === kebabBtn) return;
+            kebabMenu.classList.remove("open");
+            document.removeEventListener("mousedown", kbDocCloser);
+            kbDocCloser = null;
+          };
+          setTimeout(function() {
+            document.addEventListener("mousedown", kbDocCloser);
+          }, 0);
+        }
+      });
+      top.appendChild(kebab);
+      card.appendChild(top);
+      var slugRow = document.createElement("div");
+      slugRow.style.cssText = "display:flex;align-items:center;gap:6px;flex-wrap:wrap;";
+      var slugLabel = document.createElement("span");
+      slugLabel.style.cssText = "font-size:10px;color:#64748b;";
+      slugLabel.textContent = "slug";
+      slugRow.appendChild(slugLabel);
+      var slugInput = document.createElement("input");
+      slugInput.value = item.slug;
+      slugInput.style.cssText = "width:180px;max-width:100%;background:#020617;color:#93c5fd;border:1px solid #1e3a5f;border-radius:999px;padding:4px 9px;font:10px monospace;";
+      slugRow.appendChild(slugInput);
+      card.appendChild(slugRow);
+      var body = document.createElement("textarea");
+      body.value = item.body;
+      body.placeholder = "What should future you remember for this client?";
+      body.rows = 5;
+      body.style.cssText = "width:100%;box-sizing:border-box;background:#020617;color:#cbd5e1;border:1px solid #334155;border-radius:8px;padding:8px;font:11px/1.5 monospace;resize:vertical;min-height:96px;";
+      card.appendChild(body);
+      function saveItem() {
+        var storeNote = storeNoteForEditKey(editKey) || note;
+        var list2 = storeNote.clientNotes || [];
+        var target = null;
+        for (var i = 0; i < list2.length; i++) {
+          if (list2[i] && list2[i].id === item.id) {
+            target = list2[i];
+            break;
+          }
+        }
+        if (!target) target = item;
+        var nextTitle = titleInput.value.trim() || "Client note";
+        var nextSlug = slugifyClientNoteTitle(slugInput.value || nextTitle) || target.slug || "client-note";
+        var nextBody = body.value.trim();
+        target.title = nextTitle;
+        target.slug = nextSlug;
+        target.body = nextBody;
+        target.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+        item.title = target.title;
+        item.slug = target.slug;
+        item.body = target.body;
+        slugInput.value = target.slug;
+        persistClientNotes(editKey, storeNote);
+      }
+      function scheduleSave2() {
+        var id = item.id;
+        if (saveTimers[id]) clearTimeout(saveTimers[id]);
+        saveTimers[id] = setTimeout(function() {
+          delete saveTimers[id];
+          saveItem();
+        }, 400);
+      }
+      cardSavers.push(saveItem);
+      titleInput.addEventListener("blur", saveItem);
+      slugInput.addEventListener("blur", saveItem);
+      body.addEventListener("blur", saveItem);
+      titleInput.addEventListener("input", function() {
+        if (!slugManual) slugInput.value = slugifyClientNoteTitle(titleInput.value);
+        scheduleSave2();
+      });
+      slugInput.addEventListener("input", function() {
+        slugManual = true;
+        scheduleSave2();
+      });
+      body.addEventListener("input", scheduleSave2);
+      list.appendChild(card);
+    }
+    if (!items.length) {
+      var empty = document.createElement("div");
+      empty.style.cssText = "border:1px dashed #334155;border-radius:10px;padding:18px 10px;text-align:center;color:#64748b;font-size:11px;";
+      empty.textContent = "No reusable client notes yet.";
+      list.appendChild(empty);
+    } else {
+      items.slice().sort(function(a, b) {
+        if (!!a.favorite !== !!b.favorite) return a.favorite ? -1 : 1;
+        return String(b.updatedAt || "").localeCompare(String(a.updatedAt || ""));
+      }).forEach(renderItem);
+    }
+    addBtn.addEventListener("click", function() {
+      var now = (/* @__PURE__ */ new Date()).toISOString();
+      if (!Array.isArray(note.clientNotes)) note.clientNotes = [];
+      note.clientNotes.unshift({
+        id: uid(),
+        title: "New client note",
+        slug: "new-client-note",
+        body: "",
+        createdAt: now,
+        updatedAt: now
+      });
+      saveAndRender();
+    });
+    var focusSlug = String(state.clientNoteFocusSlug || "");
+    if (focusSlug) {
+      state.clientNoteFocusSlug = "";
+      setTimeout(function() {
+        var target = null;
+        container.querySelectorAll("[data-qaw-client-note-card]").forEach(function(el) {
+          if (el.getAttribute("data-qaw-client-note-card") === focusSlug) target = el;
+        });
+        if (!target) return;
+        target.scrollIntoView({ block: "center", behavior: "smooth" });
+        var prev = target.style.boxShadow;
+        target.style.boxShadow = "0 0 0 2px #818cf8 inset";
+        setTimeout(function() {
+          target.style.boxShadow = prev;
+        }, 1600);
+      }, 0);
+    }
+    pendingClientNoteFlush[editKey] = function() {
+      Object.keys(saveTimers).forEach(function(id) {
+        clearTimeout(saveTimers[id]);
+        delete saveTimers[id];
+      });
+      cardSavers.forEach(function(fn) {
+        fn();
+      });
+    };
+  }
+  var pendingClientNoteFlush;
+  var init_client_notes_view = __esm({
+    "src/notes/45-client-notes-view.ts"() {
+      "use strict";
+      init_state();
+      init_store();
+      init_context();
+      init_slack_self_dm();
+      init_client_note_refs();
+      pendingClientNoteFlush = {};
+    }
+  });
+
   // src/notes/18-history.ts
   function _hLoad() {
     try {
@@ -2420,149 +3771,6 @@
     }
   });
 
-  // src/notes/10-panel-shell.ts
-  var panel_shell_exports = {};
-  __export(panel_shell_exports, {
-    applyDrawerWidth: () => applyDrawerWidth,
-    clampDrawerWidth: () => clampDrawerWidth,
-    mountNotesPanelShell: () => mountNotesPanelShell,
-    wireDrawerResize: () => wireDrawerResize
-  });
-  function clampDrawerWidth(px) {
-    var w = Math.round(px);
-    return Math.max(280, Math.min(w, window.innerWidth - 24));
-  }
-  function applyDrawerWidth(el) {
-    var w = clampDrawerWidth(state.store.drawerWidth != null ? state.store.drawerWidth : 540);
-    el.style.width = w + "px";
-    el.style.maxWidth = "none";
-  }
-  function wireDrawerResize(panel) {
-    var handle = document.createElement("div");
-    handle.setAttribute("data-e2e", "investigation-panel-resize-handle");
-    handle.title = "Drag to resize drawer";
-    handle.setAttribute("tabindex", "-1");
-    handle.style.cssText = "position:absolute;top:0;right:0;width:8px;height:100%;cursor:ew-resize;z-index:20;background:linear-gradient(90deg,transparent,rgba(148,163,184,0.12));";
-    handle.addEventListener("mousedown", function(e) {
-      if (e.button !== 0) return;
-      e.preventDefault();
-      e.stopPropagation();
-      var startX = e.clientX;
-      var startW = panel.getBoundingClientRect().width;
-      function onMove(ev) {
-        var nw = clampDrawerWidth(startW + (ev.clientX - startX));
-        panel.style.width = nw + "px";
-      }
-      function onUp() {
-        document.removeEventListener("mousemove", onMove);
-        document.removeEventListener("mouseup", onUp);
-        state.store.drawerWidth = clampDrawerWidth(panel.getBoundingClientRect().width);
-        saveStoreImmediate();
-      }
-      document.addEventListener("mousemove", onMove);
-      document.addEventListener("mouseup", onUp);
-    });
-    panel.appendChild(handle);
-  }
-  function mountNotesPanelShell() {
-    if (state.panelEl) return;
-    state.panelEl = document.createElement("div");
-    state.panelEl.setAttribute("data-qaw-overlay", "1");
-    state.panelEl.setAttribute("data-qaw-inv-notes", "1");
-    state.panelEl.setAttribute("data-e2e", "investigation-panel");
-    state.panelEl.style.cssText = [
-      "position:fixed",
-      "top:0",
-      "left:0",
-      "height:100vh",
-      "background:#1e293b",
-      "color:#f1f5f9",
-      "border-right:1px solid #475569",
-      "z-index:" + Z_INV_DRAWER,
-      "box-shadow:4px 0 16px rgba(0,0,0,0.35)",
-      "display:flex",
-      "flex-direction:column",
-      "font-family:monospace",
-      "font-size:12px",
-      "box-sizing:border-box"
-    ].join(";");
-    applyDrawerWidth(state.panelEl);
-    var head = document.createElement("div");
-    head.setAttribute("data-qaw-notes-head", "1");
-    head.setAttribute("data-e2e", "investigation-panel-header");
-    head.style.cssText = "padding:10px 14px;border-bottom:1px solid #334155;flex-shrink:0;";
-    var titleRow = document.createElement("div");
-    titleRow.style.cssText = "display:flex;align-items:center;justify-content:space-between;margin-bottom:2px;";
-    var ht = document.createElement("span");
-    ht.setAttribute("data-e2e", "investigation-panel-title");
-    ht.style.cssText = "font-weight:bold;display:flex;align-items:baseline;gap:6px;";
-    var htText = document.createElement("span");
-    htText.textContent = "GitWolf Notes";
-    function resolveNotesScriptVersion2() {
-      try {
-        var gm = typeof GM_info !== "undefined" && GM_info && GM_info.script && GM_info.script.version ? String(GM_info.script.version) : "";
-        if (gm && gm !== "0.0") return gm;
-      } catch (e) {
-      }
-      try {
-        if ("1.509") return "1.509";
-      } catch (e2) {
-      }
-      return "unknown";
-    }
-    var htVer = document.createElement("span");
-    htVer.textContent = "v" + resolveNotesScriptVersion2();
-    htVer.style.cssText = "font-size:10px;font-weight:400;color:#64748b;font-family:monospace;";
-    ht.appendChild(htText);
-    ht.appendChild(htVer);
-    var feed = document.createElement("span");
-    feed.setAttribute("data-qaw-save-feedback", "1");
-    feed.setAttribute("data-e2e", "investigation-save-indicator");
-    feed.style.cssText = "font-size:10px;color:#34d399;opacity:0;transition:opacity 0.25s ease;margin-left:6px;";
-    ht.appendChild(feed);
-    var iconBtnCss = "background:none;border:none;color:#64748b;cursor:pointer;font-size:15px;flex-shrink:0;line-height:1;padding:0 2px;transition:color 0.12s;";
-    var hx = document.createElement("button");
-    hx.setAttribute("data-e2e", "investigation-panel-close");
-    hx.textContent = "\u2715";
-    hx.style.cssText = iconBtnCss + "font-size:16px;";
-    hx.addEventListener("mouseover", function() {
-      hx.style.color = "#e2e8f0";
-    });
-    hx.addEventListener("mouseout", function() {
-      hx.style.color = "#64748b";
-    });
-    hx.addEventListener("click", closePanel);
-    titleRow.appendChild(ht);
-    titleRow.appendChild(hx);
-    head.appendChild(titleRow);
-    var body = document.createElement("div");
-    body.setAttribute("data-qaw-notes-body", "1");
-    body.setAttribute("data-e2e", "investigation-panel-body");
-    body.style.cssText = "flex:1;overflow-y:auto;padding:12px 14px;display:flex;flex-direction:column;min-height:0;";
-    var foot = document.createElement("div");
-    foot.setAttribute("data-qaw-drawer-footer", "1");
-    foot.setAttribute("data-e2e", "investigation-drawer-footer");
-    foot.style.cssText = "flex-shrink:0;border-top:1px solid #334155;padding:10px 14px;background:#0f172a;";
-    state.panelEl.appendChild(head);
-    state.panelEl.appendChild(body);
-    state.panelEl.appendChild(foot);
-    wireDrawerResize(state.panelEl);
-    document.body.appendChild(state.panelEl);
-    refreshInvestigationShiftBar();
-    refreshDrawerFooter();
-  }
-  var init_panel_shell = __esm({
-    "src/notes/10-panel-shell.ts"() {
-      "use strict";
-      init_state();
-      init_constants();
-      init_store();
-      init_shift();
-      init_quicklinks();
-      init_chime_ingest();
-    }
-  });
-
   // src/notes/06-head.ts
   function applyStatusChipVisual(chip, status) {
     var s = STATUS_CHIP_STYLE[status] || STATUS_CHIP_STYLE.empty;
@@ -3131,155 +4339,6 @@
       TAG_LABELS = { "null": "\u2014 none", flake: "Flake", locator: "Locator", helper: "Helper", unknown: "Unknown", note: "Note", bug: "Bug", maintenance: "Maintenance" };
       TAG_PILL_BG = { flake: "#9a3412", locator: "#1e40af", helper: "#166534", unknown: "#6b21a8", note: "#a16207", bug: "#991b1b", maintenance: "#164e63" };
       HEAD_NICKNAME_CHIP_STYLE = "display:inline-block;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:monospace;font-size:11px;font-weight:600;padding:5px 12px;border-radius:999px;cursor:pointer;border:1px solid #475569;background:#334155;color:#e2e8f0;vertical-align:middle;";
-    }
-  });
-
-  // src/notes/44-client-note-refs.ts
-  function slugifyClientNoteTitle(title) {
-    return String(title || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64);
-  }
-  function normalizeClientNoteItem(raw, fallbackTitle) {
-    if (!raw || typeof raw !== "object") return null;
-    var title = String(raw.title || fallbackTitle || "").trim();
-    var body = String(raw.body || "").trim();
-    if (!title && !body) return null;
-    if (!title) title = "Client note";
-    var slug = String(raw.slug || "").trim().toLowerCase();
-    if (!slug) slug = slugifyClientNoteTitle(title) || "client-note";
-    var now = (/* @__PURE__ */ new Date()).toISOString();
-    var out = {
-      id: String(raw.id || uid()),
-      slug,
-      title,
-      body,
-      createdAt: String(raw.createdAt || now),
-      updatedAt: String(raw.updatedAt || raw.createdAt || now)
-    };
-    if (raw.favorite) out.favorite = true;
-    return out;
-  }
-  function normalizeClientNoteItems(note) {
-    if (!note || typeof note !== "object") return [];
-    var out = [];
-    var seen = {};
-    var hasStructuredClientNotes = Array.isArray(note.clientNotes);
-    var list = hasStructuredClientNotes ? note.clientNotes : [];
-    list.forEach(function(raw) {
-      var item = normalizeClientNoteItem(raw);
-      if (!item) return;
-      var baseSlug = item.slug;
-      if (seen[item.slug] != null) {
-        seen[item.slug] += 1;
-        item.slug = baseSlug + "-" + seen[baseSlug];
-      } else {
-        seen[item.slug] = 1;
-      }
-      out.push(item);
-    });
-    if (!hasStructuredClientNotes && !out.length) {
-      var legacy = String(note.clientPlain || "").trim();
-      if (!legacy && note.bullets && note.bullets[0]) legacy = String(note.bullets[0].text || "").trim();
-      if (legacy) {
-        var migrated = normalizeClientNoteItem({
-          title: "Migrated client note",
-          slug: "migrated-client-note",
-          body: legacy,
-          createdAt: note.updatedAt || (/* @__PURE__ */ new Date()).toISOString(),
-          updatedAt: note.updatedAt || (/* @__PURE__ */ new Date()).toISOString()
-        });
-        if (migrated) out.push(migrated);
-      }
-    }
-    note.clientNotes = out;
-    note.clientPlain = "";
-    return out;
-  }
-  function serializeClientNotesMarkdown(items) {
-    var out = [];
-    items.forEach(function(item, idx) {
-      if (idx > 0) out.push("");
-      out.push("## " + item.title + " [" + item.slug + "]");
-      if (item.body) out.push(item.body);
-    });
-    return out.join("\n");
-  }
-  function syncClientNotePlain(note) {
-    if (!note) return;
-    normalizeClientNoteItems(note);
-    note.clientPlain = "";
-    note.bullets = [];
-  }
-  function clientNotePlainForNote(note) {
-    if (!note || typeof note !== "object") return "";
-    return serializeClientNotesMarkdown(normalizeClientNoteItems(note));
-  }
-  function clientNoteItemsForClient(clientSlug) {
-    var key = clientScopedNotesKey(clientSlug);
-    var note = state.store && state.store.notes ? state.store.notes[key] : null;
-    if (!note) return [];
-    return normalizeClientNoteItems(note);
-  }
-  function clientNoteMapForClient(clientSlug) {
-    var map = {};
-    clientNoteItemsForClient(clientSlug).forEach(function(ref) {
-      map[ref.slug] = ref;
-    });
-    return map;
-  }
-  function referencedClientNotesForText(clientSlug, text) {
-    var map = clientNoteMapForClient(clientSlug);
-    var out = [];
-    var seen = {};
-    CLIENT_NOTE_REF_RE.lastIndex = 0;
-    var match;
-    while ((match = CLIENT_NOTE_REF_RE.exec(String(text || ""))) !== null) {
-      var slug = String(match[1] || "").toLowerCase();
-      if (seen[slug] || !map[slug]) continue;
-      seen[slug] = true;
-      out.push(map[slug]);
-    }
-    return out;
-  }
-  function referencedClientNotesForBullets(clientSlug, bullets) {
-    var out = [];
-    var seen = {};
-    (bullets || []).forEach(function(b) {
-      referencedClientNotesForText(clientSlug, String(b && b.text || "")).forEach(function(ref) {
-        if (seen[ref.slug]) return;
-        seen[ref.slug] = true;
-        out.push(ref);
-      });
-    });
-    return out;
-  }
-  function replaceClientNoteRefTokens(clientSlug, text) {
-    var map = clientNoteMapForClient(clientSlug);
-    return String(text || "").replace(CLIENT_NOTE_REF_RE, function(_m, slug) {
-      var ref = map[String(slug || "").toLowerCase()];
-      return ref ? "Client note: " + ref.title : "Client note: " + slug;
-    });
-  }
-  function clientNoteToken(slug) {
-    return "[[client-note:" + String(slug || "").trim().toLowerCase() + "]]";
-  }
-  function formatReferencedClientNotesMarkdown(refs) {
-    if (!refs.length) return [];
-    var lines = ["Referenced client notes", ""];
-    refs.forEach(function(ref) {
-      lines.push("### " + ref.title + " (`" + ref.slug + "`)");
-      lines.push(ref.body || "_(empty)_");
-      lines.push("");
-    });
-    return lines;
-  }
-  var CLIENT_NOTE_REF_RE;
-  var init_client_note_refs = __esm({
-    "src/notes/44-client-note-refs.ts"() {
-      "use strict";
-      init_state();
-      init_context();
-      init_store();
-      CLIENT_NOTE_REF_RE = /\[\[client-note:([a-z0-9-]+)\]\]/gi;
     }
   });
 
@@ -4263,16 +5322,6 @@
       textarea.focus();
     }, 30);
   }
-  function getClientNotes(clientSlug) {
-    var notes = state.store && state.store.notes || {};
-    var results = [];
-    Object.keys(notes).forEach(function(ek) {
-      var meta = parseNoteKey(ek);
-      if (!meta || meta.client !== clientSlug) return;
-      results.push({ editKey: ek, fileName: meta.fileName, note: notes[ek] });
-    });
-    return results;
-  }
   function buildSameFixSweepPrompt(currentFileName) {
     var fileHint = currentFileName ? currentFileName : "[file or area you changed]";
     var lines = [];
@@ -4288,60 +5337,6 @@
     lines.push("2. Why it matches this pattern");
     lines.push("");
     lines.push("Wait for my confirmation before making any edits.");
-    return lines.join("\n");
-  }
-  function buildHelperAuditPrompt(editKey, helperBullet) {
-    var meta = parseNoteKey(editKey);
-    if (!meta) return "";
-    var helperName = String(helperBullet.helperName || helperBullet.text || "").trim();
-    var helperFile = String(helperBullet.helperFile || "").trim();
-    var bulletNote = String(helperBullet.text || "").trim();
-    var allFlows = getClientNotes(meta.client);
-    var hits = [];
-    allFlows.forEach(function(f) {
-      var bullets = Array.isArray(f.note && f.note.bullets) ? f.note.bullets : [];
-      bullets.forEach(function(b) {
-        if (!b || b.tag !== "helper") return;
-        var bName = String(b.helperName || b.text || "").toLowerCase();
-        var hn = helperName.toLowerCase();
-        if (bName.indexOf(hn) === -1 && hn.indexOf(bName) === -1) return;
-        hits.push({
-          fileName: f.fileName,
-          note: String(b.text || "").slice(0, 100),
-          lineNo: b.lineNo != null ? Number(b.lineNo) : null
-        });
-      });
-    });
-    var byFile = {};
-    hits.forEach(function(h) {
-      if (!byFile[h.fileName]) byFile[h.fileName] = h;
-    });
-    var flowLines = Object.keys(byFile).map(function(fn) {
-      var h = byFile[fn];
-      var loc = h.lineNo != null ? " (line " + h.lineNo + ")" : "";
-      var noteStr = h.note ? ' \u2014 "' + h.note + '"' : "";
-      return "- `" + fn + "`" + loc + noteStr;
-    });
-    var lines = [];
-    lines.push("Audit the helper **" + (helperName || "unknown") + "**" + (helperFile ? " in `" + helperFile + "`" : "") + ".");
-    if (bulletNote && bulletNote !== helperName) {
-      lines.push('Investigation note: "' + bulletNote + '"');
-    }
-    lines.push("");
-    if (flowLines.length > 0) {
-      lines.push("It's referenced in these flows (from my investigation notes):");
-      lines.push("");
-      flowLines.forEach(function(l) {
-        lines.push(l);
-      });
-      lines.push("");
-    }
-    lines.push("Please check for:");
-    lines.push("- Bugs or edge cases that would affect all flows using this helper");
-    lines.push("- Whether the helper is being called correctly in each flow");
-    lines.push("- Any assumptions in the helper that the caller might violate");
-    lines.push("");
-    lines.push("Report findings with file names and line numbers.");
     return lines.join("\n");
   }
   function getFlowOverviewFocusRange(lineNo) {
@@ -5407,238 +6402,6 @@
     }
   });
 
-  // src/notes/22-slack-self-dm.ts
-  function gmRequestJson(url, token, body) {
-    return new Promise(function(resolve, reject) {
-      var gmReq = globalThis.GM_xmlhttpRequest;
-      if (typeof gmReq !== "function") {
-        reject(new Error("GM_xmlhttpRequest unavailable"));
-        return;
-      }
-      gmReq({
-        method: "POST",
-        url,
-        headers: {
-          Authorization: "Bearer " + token,
-          "Content-Type": "application/json;charset=UTF-8"
-        },
-        data: JSON.stringify(body || {}),
-        onload: function(res) {
-          try {
-            resolve(JSON.parse(res && res.responseText || "{}"));
-          } catch (_e) {
-            reject(new Error("Invalid JSON from Slack API"));
-          }
-        },
-        onerror: function() {
-          reject(new Error("Slack API request failed"));
-        },
-        ontimeout: function() {
-          reject(new Error("Slack API request timed out"));
-        }
-      });
-    });
-  }
-  function hardSliceLine(s, maxLen) {
-    var parts = [];
-    var i = 0;
-    while (i < s.length) {
-      parts.push(s.slice(i, i + maxLen));
-      i += maxLen;
-    }
-    return parts.length ? parts : [""];
-  }
-  function isLikelySlackImageUrl(u) {
-    if (!/^https:\/\//i.test(u)) return false;
-    if (/\.(png|jpg|jpeg|gif|webp|avif)(\?|#|$)/i.test(u)) return true;
-    if (/^https:\/\/[^/]+\.cloudinary\.com\//i.test(u)) return true;
-    if (/\/image\/upload\//i.test(u)) return true;
-    return false;
-  }
-  function splitExportIntoSequence(fullText) {
-    var lines = fullText.split("\n");
-    var out = [];
-    var buf = [];
-    function flushText() {
-      if (buf.length) {
-        out.push({ kind: "text", text: buf.join("\n") });
-        buf = [];
-      }
-    }
-    var onlyUrl = /^\s*(https?:\/\/\S+)\s*$/;
-    for (var i = 0; i < lines.length; i++) {
-      var line = lines[i];
-      var m = onlyUrl.exec(line);
-      if (m && isLikelySlackImageUrl(m[1])) {
-        flushText();
-        out.push({ kind: "image", url: m[1] });
-      } else {
-        buf.push(line);
-      }
-    }
-    flushText();
-    return out;
-  }
-  function chunkTextForSlackDm(text, maxLen) {
-    if (maxLen < 500) maxLen = SLACK_CHUNK_SAFE;
-    if (text.length <= maxLen) return [text];
-    var lines = text.split("\n");
-    var chunks = [];
-    var cur = "";
-    for (var i = 0; i < lines.length; i++) {
-      var line = lines[i];
-      var trial = cur ? cur + "\n" + line : line;
-      if (trial.length <= maxLen) {
-        cur = trial;
-        continue;
-      }
-      if (cur) {
-        chunks.push(cur);
-        cur = "";
-      }
-      if (line.length <= maxLen) {
-        cur = line;
-      } else {
-        var slices = hardSliceLine(line, maxLen);
-        for (var j = 0; j < slices.length - 1; j++) {
-          chunks.push(slices[j]);
-        }
-        cur = slices[slices.length - 1];
-      }
-    }
-    if (cur) chunks.push(cur);
-    return chunks.length ? chunks : [""];
-  }
-  async function slackOpenSelfDmChannel(token, memberUserId) {
-    var uid3 = String(memberUserId || "").trim();
-    if (!uid3) {
-      throw new Error("Missing your Slack member ID. Open Settings \u2192 SLACK and paste your U\u2026 ID.");
-    }
-    var tok = String(token || "").trim();
-    if (!tok) {
-      throw new Error("Missing Slack bot token (Settings \u2192 SLACK).");
-    }
-    var open = await gmRequestJson("https://slack.com/api/conversations.open", tok, { users: uid3 });
-    if (!open || !open.ok || !open.channel || !open.channel.id) {
-      var openErr = String(open && open.error ? open.error : "unknown");
-      if (openErr === "missing_scope") throw new Error("missing_scope (add im:write to the Slack app and reinstall)");
-      if (openErr === "cannot_dm_bot") throw new Error("cannot_dm_bot (member ID must be your user id, not the bot)");
-      if (openErr === "user_not_found") throw new Error("user_not_found \u2014 check Settings \u2192 SLACK \u2192 Your Slack member ID");
-      throw new Error("conversations.open failed: " + openErr);
-    }
-    return String(open.channel.id);
-  }
-  async function slackPostKitToSelfDm(token, memberUserId, notifyText, blocks, imageUrls) {
-    var channelId = await slackOpenSelfDmChannel(token, memberUserId);
-    var tok = String(token || "").trim();
-    var threadTs = null;
-    var textFallback = String(notifyText || "").trim() || "QA Wolf note";
-    var main = await gmRequestJson("https://slack.com/api/chat.postMessage", tok, {
-      channel: channelId,
-      text: textFallback,
-      blocks: blocks.length ? blocks : void 0,
-      unfurl_links: false,
-      unfurl_media: false
-    });
-    if (!main || !main.ok || !main.ts) {
-      throw new Error("chat.postMessage failed: " + String(main && main.error ? main.error : "unknown"));
-    }
-    threadTs = String(main.ts);
-    for (var ii = 0; ii < imageUrls.length; ii++) {
-      var u = String(imageUrls[ii] || "").trim();
-      if (!u) continue;
-      if (isLikelySlackImageUrl(u)) {
-        var imgRes = await gmRequestJson("https://slack.com/api/chat.postMessage", tok, {
-          channel: channelId,
-          thread_ts: threadTs,
-          text: "Image attachment",
-          blocks: [
-            {
-              type: "image",
-              image_url: u,
-              alt_text: "QA Wolf note image"
-            }
-          ],
-          unfurl_links: true,
-          unfurl_media: true
-        });
-        if (!imgRes || !imgRes.ok) {
-          throw new Error("chat.postMessage (image) failed: " + String(imgRes && imgRes.error ? imgRes.error : "unknown"));
-        }
-      } else {
-        var linkRes = await gmRequestJson("https://slack.com/api/chat.postMessage", tok, {
-          channel: channelId,
-          thread_ts: threadTs,
-          text: "Attachment: " + u,
-          unfurl_links: true,
-          unfurl_media: true
-        });
-        if (!linkRes || !linkRes.ok) {
-          throw new Error("chat.postMessage (attachment) failed: " + String(linkRes && linkRes.error ? linkRes.error : "unknown"));
-        }
-      }
-    }
-  }
-  async function slackPostTextToSelfDm(token, memberUserId, fullText) {
-    var channelId = await slackOpenSelfDmChannel(token, memberUserId);
-    var tok = String(token || "").trim();
-    var seq = splitExportIntoSequence(fullText);
-    var threadTs = null;
-    var globalChunkIdx = 0;
-    async function postTextChunks(text) {
-      var chunks = chunkTextForSlackDm(text, SLACK_CHUNK_SAFE);
-      for (var c = 0; c < chunks.length; c++) {
-        var payload = {
-          channel: channelId,
-          text: globalChunkIdx === 0 ? chunks[c] : "(continued)\n" + chunks[c],
-          unfurl_links: true,
-          unfurl_media: true
-        };
-        if (threadTs) payload.thread_ts = threadTs;
-        var res = await gmRequestJson("https://slack.com/api/chat.postMessage", tok, payload);
-        if (!res || !res.ok || !res.ts) {
-          throw new Error("chat.postMessage failed: " + String(res && res.error ? res.error : "unknown"));
-        }
-        if (!threadTs) threadTs = String(res.ts);
-        globalChunkIdx++;
-      }
-    }
-    for (var si = 0; si < seq.length; si++) {
-      var seg = seq[si];
-      if (seg.kind === "text") {
-        if (!seg.text.trim()) continue;
-        await postTextChunks(seg.text);
-        continue;
-      }
-      var imgPayload = {
-        channel: channelId,
-        text: "Image attachment",
-        blocks: [
-          {
-            type: "image",
-            image_url: seg.url,
-            alt_text: "QA Wolf note image"
-          }
-        ],
-        unfurl_links: true,
-        unfurl_media: true
-      };
-      if (threadTs) imgPayload.thread_ts = threadTs;
-      var imgRes = await gmRequestJson("https://slack.com/api/chat.postMessage", tok, imgPayload);
-      if (!imgRes || !imgRes.ok || !imgRes.ts) {
-        throw new Error("chat.postMessage (image) failed: " + String(imgRes && imgRes.error ? imgRes.error : "unknown"));
-      }
-      if (!threadTs) threadTs = String(imgRes.ts);
-    }
-  }
-  var SLACK_CHUNK_SAFE;
-  var init_slack_self_dm = __esm({
-    "src/notes/22-slack-self-dm.ts"() {
-      "use strict";
-      SLACK_CHUNK_SAFE = 3200;
-    }
-  });
-
   // src/notes/23-maintenance-logic.ts
   function parseMaintenanceReportId(url) {
     var m = String(url || "").match(/\/maintenance-reports\/([0-9a-f-]{36})/i);
@@ -5758,588 +6521,6 @@
       init_history();
       init_head();
       MAINTENANCE_SCRAPE_LS_KEY = "_qawMaintenanceScrapeResult";
-    }
-  });
-
-  // src/notes/19-map-tab.ts
-  function isMonacoVirtualBasename(fileName) {
-    var base = String(fileName || "").replace(/\\/g, "/").split("/").pop() || String(fileName || "");
-    return /^\d+\.[a-z]+$/i.test(base);
-  }
-  function getCategory(fileName) {
-    var base = fileName.split("/").pop() || fileName;
-    if (/\.flow\.(js|ts)$/i.test(base)) return "flow";
-    if (base === "types.ts" || /\.types\.ts$/i.test(base)) return "types";
-    if (/\.json$/i.test(base)) return "config";
-    if (/\.(js|ts)$/i.test(base)) return "helper";
-    return "config";
-  }
-  function readFileIndex() {
-    try {
-      return JSON.parse(localStorage.getItem(FILE_INDEX_KEY) || "{}");
-    } catch (e) {
-      return {};
-    }
-  }
-  function readPathIndex() {
-    try {
-      return JSON.parse(localStorage.getItem(FILE_PATH_INDEX_KEY) || "{}");
-    } catch (e) {
-      return {};
-    }
-  }
-  function fileIndexKey(client, envId, fileName) {
-    var base = String(fileName || "").replace(/\\/g, "/").split("/").pop() || String(fileName || "");
-    return client + SEP + envId + SEP + base;
-  }
-  function hasAnyIndexedFilesForEnv(client, envId) {
-    var prefix = client + SEP + envId + SEP;
-    var idx = readFileIndex();
-    var pidx = readPathIndex();
-    var keys = Object.keys(idx).concat(Object.keys(pidx));
-    for (var i = 0; i < keys.length; i++) {
-      if (keys[i].indexOf(prefix) !== 0) continue;
-      var parts = keys[i].split(SEP);
-      if (parts.length === 3 && isMonacoVirtualBasename(parts[2])) continue;
-      return true;
-    }
-    return false;
-  }
-  function purgeVirtualIndexEntriesForEnv(client, envId) {
-    var prefix = client + SEP + envId + SEP;
-    var removed = 0;
-    var index = readFileIndex();
-    var pathIndex = readPathIndex();
-    var meta = readFileIndexMeta();
-    var cache = readExportsCache();
-    var indexDirty = false;
-    var pathDirty = false;
-    var metaDirty = false;
-    var cacheDirty = false;
-    function dropKey(key) {
-      if (index[key] != null) {
-        delete index[key];
-        indexDirty = true;
-      }
-      if (pathIndex[key] != null) {
-        delete pathIndex[key];
-        pathDirty = true;
-      }
-      if (meta[key] != null) {
-        delete meta[key];
-        metaDirty = true;
-      }
-      if (cache[key] != null) {
-        delete cache[key];
-        cacheDirty = true;
-      }
-      removed++;
-    }
-    var seen = {};
-    Object.keys(index).forEach(function(k) {
-      if (k.indexOf(prefix) !== 0) return;
-      var parts = k.split(SEP);
-      if (parts.length !== 3) return;
-      if (!isMonacoVirtualBasename(parts[2])) return;
-      if (seen[k]) return;
-      seen[k] = true;
-      dropKey(k);
-    });
-    Object.keys(pathIndex).forEach(function(k) {
-      if (k.indexOf(prefix) !== 0 || seen[k]) return;
-      var parts = k.split(SEP);
-      if (parts.length !== 3 || !isMonacoVirtualBasename(parts[2])) return;
-      seen[k] = true;
-      dropKey(k);
-    });
-    if (indexDirty) {
-      try {
-        localStorage.setItem(FILE_INDEX_KEY, JSON.stringify(index));
-      } catch (_e) {
-      }
-    }
-    if (pathDirty) writePathIndex(pathIndex);
-    if (metaDirty) writeFileIndexMeta(meta);
-    if (cacheDirty) {
-      try {
-        localStorage.setItem(EXPORTS_CACHE_KEY, JSON.stringify(cache));
-      } catch (_e2) {
-      }
-    }
-    return removed;
-  }
-  function resolveIndexedFilePath(client, envId, fileName) {
-    var key = fileIndexKey(client, envId, fileName);
-    var pidx = readPathIndex();
-    var idx = readFileIndex();
-    var raw = pidx[key] || idx[key] || "";
-    if (!raw) return null;
-    return normalisePath(raw) || String(raw || "").replace(/\\/g, "/");
-  }
-  function hasIndexedFileEntry(client, envId, fileName) {
-    return resolveIndexedFilePath(client, envId, fileName) != null;
-  }
-  function writePathIndex(idx) {
-    try {
-      localStorage.setItem(FILE_PATH_INDEX_KEY, JSON.stringify(idx));
-    } catch (e) {
-    }
-  }
-  function readFileIndexMeta() {
-    try {
-      return JSON.parse(localStorage.getItem(FILE_INDEX_META_KEY) || "{}");
-    } catch (e) {
-      return {};
-    }
-  }
-  function writeFileIndexMeta(meta) {
-    try {
-      localStorage.setItem(FILE_INDEX_META_KEY, JSON.stringify(meta));
-    } catch (e) {
-    }
-  }
-  function removeFileIndexEntry(client, envId, base) {
-    var key = client + SEP + envId + SEP + base;
-    try {
-      var idx = readFileIndex();
-      if (idx[key] != null) {
-        delete idx[key];
-        localStorage.setItem(FILE_INDEX_KEY, JSON.stringify(idx));
-      }
-    } catch (_e) {
-    }
-    try {
-      var pidx = readPathIndex();
-      if (pidx[key] != null) {
-        delete pidx[key];
-        writePathIndex(pidx);
-      }
-    } catch (_e2) {
-    }
-    try {
-      var cache = readExportsCache();
-      if (cache[key] != null) {
-        delete cache[key];
-        localStorage.setItem(EXPORTS_CACHE_KEY, JSON.stringify(cache));
-      }
-    } catch (_e3) {
-    }
-  }
-  function normalisePath(raw) {
-    if (!raw) return null;
-    var p = raw.replace(/^[a-z][a-z0-9+\-.]*:\/\/[^/]*/i, "");
-    p = p.replace(/^\/+/, "");
-    if (!p) return null;
-    var base = p.split("/").pop() || "";
-    if (!/\.[a-z]{1,6}$/i.test(base)) return null;
-    return p;
-  }
-  function buildMonacoPathMap() {
-    var result = /* @__PURE__ */ new Map();
-    try {
-      var m = _uw.monaco;
-      if (!m || !m.editor || typeof m.editor.getModels !== "function") return result;
-      var models = m.editor.getModels();
-      for (var i = 0; i < models.length; i++) {
-        var fullPath = normalisePath(String(models[i].uri));
-        if (!fullPath) continue;
-        var base = fullPath.split("/").pop() || "";
-        if (!base) continue;
-        if (isMonacoVirtualBasename(base)) continue;
-        if (/\.d\.ts$/i.test(base) && fullPath.indexOf("/") === -1) continue;
-        var existing = result.get(base);
-        if (!existing || fullPath.length > existing.length) result.set(base, fullPath);
-      }
-    } catch (e) {
-    }
-    return result;
-  }
-  function getMonacoModelContent(basename) {
-    var base = basename.split("/").pop() || basename;
-    try {
-      var m = _uw.monaco;
-      if (!m || !m.editor || typeof m.editor.getModels !== "function") return null;
-      var models = m.editor.getModels();
-      var best = null;
-      for (var i = 0; i < models.length; i++) {
-        var uriStr = String(models[i].uri);
-        var uriBase = uriStr.split("/").pop() || "";
-        if (uriBase === base) {
-          if (!best || uriStr.length > String(best.uri).length) best = models[i];
-        }
-      }
-      return best ? best.getValue() : null;
-    } catch (e) {
-      return null;
-    }
-  }
-  function readExportsCache() {
-    try {
-      return JSON.parse(localStorage.getItem(EXPORTS_CACHE_KEY) || "{}");
-    } catch (e) {
-      return {};
-    }
-  }
-  function saveExportsCache(key, entries) {
-    try {
-      var cache = readExportsCache();
-      cache[key] = entries;
-      localStorage.setItem(EXPORTS_CACHE_KEY, JSON.stringify(cache));
-    } catch (e) {
-    }
-  }
-  function parseExports(content) {
-    var lines = content.split("\n");
-    var results = [];
-    var seen = /* @__PURE__ */ new Set();
-    var fnPat = /^\s*export\s+(async\s+)?function\s+(\w+)/;
-    var constPat = /^\s*export\s+(const|let|var)\s+(\w+)/;
-    var namedOpenPat = /^\s*export\s+\{/;
-    var inNamedBlock = false;
-    var namedBlockStart = -1;
-    var namedBlockBuf = "";
-    for (var i = 0; i < lines.length; i++) {
-      var line = lines[i];
-      var mm;
-      if (/^\s*export\s+type\b/.test(line)) continue;
-      if (inNamedBlock) {
-        namedBlockBuf += " " + line;
-        var closeIdx = namedBlockBuf.indexOf("}");
-        if (closeIdx !== -1) {
-          inNamedBlock = false;
-          var inner = namedBlockBuf.slice(namedBlockBuf.indexOf("{") + 1, closeIdx);
-          inner.split(",").forEach(function(part) {
-            var name = part.replace(/\s+as\s+\w+/, "").trim();
-            if (name && !seen.has(name)) {
-              seen.add(name);
-              results.push({ name, line: namedBlockStart + 1 });
-            }
-          });
-        }
-        continue;
-      }
-      mm = line.match(fnPat);
-      if (mm && mm[2] && !seen.has(mm[2])) {
-        seen.add(mm[2]);
-        results.push({ name: mm[2], line: i + 1 });
-        continue;
-      }
-      mm = line.match(constPat);
-      if (mm && mm[2] && !seen.has(mm[2])) {
-        seen.add(mm[2]);
-        results.push({ name: mm[2], line: i + 1 });
-        continue;
-      }
-      if (namedOpenPat.test(line)) {
-        if (line.indexOf("}") !== -1) {
-          var inner2 = line.slice(line.indexOf("{") + 1, line.indexOf("}"));
-          inner2.split(",").forEach(function(part) {
-            var name = part.replace(/\s+as\s+\w+/, "").trim();
-            if (name && !seen.has(name)) {
-              seen.add(name);
-              results.push({ name, line: i + 1 });
-            }
-          });
-        } else {
-          inNamedBlock = true;
-          namedBlockStart = i;
-          namedBlockBuf = line;
-        }
-      }
-    }
-    return results;
-  }
-  function fileUrl(client, envId, fullPath) {
-    return "https://app.qawolf.com/" + client + "/environments/" + envId + "/automate/ide?file=" + encodeURIComponent(fullPath);
-  }
-  function mountMapView(container) {
-    container.innerHTML = "";
-    var ctx = parseContext();
-    if (!ctx) {
-      var msg = document.createElement("div");
-      msg.style.cssText = "color:#64748b;font-size:11px;padding:4px 0;";
-      msg.textContent = "Navigate to a QA Wolf environment to use the Map tab.";
-      container.appendChild(msg);
-      return;
-    }
-    var client = ctx.client;
-    var envIds = (state.store.clientEnvOrder[client] || []).slice();
-    if (!envIds.length) envIds = [ctx.envId];
-    var selectedEnvId = envIds.indexOf(ctx.envId) !== -1 ? ctx.envId : envIds[0];
-    var headerRow = document.createElement("div");
-    headerRow.style.cssText = "display:flex;align-items:center;gap:6px;margin-bottom:10px;flex-shrink:0;";
-    var envSelect = document.createElement("select");
-    envSelect.style.cssText = "flex:1;background:#0f172a;color:#e2e8f0;border:1px solid #475569;border-radius:4px;padding:4px 8px;font-family:monospace;font-size:11px;min-width:0;";
-    envIds.forEach(function(eid) {
-      var opt = document.createElement("option");
-      opt.value = eid;
-      opt.textContent = getEnvDisplayName(eid);
-      if (eid === selectedEnvId) opt.selected = true;
-      envSelect.appendChild(opt);
-    });
-    var refreshBtn = document.createElement("button");
-    refreshBtn.type = "button";
-    refreshBtn.title = "Refresh";
-    refreshBtn.textContent = "\u21BA";
-    refreshBtn.style.cssText = "background:none;border:1px solid #334155;border-radius:4px;color:#64748b;cursor:pointer;font-size:13px;padding:2px 8px;line-height:1;flex-shrink:0;";
-    refreshBtn.addEventListener("mouseenter", function() {
-      refreshBtn.style.color = "#e2e8f0";
-    });
-    refreshBtn.addEventListener("mouseleave", function() {
-      refreshBtn.style.color = "#64748b";
-    });
-    if (envIds.length > 1) headerRow.appendChild(envSelect);
-    headerRow.appendChild(refreshBtn);
-    container.appendChild(headerRow);
-    var treeEl = document.createElement("div");
-    treeEl.style.cssText = "flex:1;overflow-y:auto;";
-    container.appendChild(treeEl);
-    var expandedFiles = /* @__PURE__ */ new Set();
-    function renderTree() {
-      treeEl.innerHTML = "";
-      purgeVirtualIndexEntriesForEnv(client, selectedEnvId);
-      var index = readFileIndex();
-      var files = [];
-      var monacoMap = buildMonacoPathMap();
-      var pathIndex = readPathIndex();
-      var pathIndexDirty = false;
-      var seenBases = /* @__PURE__ */ new Set();
-      Object.keys(index).forEach(function(k) {
-        var parts = k.split(SEP);
-        if (parts.length !== 3 || parts[0] !== client || parts[1] !== selectedEnvId) return;
-        var base = parts[2];
-        if (isMonacoVirtualBasename(base)) return;
-        var modelKey = index[k];
-        seenBases.add(base);
-        var monacoPath = monacoMap.get(base);
-        var storedPath = pathIndex[k];
-        var fullPath = monacoPath || normalisePath(storedPath || "") || normalisePath(modelKey || "") || base;
-        if (monacoPath && monacoPath !== storedPath) {
-          pathIndex[k] = monacoPath;
-          pathIndexDirty = true;
-        }
-        var dir = fullPath.indexOf("/") !== -1 ? fullPath.slice(0, fullPath.lastIndexOf("/")) : "";
-        files.push({ base, modelKey: fullPath, fullPath, dir, category: getCategory(base) });
-      });
-      monacoMap.forEach(function(fullPath, base) {
-        if (seenBases.has(base)) return;
-        var k = client + SEP + selectedEnvId + SEP + base;
-        index[k] = fullPath;
-        pathIndex[k] = fullPath;
-        pathIndexDirty = true;
-        seenBases.add(base);
-        var dir = fullPath.indexOf("/") !== -1 ? fullPath.slice(0, fullPath.lastIndexOf("/")) : "";
-        files.push({ base, modelKey: fullPath, fullPath, dir, category: getCategory(base) });
-      });
-      if (pathIndexDirty) {
-        try {
-          localStorage.setItem(FILE_INDEX_KEY, JSON.stringify(index));
-        } catch (e) {
-        }
-        writePathIndex(pathIndex);
-      }
-      var nowTs = Date.now();
-      var metaDirty = false;
-      var meta = readFileIndexMeta();
-      monacoMap.forEach(function(_fullPath, base) {
-        var k = client + SEP + selectedEnvId + SEP + base;
-        if (!meta[k]) meta[k] = {};
-        meta[k].lastSeen = nowTs;
-        metaDirty = true;
-      });
-      if (metaDirty) writeFileIndexMeta(meta);
-      if (!files.length) {
-        var empty = document.createElement("div");
-        empty.style.cssText = "color:#475569;font-size:11px;padding:4px 0;";
-        empty.textContent = "No files indexed yet \u2014 open files in the IDE to populate.";
-        treeEl.appendChild(empty);
-        return;
-      }
-      var helperFiles = files.filter(function(f) {
-        return f.category === "helper" && !isMonacoVirtualBasename(f.base);
-      }).sort(function(a, b) {
-        var da = a.dir, db = b.dir;
-        if (da !== db) return da.localeCompare(db);
-        return a.base.localeCompare(b.base);
-      });
-      if (!helperFiles.length) {
-        var empty2 = document.createElement("div");
-        empty2.style.cssText = "color:#475569;font-size:11px;padding:4px 0;";
-        empty2.textContent = "No helper files indexed yet. Open helper files in the IDE to populate.";
-        treeEl.appendChild(empty2);
-        return;
-      }
-      var OPEN_LINK_CSS = "flex-shrink:0;font-size:11px;color:#475569;text-decoration:none;padding:0 2px;line-height:1;";
-      var groups = [];
-      helperFiles.forEach(function(f) {
-        var last = groups[groups.length - 1];
-        if (last && last.dir === f.dir) {
-          last.files.push(f);
-        } else {
-          groups.push({ dir: f.dir, files: [f] });
-        }
-      });
-      groups.forEach(function(g) {
-        if (g.dir) {
-          var dirLbl = document.createElement("div");
-          var shortDir = g.dir.split("/").pop() || g.dir;
-          dirLbl.style.cssText = "font-size:10px;color:#475569;padding:4px 0 2px 2px;user-select:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
-          dirLbl.textContent = shortDir + "/";
-          if (g.dir !== shortDir) dirLbl.title = g.dir;
-          treeEl.appendChild(dirLbl);
-        }
-        g.files.forEach(function(f) {
-          var isHelper = f.category === "helper";
-          var expanded = expandedFiles.has(f.base);
-          var indent = g.dir ? "14px" : "2px";
-          var row2 = document.createElement("div");
-          row2.style.cssText = "display:flex;align-items:center;gap:5px;padding:2px 0;min-height:22px;padding-left:" + indent + ";";
-          var toggle = document.createElement("span");
-          toggle.style.cssText = "width:12px;flex-shrink:0;font-size:9px;color:#64748b;user-select:none;cursor:" + (isHelper ? "pointer" : "default") + ";";
-          toggle.textContent = isHelper ? expanded ? "\u25BC" : "\u25B6" : "\xB7";
-          var nameEl = document.createElement("span");
-          nameEl.style.cssText = "font-size:11px;color:#cbd5e1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:320px;" + (isHelper ? "cursor:pointer;" : "");
-          nameEl.textContent = f.base;
-          if (f.dir) nameEl.title = f.fullPath;
-          var openLink = document.createElement("button");
-          openLink.type = "button";
-          openLink.title = f.fullPath || f.base;
-          openLink.textContent = "\u2197";
-          openLink.style.cssText = OPEN_LINK_CSS + "background:none;border:none;cursor:pointer;";
-          openLink.addEventListener("mouseenter", function() {
-            openLink.style.color = "#94a3b8";
-          });
-          openLink.addEventListener("mouseleave", function() {
-            openLink.style.color = "#475569";
-          });
-          (function(stem) {
-            openLink.addEventListener("click", function(e) {
-              e.stopPropagation();
-              navigateToHelperFile(stem, "");
-            });
-          })(f.base.replace(/\.(js|ts)$/, ""));
-          var delBtn = document.createElement("button");
-          delBtn.type = "button";
-          delBtn.title = "Remove stale map entry";
-          delBtn.textContent = "\u2715";
-          delBtn.style.cssText = "flex-shrink:0;font-size:11px;color:#475569;background:none;border:none;cursor:pointer;padding:0 2px;line-height:1;";
-          delBtn.addEventListener("mouseenter", function() {
-            delBtn.style.color = "#fca5a5";
-          });
-          delBtn.addEventListener("mouseleave", function() {
-            delBtn.style.color = "#475569";
-          });
-          delBtn.addEventListener("click", function(e) {
-            e.stopPropagation();
-            var typed = window.prompt(
-              'Remove map entry for "' + f.base + '"?\nType the exact file name to confirm.',
-              ""
-            );
-            if (typed == null) return;
-            if (typed.trim() !== f.base) {
-              window.alert("File name did not match. Entry was not removed.");
-              return;
-            }
-            removeFileIndexEntry(client, selectedEnvId, f.base);
-            expandedFiles.delete(f.base);
-            renderTree();
-          });
-          var nameGroup = document.createElement("div");
-          nameGroup.style.cssText = "display:inline-flex;align-items:center;gap:3px;min-width:0;";
-          nameGroup.appendChild(nameEl);
-          nameGroup.appendChild(openLink);
-          nameGroup.appendChild(delBtn);
-          row2.appendChild(toggle);
-          row2.appendChild(nameGroup);
-          treeEl.appendChild(row2);
-          if (!isHelper) return;
-          var fnContainer = document.createElement("div");
-          fnContainer.style.cssText = "padding-left:" + (parseInt(indent, 10) + 17) + "px;display:" + (expanded ? "block" : "none") + ";";
-          treeEl.appendChild(fnContainer);
-          function populateFns() {
-            fnContainer.innerHTML = "";
-            var cacheKey = client + SEP + selectedEnvId + SEP + f.base;
-            var content = getMonacoModelContent(f.base);
-            var exports;
-            if (content) {
-              exports = parseExports(content);
-              if (exports.length) saveExportsCache(cacheKey, exports);
-            } else {
-              var cached = readExportsCache()[cacheKey];
-              exports = cached || [];
-            }
-            if (!exports.length) {
-              var hint = document.createElement("div");
-              hint.style.cssText = "font-size:10px;color:#475569;padding:2px 0 3px 4px;";
-              hint.textContent = content ? "No exports found" : "Open file once to cache exports";
-              fnContainer.appendChild(hint);
-              return;
-            }
-            exports.forEach(function(exp) {
-              var fnRow = document.createElement("div");
-              fnRow.style.cssText = "display:flex;align-items:center;gap:5px;padding:2px 4px;border-radius:3px;cursor:pointer;";
-              fnRow.addEventListener("mouseenter", function() {
-                fnRow.style.background = "#1e293b";
-              });
-              fnRow.addEventListener("mouseleave", function() {
-                fnRow.style.background = "";
-              });
-              var tag = document.createElement("span");
-              tag.style.cssText = "font-size:9px;color:#475569;flex-shrink:0;font-family:monospace;";
-              tag.textContent = "fn";
-              var fnName = document.createElement("span");
-              fnName.style.cssText = "font-size:11px;color:#7dd3fc;font-family:monospace;";
-              fnName.textContent = exp.name;
-              fnRow.appendChild(tag);
-              fnRow.appendChild(fnName);
-              (function(stem, fnN) {
-                fnRow.addEventListener("click", function() {
-                  navigateToHelperFile(stem, fnN);
-                });
-              })(f.base.replace(/\.(js|ts)$/, ""), exp.name);
-              fnContainer.appendChild(fnRow);
-            });
-          }
-          if (expanded) populateFns();
-          function doToggle() {
-            expanded = !expanded;
-            if (expanded) {
-              expandedFiles.add(f.base);
-              toggle.textContent = "\u25BC";
-              fnContainer.style.display = "block";
-              populateFns();
-            } else {
-              expandedFiles.delete(f.base);
-              toggle.textContent = "\u25B6";
-              fnContainer.style.display = "none";
-            }
-          }
-          toggle.addEventListener("click", doToggle);
-          nameEl.addEventListener("click", doToggle);
-        });
-      });
-    }
-    envSelect.addEventListener("change", function() {
-      selectedEnvId = envSelect.value;
-      expandedFiles.clear();
-      renderTree();
-    });
-    refreshBtn.addEventListener("click", renderTree);
-    renderTree();
-  }
-  var FILE_INDEX_KEY, FILE_PATH_INDEX_KEY, EXPORTS_CACHE_KEY, FILE_INDEX_META_KEY, FILE_INDEX_SEP, SEP, _uw;
-  var init_map_tab = __esm({
-    "src/notes/19-map-tab.ts"() {
-      "use strict";
-      init_state();
-      init_context();
-      FILE_INDEX_KEY = "_qawFileIndex";
-      FILE_PATH_INDEX_KEY = "_qawFilePathIndex";
-      EXPORTS_CACHE_KEY = "_qawExportsCache";
-      FILE_INDEX_META_KEY = "_qawFileIndexMeta";
-      FILE_INDEX_SEP = "";
-      SEP = FILE_INDEX_SEP;
-      _uw = typeof globalThis.unsafeWindow !== "undefined" ? globalThis.unsafeWindow : window;
     }
   });
 
@@ -9166,6 +9347,212 @@
     }
   });
 
+  // src/notes/46-related-notes.ts
+  function norm(v) {
+    return String(v || "").trim().toLowerCase();
+  }
+  function helperRelationKey(b) {
+    if (!b || b.tag !== "helper") return "";
+    var helperFile = norm(b.helperFile);
+    var helperFn = norm(b.helperFn);
+    if (helperFile && helperFn) return "ref:" + helperFile + "." + helperFn;
+    var helperName = norm(b.helperName);
+    if (helperName) return "name:" + helperName;
+    return "";
+  }
+  function helperRelationLabel(b) {
+    if (!b || b.tag !== "helper") return "helper";
+    var helperFile = String(b.helperFile || "").trim();
+    var helperFn = String(b.helperFn || "").trim();
+    if (helperFile && helperFn) return helperFile + "." + helperFn;
+    var helperName = String(b.helperName || "").trim();
+    return helperName || "helper";
+  }
+  function collectRelatedHelperNotes(store, currentEditKey, currentBullet) {
+    var targetKey = helperRelationKey(currentBullet);
+    if (!targetKey || !store || !store.notes) return [];
+    var currentId = String(currentBullet && currentBullet.id || "");
+    var results = [];
+    Object.keys(store.notes).forEach(function(editKey) {
+      var note = store.notes[editKey];
+      var meta = parseNoteKey(editKey);
+      if (!note || !meta || !Array.isArray(note.bullets)) return;
+      for (var i = 0; i < note.bullets.length; i++) {
+        var b = note.bullets[i];
+        if (!b || b.tag !== "helper") continue;
+        if (editKey === currentEditKey && currentId && String(b.id || "") === currentId) continue;
+        if (helperRelationKey(b) !== targetKey) continue;
+        results.push({
+          editKey,
+          bulletIndex: i,
+          bulletId: String(b.id || ""),
+          client: meta.client,
+          envId: meta.envId,
+          fileName: meta.fileName,
+          tag: String(b.tag || ""),
+          text: String(b.text || "").trim(),
+          helperLabel: helperRelationLabel(b),
+          lineNo: b.lineNo != null && b.lineNo !== "" && Number.isFinite(Number(b.lineNo)) ? Number(b.lineNo) : null,
+          loggedAt: String(b.loggedAt || Array.isArray(b.timestamps) && b.timestamps[0] && b.timestamps[0].ts || "")
+        });
+      }
+    });
+    results.sort(function(a, b) {
+      if (a.client !== b.client) return a.client.localeCompare(b.client);
+      if (a.envId !== b.envId) return a.envId.localeCompare(b.envId);
+      if (a.fileName !== b.fileName) return a.fileName.localeCompare(b.fileName);
+      return a.bulletIndex - b.bulletIndex;
+    });
+    return results;
+  }
+  var init_related_notes = __esm({
+    "src/notes/46-related-notes.ts"() {
+      "use strict";
+      init_context();
+    }
+  });
+
+  // src/notes/47-helper-index.ts
+  function isHelperBaseName(base) {
+    if (!/\.(js|ts)$/i.test(base)) return false;
+    if (/\.flow\.(js|ts)$/i.test(base)) return false;
+    if (base === "types.ts" || /\.types\.ts$/i.test(base)) return false;
+    if (/\.json$/i.test(base)) return false;
+    return true;
+  }
+  function helperBasename(stem, ext) {
+    var s = String(stem || "").trim().replace(/\.(js|ts)$/i, "");
+    return s + "." + ext;
+  }
+  function exportsForStem(cache, client, envId, stem) {
+    var keyTs = fileIndexKey(client, envId, helperBasename(stem, "ts"));
+    var keyJs = fileIndexKey(client, envId, helperBasename(stem, "js"));
+    return cache[keyTs] || cache[keyJs] || [];
+  }
+  function envHasIndexedHelpers(cache, client, envId) {
+    var prefix = client + FILE_INDEX_SEP + envId + FILE_INDEX_SEP;
+    return Object.keys(cache).some(function(k) {
+      if (k.indexOf(prefix) !== 0) return false;
+      var entries = cache[k];
+      return !!(entries && entries.length);
+    });
+  }
+  function refreshHelperExportsForEnv(client, envId) {
+    var cache = readExportsCache();
+    var fileIndex = readFileIndex();
+    var pathIndex = readPathIndex();
+    var monacoMap = buildMonacoPathMap();
+    var bases = /* @__PURE__ */ new Set();
+    var prefix = client + FILE_INDEX_SEP + envId + FILE_INDEX_SEP;
+    var pathDirty = false;
+    var fileDirty = false;
+    Object.keys(fileIndex).forEach(function(k) {
+      if (k.indexOf(prefix) !== 0) return;
+      var parts = k.split(FILE_INDEX_SEP);
+      if (parts.length !== 3) return;
+      var base = parts[2];
+      if (!isHelperBaseName(base)) return;
+      bases.add(base);
+    });
+    Object.keys(pathIndex).forEach(function(k) {
+      if (k.indexOf(prefix) !== 0) return;
+      var parts = k.split(FILE_INDEX_SEP);
+      if (parts.length !== 3) return;
+      var base = parts[2];
+      if (!isHelperBaseName(base)) return;
+      bases.add(base);
+    });
+    monacoMap.forEach(function(fullPath, base) {
+      if (!isHelperBaseName(base)) return;
+      bases.add(base);
+      var key = fileIndexKey(client, envId, base);
+      if (pathIndex[key] !== fullPath) {
+        pathIndex[key] = fullPath;
+        pathDirty = true;
+      }
+      if (fileIndex[key] !== fullPath) {
+        fileIndex[key] = fullPath;
+        fileDirty = true;
+      }
+    });
+    bases.forEach(function(base) {
+      var key = fileIndexKey(client, envId, base);
+      var content = getMonacoModelContent(base);
+      if (!content) return;
+      var exports = parseExports(content);
+      if (!exports.length) return;
+      cache[key] = exports;
+      saveExportsCache(key, exports);
+    });
+    if (pathDirty) {
+      try {
+        localStorage.setItem("_qawFilePathIndex", JSON.stringify(pathIndex));
+      } catch (_e) {
+      }
+    }
+    if (fileDirty) {
+      try {
+        localStorage.setItem("_qawFileIndex", JSON.stringify(fileIndex));
+      } catch (_e1) {
+      }
+    }
+    return cache;
+  }
+  function lookupHelperByCalledName(client, envId, calledName, cache) {
+    var name = String(calledName || "").trim();
+    if (!name) return [];
+    var exportsCache = cache || refreshHelperExportsForEnv(client, envId);
+    var prefix = client + FILE_INDEX_SEP + envId + FILE_INDEX_SEP;
+    var results = [];
+    Object.keys(exportsCache).forEach(function(k) {
+      if (k.indexOf(prefix) !== 0) return;
+      var base = k.split(FILE_INDEX_SEP)[2] || "";
+      if (!isHelperBaseName(base)) return;
+      var stem = base.replace(/\.(js|ts)$/, "");
+      var exps = exportsCache[k] || [];
+      for (var i = 0; i < exps.length; i++) {
+        if (String(exps[i].name || "") !== name) continue;
+        results.push({ stem, fn: name });
+        break;
+      }
+    });
+    results.sort(function(a, b) {
+      if (a.stem !== b.stem) return a.stem.localeCompare(b.stem);
+      return a.fn.localeCompare(b.fn);
+    });
+    return results;
+  }
+  function isHelperExportResolved(client, envId, stem, fn) {
+    var stemClean = String(stem || "").trim();
+    var fnClean = String(fn || "").trim();
+    if (!stemClean || !fnClean) return true;
+    var cache = readExportsCache();
+    if (!envHasIndexedHelpers(cache, client, envId)) return true;
+    var entries = exportsForStem(cache, client, envId, stemClean);
+    if (!entries.length) return false;
+    return entries.some(function(e) {
+      return String(e.name || "") === fnClean;
+    });
+  }
+  function listHelperStemsForEnv(client, envId, cache) {
+    var exportsCache = cache || refreshHelperExportsForEnv(client, envId);
+    var prefix = client + FILE_INDEX_SEP + envId + FILE_INDEX_SEP;
+    var stems = /* @__PURE__ */ new Set();
+    Object.keys(exportsCache).forEach(function(k) {
+      if (k.indexOf(prefix) !== 0) return;
+      var base = k.split(FILE_INDEX_SEP)[2] || "";
+      if (!isHelperBaseName(base)) return;
+      stems.add(base.replace(/\.(js|ts)$/, ""));
+    });
+    return Array.from(stems).sort();
+  }
+  var init_helper_index = __esm({
+    "src/notes/47-helper-index.ts"() {
+      "use strict";
+      init_map_tab();
+    }
+  });
+
   // src/notes/05-cards.ts
   function clearPendingRunLogCopyUi() {
     state.pendingRunLogCopy = null;
@@ -10111,6 +10498,118 @@
       searchInput.focus();
     }, 0);
   }
+  function jumpToRelatedHelperNote(entry) {
+    getRenderPanelForKey()(entry.editKey);
+    var dayKey = entry.loggedAt ? getDayKey(entry.loggedAt) : null;
+    if (dayKey && dayKey !== "unknown") {
+      if (!state.notesViewState[entry.editKey]) state.notesViewState[entry.editKey] = { filterFavs: false, collapsedDays: {} };
+      state.notesViewState[entry.editKey].collapsedDays[dayKey] = false;
+    }
+    setTimeout(function() {
+      var panelBody = state.panelEl;
+      if (!panelBody) return;
+      var notesTab = panelBody.querySelector('[data-qaw-panel-tab="notes"]');
+      if (notesTab) notesTab.click();
+      var viewer = panelBody.querySelector("[data-qaw-notes-viewer]");
+      if (viewer && typeof viewer._qawRedrawCards === "function") viewer._qawRedrawCards();
+      setTimeout(function() {
+        var viewerNow = state.panelEl ? state.panelEl.querySelector("[data-qaw-notes-viewer]") : null;
+        if (viewerNow && typeof viewerNow._qawRevealBulletIndex === "function") {
+          viewerNow._qawRevealBulletIndex(entry.bulletIndex, "#a78bfa");
+        }
+      }, 60);
+    }, 0);
+  }
+  function openRelatedHelperNotesModal(helperLabel, entries) {
+    document.querySelectorAll("[data-qaw-related-helper-backdrop]").forEach(function(el) {
+      el.remove();
+    });
+    var backdrop = document.createElement("div");
+    backdrop.setAttribute("data-qaw-overlay", "1");
+    backdrop.setAttribute("data-qaw-related-helper-backdrop", "1");
+    backdrop.style.cssText = "position:fixed;inset:0;background:rgba(2,6,23,0.55);z-index:" + Z_INV_MODAL + ";display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box;";
+    var modal = document.createElement("div");
+    modal.style.cssText = "background:#0f172a;border:1px solid #334155;border-radius:10px;max-width:620px;width:100%;max-height:80vh;display:flex;flex-direction:column;box-shadow:0 14px 36px rgba(0,0,0,0.55);color:#e2e8f0;font-family:monospace;overflow:hidden;";
+    backdrop.appendChild(modal);
+    var onEsc;
+    function closeModal() {
+      backdrop.remove();
+      document.removeEventListener("keydown", onEsc);
+    }
+    onEsc = function(e) {
+      if (e.key === "Escape") closeModal();
+    };
+    backdrop.addEventListener("click", function(e) {
+      if (e.target === backdrop) closeModal();
+    });
+    document.addEventListener("keydown", onEsc);
+    var header = document.createElement("div");
+    header.style.cssText = "padding:10px 12px;border-bottom:1px solid #1e293b;display:flex;align-items:center;gap:8px;";
+    var title = document.createElement("div");
+    title.style.cssText = "flex:1;min-width:0;font-size:13px;font-weight:700;color:#f8fafc;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
+    title.textContent = "Related helper notes: " + helperLabel;
+    header.appendChild(title);
+    var count = document.createElement("span");
+    count.style.cssText = "font-size:10px;color:#a78bfa;border:1px solid #4c1d95;border-radius:999px;padding:2px 8px;background:#1e1b4b;";
+    count.textContent = String(entries.length);
+    header.appendChild(count);
+    var closeBtn = document.createElement("button");
+    closeBtn.type = "button";
+    closeBtn.textContent = "\xD7";
+    closeBtn.title = "Close";
+    closeBtn.style.cssText = "background:none;border:none;color:#64748b;font-size:18px;line-height:1;cursor:pointer;padding:0 2px;";
+    closeBtn.addEventListener("click", closeModal);
+    header.appendChild(closeBtn);
+    modal.appendChild(header);
+    var list = document.createElement("div");
+    list.style.cssText = "overflow:auto;padding:8px;display:flex;flex-direction:column;gap:7px;";
+    modal.appendChild(list);
+    entries.forEach(function(entry) {
+      var row2 = document.createElement("button");
+      row2.type = "button";
+      row2.style.cssText = "display:flex;gap:8px;width:100%;text-align:left;background:#020617;border:1px solid #1e293b;border-radius:8px;padding:8px;cursor:pointer;color:#cbd5e1;font-family:monospace;";
+      row2.addEventListener("mouseenter", function() {
+        row2.style.borderColor = "#6366f1";
+      });
+      row2.addEventListener("mouseleave", function() {
+        row2.style.borderColor = "#1e293b";
+      });
+      row2.addEventListener("click", function() {
+        closeModal();
+        jumpToRelatedHelperNote(entry);
+      });
+      var body = document.createElement("div");
+      body.style.cssText = "flex:1;min-width:0;display:flex;flex-direction:column;gap:4px;";
+      var meta = document.createElement("div");
+      meta.style.cssText = "display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:10px;";
+      var file = document.createElement("span");
+      file.style.cssText = "color:#93c5fd;font-weight:700;";
+      file.textContent = displayNoteFileLabel(entry.editKey) || entry.fileName;
+      meta.appendChild(file);
+      var env = document.createElement("span");
+      env.style.cssText = "color:#64748b;";
+      env.textContent = getEnvDisplayName(entry.envId);
+      meta.appendChild(env);
+      if (entry.lineNo != null) {
+        var line = document.createElement("span");
+        line.style.cssText = "color:#c4b5fd;border:1px solid #4c1d95;border-radius:999px;padding:1px 6px;background:#1e1b4b;";
+        line.textContent = "Line " + entry.lineNo;
+        meta.appendChild(line);
+      }
+      body.appendChild(meta);
+      var text = document.createElement("div");
+      text.style.cssText = "font-size:11px;line-height:1.4;color:#e2e8f0;white-space:pre-wrap;overflow-wrap:anywhere;";
+      text.textContent = entry.text || "(no note text)";
+      body.appendChild(text);
+      row2.appendChild(body);
+      var action = document.createElement("span");
+      action.style.cssText = "flex-shrink:0;color:#818cf8;font-size:10px;align-self:center;";
+      action.textContent = "Open \u2192";
+      row2.appendChild(action);
+      list.appendChild(row2);
+    });
+    document.body.appendChild(backdrop);
+  }
   function openCaseDetailModal(caseObj, editKey) {
     document.querySelectorAll("[data-qaw-case-detail-backdrop]").forEach(function(el) {
       el.remove();
@@ -10409,6 +10908,11 @@
     var hideDayDividers = !!ctx.hideDayDividers;
     if (!state.notesViewState[editKey]) state.notesViewState[editKey] = { filterFavs: false, collapsedDays: {} };
     var vs = state.notesViewState[editKey];
+    var panelNoteMeta = parseNoteKey(editKey);
+    var helperExportsCache = null;
+    if (panelNoteMeta) {
+      helperExportsCache = refreshHelperExportsForEnv(panelNoteMeta.client, panelNoteMeta.envId);
+    }
     var wrap = viewerEl.parentNode;
     var favFilterBtn = body.querySelector("[data-qaw-filter-favs]");
     if (favFilterBtn) {
@@ -10882,152 +11386,11 @@
       }
       editDiv.scrollIntoView({ block: "nearest" });
     };
-    function _lookupHelperByLine(ek, lineNum) {
-      if (!lineNum || !Number.isFinite(lineNum)) return [];
-      var _SEP = "";
-      var cache = _refreshHelperExportsCacheFromOpenModels(ek);
-      var noteMeta = parseNoteKey(ek);
-      if (!noteMeta) return [];
-      var noteClient = noteMeta.client;
-      var noteEnvId = noteMeta.envId;
-      var results = [];
-      Object.keys(cache).forEach(function(k) {
-        var kp = k.split(_SEP);
-        if (kp.length !== 3 || kp[0] !== noteClient || kp[1] !== noteEnvId) return;
-        var base = kp[2];
-        if (/\.flow\.(js|ts)$/i.test(base) || base === "types.ts" || /\.types\.ts$/i.test(base) || /\.json$/i.test(base)) return;
-        var stem = base.replace(/\.(js|ts)$/, "");
-        var exps = cache[k];
-        var best = null;
-        for (var i = 0; i < exps.length; i++) {
-          if (exps[i].line <= lineNum && (!best || exps[i].line > best.line)) best = exps[i];
-        }
-        if (best && lineNum - best.line < 200) results.push({ stem, fn: best.name });
-      });
-      return results;
-    }
     function _normalizeRepoPath(raw) {
       var p = String(raw || "").trim().replace(/\\/g, "/").replace(/^\/+/, "");
       var srcIdx = p.indexOf("src/");
       if (srcIdx >= 0) p = p.slice(srcIdx);
       return p;
-    }
-    function _parseHelperExports(content) {
-      var lines = String(content || "").split("\n");
-      var results = [];
-      var seen = /* @__PURE__ */ new Set();
-      var fnPat = /^\s*export\s+(async\s+)?function\s+(\w+)/;
-      var constPat = /^\s*export\s+(const|let|var)\s+(\w+)/;
-      var inNamedBlock = false;
-      var namedBlockStart = -1;
-      var namedBlockBuf = "";
-      function addName(name, line2) {
-        if (!name || seen.has(name)) return;
-        seen.add(name);
-        results.push({ name, line: line2 });
-      }
-      function addNamedExports(raw, line2) {
-        raw.split(",").forEach(function(part) {
-          addName(part.replace(/\s+as\s+\w+/, "").trim(), line2);
-        });
-      }
-      for (var i = 0; i < lines.length; i++) {
-        var line = lines[i];
-        var mm;
-        if (/^\s*export\s+type\b/.test(line)) continue;
-        if (inNamedBlock) {
-          namedBlockBuf += " " + line;
-          var closeIdx = namedBlockBuf.indexOf("}");
-          if (closeIdx !== -1) {
-            inNamedBlock = false;
-            addNamedExports(namedBlockBuf.slice(namedBlockBuf.indexOf("{") + 1, closeIdx), namedBlockStart + 1);
-          }
-          continue;
-        }
-        mm = line.match(fnPat);
-        if (mm && mm[2]) {
-          addName(mm[2], i + 1);
-          continue;
-        }
-        mm = line.match(constPat);
-        if (mm && mm[2]) {
-          addName(mm[2], i + 1);
-          continue;
-        }
-        if (/^\s*export\s+\{/.test(line)) {
-          if (line.indexOf("}") !== -1) {
-            addNamedExports(line.slice(line.indexOf("{") + 1, line.indexOf("}")), i + 1);
-          } else {
-            inNamedBlock = true;
-            namedBlockStart = i;
-            namedBlockBuf = line;
-          }
-        }
-      }
-      return results;
-    }
-    function _refreshHelperExportsCacheFromOpenModels(ek) {
-      var cache = {};
-      try {
-        cache = JSON.parse(localStorage.getItem("_qawExportsCache") || "{}");
-      } catch (e) {
-        cache = {};
-      }
-      var noteMeta = parseNoteKey(ek);
-      if (!noteMeta) return cache;
-      var fileIndex = {};
-      var pathIndex = {};
-      var dirty = false;
-      try {
-        fileIndex = JSON.parse(localStorage.getItem("_qawFileIndex") || "{}");
-      } catch (e1) {
-        fileIndex = {};
-      }
-      try {
-        pathIndex = JSON.parse(localStorage.getItem("_qawFilePathIndex") || "{}");
-      } catch (e2) {
-        pathIndex = {};
-      }
-      try {
-        var uw = typeof globalThis.unsafeWindow !== "undefined" ? globalThis.unsafeWindow : window;
-        var m = uw && uw.monaco;
-        if (!m || !m.editor || typeof m.editor.getModels !== "function") return cache;
-        var models = m.editor.getModels() || [];
-        for (var i = 0; i < models.length; i++) {
-          var model = models[i];
-          var fullPath = _normalizeRepoPath(String(model.uri || ""));
-          var base = fullPath.split("/").pop() || "";
-          if (!base || isMonacoVirtualBasename(base)) continue;
-          if (/\.flow\.(js|ts)$/i.test(base) || base === "types.ts" || /\.types\.ts$/i.test(base) || /\.json$/i.test(base)) continue;
-          if (!/\.(js|ts)$/i.test(base)) continue;
-          var content = typeof model.getValue === "function" ? String(model.getValue() || "") : "";
-          var exports = _parseHelperExports(content);
-          if (!exports.length) continue;
-          var key = fileIndexKey(noteMeta.client, noteMeta.envId, base);
-          cache[key] = exports;
-          if (fullPath) {
-            fileIndex[key] = fullPath;
-            pathIndex[key] = fullPath;
-            dirty = true;
-          }
-        }
-      } catch (e3) {
-      }
-      try {
-        localStorage.setItem("_qawExportsCache", JSON.stringify(cache));
-      } catch (e4) {
-      }
-      if (dirty) {
-        try {
-          localStorage.setItem("_qawFileIndex", JSON.stringify(fileIndex));
-        } catch (e5) {
-        }
-        try {
-          localStorage.setItem("_qawFilePathIndex", JSON.stringify(pathIndex));
-        } catch (e6) {
-        }
-      }
-      return cache;
     }
     function _extractCalledHelperNameAtLine(lineNum) {
       if (!lineNum || !Number.isFinite(lineNum)) return "";
@@ -11068,34 +11431,6 @@
       } catch (_e2) {
         return "";
       }
-    }
-    function _lookupHelperByCalledName(ek, calledName) {
-      var name = String(calledName || "").trim();
-      if (!name) return [];
-      var _SEP = "";
-      var cache = _refreshHelperExportsCacheFromOpenModels(ek);
-      var noteMeta = parseNoteKey(ek);
-      if (!noteMeta) return [];
-      var noteClient = noteMeta.client;
-      var noteEnvId = noteMeta.envId;
-      var results = [];
-      Object.keys(cache).forEach(function(k) {
-        var kp = k.split(_SEP);
-        if (kp.length !== 3 || kp[0] !== noteClient || kp[1] !== noteEnvId) return;
-        var base = kp[2];
-        if (/\.flow\.(js|ts)$/i.test(base) || base === "types.ts" || /\.types\.ts$/i.test(base) || /\.json$/i.test(base)) return;
-        var exps = cache[k] || [];
-        for (var i = 0; i < exps.length; i++) {
-          if (String(exps[i].name || "") !== name) continue;
-          results.push({ stem: base.replace(/\.(js|ts)$/, ""), fn: name });
-          break;
-        }
-      });
-      results.sort(function(a, b) {
-        if (a.stem !== b.stem) return a.stem.localeCompare(b.stem);
-        return a.fn.localeCompare(b.fn);
-      });
-      return results;
     }
     function openDayForBulletIndex(bulletIdx) {
       var b = n.bullets && n.bullets[bulletIdx];
@@ -11144,17 +11479,22 @@
     }
     var makeCard = function(b, idx) {
       if (b.tag === "helper" && (!b.helperFile || !b.helperFn)) finalizeHelperBullet(b);
-      if (b.tag === "helper" && b.lineNo != null && (!b.helperFile || !b.helperFn)) {
+      if (b.tag === "helper" && panelNoteMeta && b.lineNo != null && (!b.helperFile || !b.helperFn)) {
         var _calledName = _extractCalledHelperNameAtLine(Number(b.lineNo));
-        var _autoMatch = _calledName ? _lookupHelperByCalledName(editKey, _calledName) : [];
+        var _autoMatch = _calledName ? lookupHelperByCalledName(panelNoteMeta.client, panelNoteMeta.envId, _calledName, helperExportsCache || void 0) : [];
         if (_autoMatch.length >= 1) {
           b.helperFile = _autoMatch[0].stem;
           b.helperFn = _autoMatch[0].fn;
           persist();
         }
       }
-      if (b.tag === "helper" && b.helperName && (!b.helperFile || !b.helperFn)) {
-        var _nameMatch = _lookupHelperByCalledName(editKey, String(b.helperName));
+      if (b.tag === "helper" && panelNoteMeta && b.helperName && (!b.helperFile || !b.helperFn)) {
+        var _nameMatch = lookupHelperByCalledName(
+          panelNoteMeta.client,
+          panelNoteMeta.envId,
+          String(b.helperName),
+          helperExportsCache || void 0
+        );
         if (_nameMatch.length === 1) {
           b.helperFile = _nameMatch[0].stem;
           b.helperFn = _nameMatch[0].fn;
@@ -11659,19 +11999,20 @@
         chipsRow2.appendChild(maintWrap);
       }
       if (b.tag === "helper" && (b.helperName || b.helperFile)) {
-        var auditBtn = document.createElement("button");
-        auditBtn.type = "button";
-        auditBtn.className = "qaw-chip-btn";
-        auditBtn.textContent = "\u2728 audit";
-        auditBtn.title = "Helper audit \u2014 check this helper across all flows";
-        auditBtn.style.cssText = "font-size:10px;color:#818cf8;background:none;border:1px dashed #3730a3;border-radius:12px;cursor:pointer;padding:2px 8px;font-family:monospace;";
-        auditBtn.addEventListener("click", function(e) {
-          e.stopPropagation();
-          var prompt2 = buildHelperAuditPrompt(editKey, b);
-          var noteMeta = parseNoteKey(editKey);
-          openPromptPanel("Helper Audit \u2014 " + (b.helperName || b.helperFile || noteMeta && noteMeta.fileName || "helper"), prompt2);
-        });
-        chipsRow2.appendChild(auditBtn);
+        var relatedHelpers = collectRelatedHelperNotes(state.store, editKey, b);
+        if (relatedHelpers.length) {
+          var relatedBtn = document.createElement("button");
+          relatedBtn.type = "button";
+          relatedBtn.className = "qaw-chip-btn";
+          relatedBtn.textContent = "Related " + relatedHelpers.length;
+          relatedBtn.title = "Review other notes for " + helperRelationLabel(b);
+          relatedBtn.style.cssText = "font-size:10px;color:#c4b5fd;background:#1e1b4b;border:1px solid #4c1d95;border-radius:12px;cursor:pointer;padding:2px 8px;font-family:monospace;";
+          relatedBtn.addEventListener("click", function(e) {
+            e.stopPropagation();
+            openRelatedHelperNotesModal(helperRelationLabel(b), relatedHelpers);
+          });
+          chipsRow2.appendChild(relatedBtn);
+        }
       }
       if (b.favorite) {
         var favChip = document.createElement("span");
@@ -11965,32 +12306,17 @@
         });
         var startPathEdit = function() {
           pathRow.innerHTML = "";
-          var _SEP = "";
-          var exportsCache = _refreshHelperExportsCacheFromOpenModels(editKey);
-          var noteMeta = parseNoteKey(editKey);
-          var noteClient = noteMeta ? noteMeta.client : "";
-          var noteEnvId = noteMeta ? noteMeta.envId : "";
-          var helperStems = [];
-          var _seenStems = /* @__PURE__ */ new Set();
-          Object.keys(exportsCache).forEach(function(k) {
-            var kp = k.split(_SEP);
-            if (kp.length !== 3 || kp[0] !== noteClient || kp[1] !== noteEnvId) return;
-            var base = kp[2];
-            if (/\.flow\.(js|ts)$/i.test(base) || base === "types.ts" || /\.types\.ts$/i.test(base) || /\.json$/i.test(base)) return;
-            var stem = base.replace(/\.(js|ts)$/, "");
-            if (!_seenStems.has(stem)) {
-              _seenStems.add(stem);
-              helperStems.push(stem);
-            }
-          });
-          helperStems.sort();
+          var exportsCache = helperExportsCache || {};
+          var noteClient = panelNoteMeta ? panelNoteMeta.client : "";
+          var noteEnvId = panelNoteMeta ? panelNoteMeta.envId : "";
+          var helperStems = panelNoteMeta ? listHelperStemsForEnv(noteClient, noteEnvId, exportsCache) : [];
           var initFile = hFile;
           var initFn = hFn;
           var autoMatches = [];
           var validByStem = {};
-          if ((!initFile || !initFn) && b.lineNo != null) {
+          if (panelNoteMeta && (!initFile || !initFn) && b.lineNo != null) {
             var called = _extractCalledHelperNameAtLine(Number(b.lineNo));
-            autoMatches = called ? _lookupHelperByCalledName(editKey, called) : [];
+            autoMatches = called ? lookupHelperByCalledName(noteClient, noteEnvId, called, exportsCache) : [];
             if (autoMatches.length >= 1) {
               initFile = autoMatches[0].stem;
               initFn = autoMatches[0].fn;
@@ -12025,20 +12351,16 @@
           function _fnsForStem(stem) {
             if (!stem) return [];
             if (autoMatches.length) return (validByStem[stem] || []).slice().sort();
-            var _SEP2 = "";
+            if (!panelNoteMeta) return [];
+            var keyTs = fileIndexKey(noteClient, noteEnvId, stem + ".ts");
+            var keyJs = fileIndexKey(noteClient, noteEnvId, stem + ".js");
+            var exps = exportsCache[keyTs] || exportsCache[keyJs] || [];
             var list = [];
-            Object.keys(exportsCache).forEach(function(k) {
-              var kp = k.split(_SEP2);
-              if (kp.length !== 3 || kp[0] !== noteClient || kp[1] !== noteEnvId) return;
-              var base = kp[2];
-              if (base.replace(/\.(js|ts)$/, "") !== stem) return;
-              var exps = exportsCache[k] || [];
-              for (var ii = 0; ii < exps.length; ii++) {
-                var n0 = String(exps[ii].name || "").trim();
-                if (!n0) continue;
-                if (list.indexOf(n0) === -1) list.push(n0);
-              }
-            });
+            for (var ii = 0; ii < exps.length; ii++) {
+              var n0 = String(exps[ii].name || "").trim();
+              if (!n0) continue;
+              if (list.indexOf(n0) === -1) list.push(n0);
+            }
             return list.sort();
           }
           function _refreshFnOptions(selectFirst) {
@@ -12147,12 +12469,24 @@
           refChip.type = "button";
           refChip.setAttribute("data-e2e", "investigation-notes-viewer-helper-ref");
           refChip.style.cssText = "display:inline-flex;align-items:center;gap:4px;font-size:11px;font-weight:600;font-family:monospace;background:#1e1b4b;color:#c4b5fd;padding:3px 10px;border-radius:6px;border:1px solid #6366f1;cursor:pointer;";
-          refChip.innerHTML = '<span style="opacity:0.7;font-size:10px;">\u2192</span> ' + hFile + "." + hFn;
+          refChip.title = "Open " + hFile + "." + hFn;
+          refChip.innerHTML = '<span style="opacity:0.7;font-size:10px;">\u2192</span> ' + hFn;
           refChip.addEventListener("click", function(e) {
             e.preventDefault();
             e.stopPropagation();
-            navigateToHelperFile(hFile, hFn);
+            navigateToHelperFile(
+              hFile,
+              hFn,
+              panelNoteMeta ? { client: panelNoteMeta.client, envId: panelNoteMeta.envId } : void 0
+            );
           });
+          if (panelNoteMeta && !isHelperExportResolved(panelNoteMeta.client, panelNoteMeta.envId, hFile, hFn)) {
+            var pathWarn = document.createElement("span");
+            pathWarn.title = "Export not found in helper index \u2014 open this helper in the IDE or refresh the Helpers tab.";
+            pathWarn.style.cssText = "display:inline-flex;align-items:center;justify-content:center;width:13px;height:13px;border-radius:50%;font-size:9px;line-height:1;cursor:help;flex-shrink:0;background:#78350f;color:#fbbf24;border:1px solid rgba(251,191,36,0.4);";
+            pathWarn.textContent = "!";
+            chipWrap.appendChild(pathWarn);
+          }
           var editBtn = document.createElement("button");
           editBtn.type = "button";
           editBtn.title = "Edit path";
@@ -14341,7 +14675,6 @@
       init_slack_self_dm();
       init_maintenance_logic();
       init_bugs_tab();
-      init_ai_prompts();
       init_note_llm_chat();
       init_reminder_utils();
       init_shift();
@@ -14356,6 +14689,8 @@
       init_run_log_parsers();
       init_facet_hashtag();
       init_client_note_refs();
+      init_related_notes();
+      init_helper_index();
       CASE_STATUS_OPTIONS = ["open", "resolved"];
       lineContextCloseTimer = null;
       lineContextOutsideHandler = null;
@@ -14765,348 +15100,6 @@
       PARSER_GALLERY_LEFT_WIDTH_KEY = "_qawParserGalleryLeftWidth";
       PARSER_GALLERY_ROW_HEIGHT_PREFIX = "_qawParserGalleryRowHeight:";
       playgroundRows = null;
-    }
-  });
-
-  // src/notes/45-client-notes-view.ts
-  function buttonStyle(kind) {
-    if (kind === "primary") {
-      return "background:#0c4a6e;color:#bae6fd;border:1px solid #0ea5e9;border-radius:6px;padding:5px 10px;cursor:pointer;font:11px monospace;";
-    }
-    if (kind === "danger") {
-      return "background:#3f1d1d;color:#fecaca;border:1px solid #7f1d1d;border-radius:6px;padding:4px 9px;cursor:pointer;font:10px monospace;";
-    }
-    return "background:#0f172a;color:#94a3b8;border:1px solid #334155;border-radius:6px;padding:4px 9px;cursor:pointer;font:10px monospace;";
-  }
-  function persistClientNotes(editKey, note) {
-    if (state.store && state.store.notes) state.store.notes[editKey] = note;
-    syncClientNotePlain(note);
-    touchNote(editKey);
-    saveStoreImmediate();
-  }
-  function ensureClientNotesCss() {
-    if (document.getElementById("qaw-client-notes-view-css")) return;
-    var st = document.createElement("style");
-    st.id = "qaw-client-notes-view-css";
-    st.textContent = "[data-qaw-client-notes-view] .qaw-note-kebab{position:relative;flex-shrink:0;}[data-qaw-client-notes-view] .qaw-note-kebab-btn{background:none;border:none;color:#475569;font-size:15px;cursor:pointer;padding:0 3px;line-height:1;border-radius:3px;transition:color .1s;}[data-qaw-client-notes-view] .qaw-note-kebab-btn:hover{color:#94a3b8;background:#334155;}[data-qaw-client-notes-view] .qaw-note-kebab-menu{display:none;position:fixed;background:#0f172a;border:1px solid #475569;border-radius:6px;padding:3px;min-width:130px;z-index:2147483647;box-shadow:0 4px 12px rgba(0,0,0,0.5);}[data-qaw-client-notes-view] .qaw-note-kebab-menu.open{display:block;}[data-qaw-client-notes-view] .qaw-note-kebab-menu button{display:block;width:100%;text-align:left;padding:5px 9px;border:none;background:transparent;color:#e2e8f0;cursor:pointer;font-size:11px;font-family:monospace;border-radius:3px;}[data-qaw-client-notes-view] .qaw-note-kebab-menu button:hover{background:#1e293b;}";
-    document.head.appendChild(st);
-  }
-  function escapeSlack(s) {
-    return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  }
-  async function sendClientNoteToSlack(item) {
-    var settings = loadSettings();
-    var token = String(settings.slackToken || "").trim();
-    var memberId = String(settings.slackMemberUserId || "").trim();
-    if (!token || !memberId) {
-      alert("Slack bot token and your Slack member ID are required. Open Settings -> SLACK.");
-      return;
-    }
-    var title = String(item.title || "Client note");
-    var body = String(item.body || "").trim() || "(empty)";
-    var blocks = [
-      { type: "section", text: { type: "mrkdwn", text: "*Client note* \xB7 `" + escapeSlack(item.slug) + "`" } },
-      { type: "section", text: { type: "mrkdwn", text: "*" + escapeSlack(title) + "*\n" + escapeSlack(body).slice(0, 2800) } }
-    ];
-    await slackPostKitToSelfDm(token, memberId, "QA Wolf client note \xB7 " + title, blocks, []);
-  }
-  function flushPendingClientNoteEdits(editKey) {
-    var fn = pendingClientNoteFlush[editKey];
-    if (fn) {
-      delete pendingClientNoteFlush[editKey];
-      fn();
-    }
-  }
-  function storeNoteForEditKey(editKey) {
-    return state.store && state.store.notes ? state.store.notes[editKey] : null;
-  }
-  function mountClientNotesView(container, editKey, note) {
-    ensureClientNotesCss();
-    flushPendingClientNoteEdits(editKey);
-    var needsLegacyPersist = !Array.isArray(note.clientNotes) && (!!String(note.clientPlain || "").trim() || !!(note.bullets && note.bullets[0] && String(note.bullets[0].text || "").trim()));
-    container.innerHTML = "";
-    container.style.cssText = "display:flex;flex-direction:column;gap:10px;";
-    var items = normalizeClientNoteItems(note);
-    if (needsLegacyPersist) persistClientNotes(editKey, note);
-    var header = document.createElement("div");
-    header.style.cssText = "display:flex;align-items:center;gap:8px;flex-wrap:wrap;";
-    var title = document.createElement("div");
-    title.style.cssText = "flex:1;min-width:180px;";
-    title.innerHTML = '<div style="font-size:12px;font-weight:700;color:#e2e8f0;">Client notes</div><div style="font-size:10px;color:#64748b;margin-top:2px;">Reusable client knowledge. Reference from file notes with <code>[[client-note:slug]]</code>.</div>';
-    header.appendChild(title);
-    var addBtn = document.createElement("button");
-    addBtn.type = "button";
-    addBtn.textContent = "+ Client note";
-    addBtn.style.cssText = buttonStyle("primary");
-    header.appendChild(addBtn);
-    container.appendChild(header);
-    var list = document.createElement("div");
-    list.style.cssText = "display:flex;flex-direction:column;gap:8px;";
-    container.appendChild(list);
-    var cardSavers = [];
-    var saveTimers = {};
-    function saveAndRender() {
-      flushPendingClientNoteEdits(editKey);
-      var latest = storeNoteForEditKey(editKey) || note;
-      mountClientNotesView(container, editKey, latest);
-    }
-    function renderItem(item) {
-      var slugManual = item.slug !== "new-client-note" && item.slug !== slugifyClientNoteTitle(item.title);
-      var card = document.createElement("div");
-      card.setAttribute("data-qaw-client-note-card", item.slug);
-      card.style.cssText = "border:1px solid #334155;border-radius:10px;background:#0f172a;padding:10px;display:flex;flex-direction:column;gap:8px;box-shadow:inset 0 1px 0 rgba(255,255,255,0.03);";
-      if (item.favorite) card.style.borderColor = "#ca8a04";
-      var top = document.createElement("div");
-      top.style.cssText = "display:flex;align-items:center;gap:8px;";
-      if (item.favorite) {
-        var fav = document.createElement("span");
-        fav.style.cssText = "display:inline-block;font-size:10px;padding:3px 6px;border-radius:999px;background:#713f12;color:#fef08a;border:1px solid #ca8a04;";
-        fav.textContent = "\u2605";
-        top.appendChild(fav);
-      }
-      var titleInput = document.createElement("input");
-      titleInput.value = item.title;
-      titleInput.placeholder = "Client note title";
-      titleInput.style.cssText = "flex:1;min-width:0;background:#020617;color:#f8fafc;border:1px solid #334155;border-radius:6px;padding:6px 8px;font:12px monospace;font-weight:700;";
-      top.appendChild(titleInput);
-      var kebab = document.createElement("div");
-      kebab.className = "qaw-note-kebab";
-      var kebabBtn = document.createElement("button");
-      kebabBtn.type = "button";
-      kebabBtn.className = "qaw-note-kebab-btn";
-      kebabBtn.title = "More actions";
-      kebabBtn.textContent = "\u22EE";
-      var kebabMenu = document.createElement("div");
-      kebabMenu.className = "qaw-note-kebab-menu";
-      var pinItem = document.createElement("button");
-      pinItem.type = "button";
-      pinItem.textContent = item.favorite ? "\u2605 Unpin" : "\u2606 Pin";
-      pinItem.addEventListener("click", function(e) {
-        e.stopPropagation();
-        item.favorite = !item.favorite;
-        kebabMenu.classList.remove("open");
-        saveAndRender();
-      });
-      kebabMenu.appendChild(pinItem);
-      var copyItem = document.createElement("button");
-      copyItem.type = "button";
-      copyItem.textContent = "Copy token";
-      copyItem.addEventListener("click", function(e) {
-        e.stopPropagation();
-        saveItem();
-        var token = clientNoteToken(item.slug);
-        kebabMenu.classList.remove("open");
-        if (navigator.clipboard && navigator.clipboard.writeText) {
-          navigator.clipboard.writeText(token).catch(function() {
-            window.prompt("Copy client note token:", token);
-          });
-        } else {
-          window.prompt("Copy client note token:", token);
-        }
-      });
-      kebabMenu.appendChild(copyItem);
-      var slackRule = document.createElement("hr");
-      slackRule.style.cssText = "border:none;border-top:1px solid #1e293b;margin:2px 0;";
-      kebabMenu.appendChild(slackRule);
-      var slackItem = document.createElement("button");
-      slackItem.type = "button";
-      slackItem.textContent = "Send to Slack";
-      slackItem.addEventListener("click", function(e) {
-        e.stopPropagation();
-        saveItem();
-        kebabMenu.classList.remove("open");
-        sendClientNoteToSlack(item).catch(function(err) {
-          alert(err && err.message ? String(err.message) : String(err));
-        });
-      });
-      kebabMenu.appendChild(slackItem);
-      var delRule = document.createElement("hr");
-      delRule.style.cssText = "border:none;border-top:1px solid #1e293b;margin:2px 0;";
-      kebabMenu.appendChild(delRule);
-      var delItem = document.createElement("button");
-      delItem.type = "button";
-      delItem.style.color = "#fca5a5";
-      delItem.textContent = "Delete";
-      var confirming = false;
-      var confirmTimer = null;
-      delItem.addEventListener("click", function(e) {
-        e.stopPropagation();
-        if (!confirming) {
-          confirming = true;
-          delItem.textContent = "Sure? Click again";
-          delItem.style.color = "#f87171";
-          confirmTimer = setTimeout(function() {
-            confirming = false;
-            delItem.textContent = "Delete";
-            delItem.style.color = "#fca5a5";
-          }, 3e3);
-          return;
-        }
-        if (confirmTimer) clearTimeout(confirmTimer);
-        note.clientNotes = (note.clientNotes || []).filter(function(x) {
-          return x.id !== item.id;
-        });
-        kebabMenu.classList.remove("open");
-        saveAndRender();
-      });
-      kebabMenu.appendChild(delItem);
-      kebab.appendChild(kebabBtn);
-      kebab.appendChild(kebabMenu);
-      var kbDocCloser = null;
-      kebabBtn.addEventListener("click", function(e) {
-        e.stopPropagation();
-        var wasOpen = kebabMenu.classList.contains("open");
-        container.querySelectorAll(".qaw-note-kebab-menu.open").forEach(function(m) {
-          m.classList.remove("open");
-        });
-        if (kbDocCloser) {
-          document.removeEventListener("mousedown", kbDocCloser);
-          kbDocCloser = null;
-        }
-        if (!wasOpen) {
-          kebabMenu.classList.add("open");
-          var btnR = kebabBtn.getBoundingClientRect();
-          var mw = kebabMenu.offsetWidth || 130;
-          kebabMenu.style.top = btnR.bottom + 2 + "px";
-          kebabMenu.style.left = Math.max(8, Math.min(btnR.right - mw, window.innerWidth - mw - 8)) + "px";
-          kbDocCloser = function(ev) {
-            if (kebabMenu.contains(ev.target) || ev.target === kebabBtn) return;
-            kebabMenu.classList.remove("open");
-            document.removeEventListener("mousedown", kbDocCloser);
-            kbDocCloser = null;
-          };
-          setTimeout(function() {
-            document.addEventListener("mousedown", kbDocCloser);
-          }, 0);
-        }
-      });
-      top.appendChild(kebab);
-      card.appendChild(top);
-      var slugRow = document.createElement("div");
-      slugRow.style.cssText = "display:flex;align-items:center;gap:6px;flex-wrap:wrap;";
-      var slugLabel = document.createElement("span");
-      slugLabel.style.cssText = "font-size:10px;color:#64748b;";
-      slugLabel.textContent = "slug";
-      slugRow.appendChild(slugLabel);
-      var slugInput = document.createElement("input");
-      slugInput.value = item.slug;
-      slugInput.style.cssText = "width:180px;max-width:100%;background:#020617;color:#93c5fd;border:1px solid #1e3a5f;border-radius:999px;padding:4px 9px;font:10px monospace;";
-      slugRow.appendChild(slugInput);
-      card.appendChild(slugRow);
-      var body = document.createElement("textarea");
-      body.value = item.body;
-      body.placeholder = "What should future you remember for this client?";
-      body.rows = 5;
-      body.style.cssText = "width:100%;box-sizing:border-box;background:#020617;color:#cbd5e1;border:1px solid #334155;border-radius:8px;padding:8px;font:11px/1.5 monospace;resize:vertical;min-height:96px;";
-      card.appendChild(body);
-      function saveItem() {
-        var storeNote = storeNoteForEditKey(editKey) || note;
-        var list2 = storeNote.clientNotes || [];
-        var target = null;
-        for (var i = 0; i < list2.length; i++) {
-          if (list2[i] && list2[i].id === item.id) {
-            target = list2[i];
-            break;
-          }
-        }
-        if (!target) target = item;
-        var nextTitle = titleInput.value.trim() || "Client note";
-        var nextSlug = slugifyClientNoteTitle(slugInput.value || nextTitle) || target.slug || "client-note";
-        var nextBody = body.value.trim();
-        target.title = nextTitle;
-        target.slug = nextSlug;
-        target.body = nextBody;
-        target.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-        item.title = target.title;
-        item.slug = target.slug;
-        item.body = target.body;
-        slugInput.value = target.slug;
-        persistClientNotes(editKey, storeNote);
-      }
-      function scheduleSave2() {
-        var id = item.id;
-        if (saveTimers[id]) clearTimeout(saveTimers[id]);
-        saveTimers[id] = setTimeout(function() {
-          delete saveTimers[id];
-          saveItem();
-        }, 400);
-      }
-      cardSavers.push(saveItem);
-      titleInput.addEventListener("blur", saveItem);
-      slugInput.addEventListener("blur", saveItem);
-      body.addEventListener("blur", saveItem);
-      titleInput.addEventListener("input", function() {
-        if (!slugManual) slugInput.value = slugifyClientNoteTitle(titleInput.value);
-        scheduleSave2();
-      });
-      slugInput.addEventListener("input", function() {
-        slugManual = true;
-        scheduleSave2();
-      });
-      body.addEventListener("input", scheduleSave2);
-      list.appendChild(card);
-    }
-    if (!items.length) {
-      var empty = document.createElement("div");
-      empty.style.cssText = "border:1px dashed #334155;border-radius:10px;padding:18px 10px;text-align:center;color:#64748b;font-size:11px;";
-      empty.textContent = "No reusable client notes yet.";
-      list.appendChild(empty);
-    } else {
-      items.slice().sort(function(a, b) {
-        if (!!a.favorite !== !!b.favorite) return a.favorite ? -1 : 1;
-        return String(b.updatedAt || "").localeCompare(String(a.updatedAt || ""));
-      }).forEach(renderItem);
-    }
-    addBtn.addEventListener("click", function() {
-      var now = (/* @__PURE__ */ new Date()).toISOString();
-      if (!Array.isArray(note.clientNotes)) note.clientNotes = [];
-      note.clientNotes.unshift({
-        id: uid(),
-        title: "New client note",
-        slug: "new-client-note",
-        body: "",
-        createdAt: now,
-        updatedAt: now
-      });
-      saveAndRender();
-    });
-    var focusSlug = String(state.clientNoteFocusSlug || "");
-    if (focusSlug) {
-      state.clientNoteFocusSlug = "";
-      setTimeout(function() {
-        var target = null;
-        container.querySelectorAll("[data-qaw-client-note-card]").forEach(function(el) {
-          if (el.getAttribute("data-qaw-client-note-card") === focusSlug) target = el;
-        });
-        if (!target) return;
-        target.scrollIntoView({ block: "center", behavior: "smooth" });
-        var prev = target.style.boxShadow;
-        target.style.boxShadow = "0 0 0 2px #818cf8 inset";
-        setTimeout(function() {
-          target.style.boxShadow = prev;
-        }, 1600);
-      }, 0);
-    }
-    pendingClientNoteFlush[editKey] = function() {
-      Object.keys(saveTimers).forEach(function(id) {
-        clearTimeout(saveTimers[id]);
-        delete saveTimers[id];
-      });
-      cardSavers.forEach(function(fn) {
-        fn();
-      });
-    };
-  }
-  var pendingClientNoteFlush;
-  var init_client_notes_view = __esm({
-    "src/notes/45-client-notes-view.ts"() {
-      "use strict";
-      init_state();
-      init_store();
-      init_context();
-      init_slack_self_dm();
-      init_client_note_refs();
-      pendingClientNoteFlush = {};
     }
   });
 
@@ -20646,1122 +20639,6 @@ This won't delete the actual file.`)) return;
     }
   });
 
-  // src/notes/04-context.ts
-  function parseContext() {
-    var path = window.location.pathname;
-    var m = path.match(/^\/([^/]+)\/environments\/([^/]+)/);
-    if (!m) return null;
-    return { client: m[1], envId: m[2] };
-  }
-  function getActiveFileName() {
-    var tabs = document.querySelectorAll('[class*="styles_tab__"]');
-    var active = null;
-    for (var i = 0; i < tabs.length; i++) {
-      var t = tabs[i];
-      var cls = t.className;
-      if (typeof cls === "string" && cls.indexOf("styles_tabActive__") !== -1) {
-        active = t;
-        break;
-      }
-    }
-    if (!active) return null;
-    var closeBtn = active.querySelector('[class*="styles_closeButton__"]');
-    var clone = active.cloneNode(true);
-    if (closeBtn) {
-      var cbs = clone.querySelectorAll('[class*="styles_closeButton__"]');
-      for (var j = 0; j < cbs.length; j++) cbs[j].remove();
-    }
-    var text = (clone.innerText || clone.textContent || "").trim().replace(/\s+/g, " ");
-    if (!text) return null;
-    var parts = text.split(/[/\\]/);
-    var name = parts[parts.length - 1].trim();
-    if (!name || name.length > 200) return null;
-    return name;
-  }
-  function noteKey(client, envId, fileName) {
-    return client + "" + envId + "" + fileName;
-  }
-  function clientScopedNotesKey(client) {
-    return noteKey(client, CLIENT_SCOPE_ENV, CLIENT_NOTES_FILE);
-  }
-  function isClientScopedNoteKey(editKey) {
-    var m = parseNoteKey(editKey);
-    return !!(m && m.envId === CLIENT_SCOPE_ENV && m.fileName === CLIENT_NOTES_FILE);
-  }
-  function displayNoteFileLabel(metaOrKey) {
-    var m = typeof metaOrKey === "string" ? parseNoteKey(metaOrKey) : metaOrKey;
-    if (!m) return "";
-    if (m.envId === CLIENT_SCOPE_ENV && m.fileName === CLIENT_NOTES_FILE) return "Client notes";
-    return m.fileName;
-  }
-  function getActiveNoteKey() {
-    var ctx = parseContext();
-    var fn = getActiveFileName();
-    if (!ctx || !fn) return null;
-    return noteKey(ctx.client, ctx.envId, fn);
-  }
-  function syncFollowTabState() {
-    state.prevFollowActiveKey = getActiveNoteKey();
-  }
-  function relocateOrMergeToFileKey(sourceKey, newKey) {
-    if (!newKey) return false;
-    var meta = parseNoteKey(newKey);
-    if (!meta) return false;
-    ensureEnvMetadata(meta.client, meta.envId);
-    if (sourceKey && sourceKey === newKey) return true;
-    if (sourceKey) {
-      var n = state.store.notes[sourceKey];
-      if (!n) return false;
-      if (state.store.notes[newKey]) {
-        var target = state.store.notes[newKey];
-        target.bullets = (target.bullets || []).concat(n.bullets || []);
-        if (n.status && n.status !== "empty") target.status = n.status;
-        delete state.store.notes[sourceKey];
-      } else {
-        state.store.notes[newKey] = n;
-        delete state.store.notes[sourceKey];
-      }
-      try {
-        localStorage.removeItem(NOTE_LS_KEY_PREFIX + sourceKey);
-      } catch (_r) {
-      }
-    } else {
-      getOrCreateNote(meta.client, meta.envId, meta.fileName);
-    }
-    touchNote(newKey);
-    saveStoreImmediate();
-    if (!state.panelEl) mountNotesPanelShell();
-    renderPanelForKey(newKey);
-    return true;
-  }
-  function parseNoteKey(key) {
-    var p = key.split("");
-    if (p.length !== 3) return null;
-    return { client: p[0], envId: p[1], fileName: p[2] };
-  }
-  function caseMatchesNoteClient(c, noteClientSlug) {
-    if (!c || !c.id) return false;
-    var scope = String(c.scope || "").toLowerCase();
-    if (scope === "global") return true;
-    if (scope === "client") {
-      return String(c.clientSlug || "").trim() === String(noteClientSlug || "").trim();
-    }
-    if (c.clientSlug) return String(c.clientSlug).trim() === String(noteClientSlug || "").trim();
-    return true;
-  }
-  function ensureEnvMetadata(client, envId) {
-    if (envId === CLIENT_SCOPE_ENV) return;
-    if (!state.store.clientEnvOrder[client]) state.store.clientEnvOrder[client] = [];
-    var order = state.store.clientEnvOrder[client];
-    if (order.indexOf(envId) === -1) order.push(envId);
-    if (!state.store.envLabels[envId]) {
-      var _fileExplorerHdr = document.querySelector('[aria-label="File Explorer Header"]');
-      var _domEnvLabel = _fileExplorerHdr ? (_fileExplorerHdr.textContent || "").trim() : "";
-      if (_domEnvLabel) {
-        state.store.envLabels[envId] = _domEnvLabel;
-      } else if (order.length === 1) {
-        state.store.envLabels[envId] = "Production";
-      } else {
-        state.store.envLabels[envId] = "Env " + order.length;
-      }
-    }
-    scheduleSave();
-  }
-  function getEnvDisplayName(envId) {
-    if (envId === CLIENT_SCOPE_ENV) return "All envs";
-    return state.store.envLabels[envId] || envId.slice(0, 8) + "\u2026";
-  }
-  function getClientDisplayName(client) {
-    return state.store.clientNicknames[client] || client;
-  }
-  function getOrCreateNote(client, envId, fileName) {
-    ensureEnvMetadata(client, envId);
-    var k = noteKey(client, envId, fileName);
-    if (!state.store.notes[k]) {
-      state.store.notes[k] = {
-        status: "empty",
-        workMode: "follow",
-        bullets: [],
-        updatedAt: (/* @__PURE__ */ new Date()).toISOString()
-      };
-      if (envId === CLIENT_SCOPE_ENV && fileName === CLIENT_NOTES_FILE) {
-        state.store.notes[k].clientPlain = "";
-      }
-      saveStoreImmediate();
-    }
-    return state.store.notes[k];
-  }
-  function touchNote(k) {
-    if (state.store.notes[k]) {
-      state.store.notes[k].updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-      scheduleSave();
-    }
-  }
-  function noteMatchesActiveEditorFile(editKey) {
-    var ctx = parseContext();
-    var fn = getActiveFileName();
-    var meta = parseNoteKey(editKey);
-    if (!ctx || !fn || !meta) return false;
-    return meta.client === ctx.client && meta.envId === ctx.envId && meta.fileName === fn;
-  }
-  function detectTerminalOutcomeFromPanel() {
-    try {
-      var panel = document.getElementById("gitwolf-file-editor-panel") || document.body;
-      var txt = String(panel && (panel.innerText || panel.textContent) || "").toLowerCase();
-      if (txt.indexOf("flow passed") !== -1) return "passed";
-      if (txt.indexOf("flow stopped") !== -1) return "stopped";
-      if (txt.indexOf("flow failed") !== -1) return "failed";
-    } catch (_e) {
-    }
-    return "";
-  }
-  function readRunMetricsSlot(fileName) {
-    try {
-      var raw = localStorage.getItem(RUN_CHIME_METRICS_KEY);
-      if (!raw) return null;
-      var metrics = JSON.parse(raw);
-      return metrics && metrics.byFile && metrics.byFile[fileName] ? metrics.byFile[fileName] : null;
-    } catch (_e) {
-    }
-    return null;
-  }
-  function runTimesMatch(a, b) {
-    return Number.isFinite(a) && Number.isFinite(b) && Math.abs(a - b) <= 5e3;
-  }
-  function tabMatchesNote(t, client, envId, fileName) {
-    if (!t) return false;
-    if (String(t.client || "") !== String(client)) return false;
-    if (String(t.envId || "") !== String(envId)) return false;
-    return String(t.flowName || "") === String(fileName);
-  }
-  function getCompletedFailedRunLineFromOpenTabs(client, envId, fileName) {
-    try {
-      var raw = localStorage.getItem(OPEN_TABS_KEY);
-      if (!raw) return null;
-      var openTabs = JSON.parse(raw);
-      var wn = window.name || "";
-      var t = wn ? openTabs[wn] : null;
-      if (!tabMatchesNote(t, client, envId, fileName)) return null;
-      if (t.isRunning) return null;
-      if (t.lastRunPassed === true) return null;
-      var slot = readRunMetricsSlot(fileName);
-      var completedStart = Number(slot && slot.completedRunStartedAt);
-      var completedEnd = Number(slot && slot.completedRunEndedAt);
-      var lineRunStart = Number(t.currentLineRunStartedAt);
-      var lineSeenAt = Number(t.currentLineSeenAt);
-      if (!runTimesMatch(lineRunStart, completedStart)) return null;
-      if (Number.isFinite(completedEnd) && Number.isFinite(lineSeenAt) && lineSeenAt > completedEnd + 5e3) return null;
-      var ln = Number(t.currentLine);
-      if (Number.isFinite(ln) && ln > 0) return Math.floor(ln);
-    } catch (_e) {
-    }
-    return null;
-  }
-  function getFailedRunLineForNote(editKey) {
-    var meta = parseNoteKey(editKey);
-    if (!meta) return null;
-    if (!noteMatchesActiveEditorFile(editKey)) return null;
-    var panelOutcome = detectTerminalOutcomeFromPanel();
-    if (panelOutcome !== "failed") return null;
-    return getCompletedFailedRunLineFromOpenTabs(meta.client, meta.envId, meta.fileName);
-  }
-  function getMonacoEditorsFromWindow() {
-    try {
-      if (typeof monaco !== "undefined" && monaco.editor && typeof monaco.editor.getEditors === "function") {
-        return monaco.editor.getEditors() || [];
-      }
-    } catch (e) {
-    }
-    return [];
-  }
-  function pickMonacoEditor(editors) {
-    if (!editors || !editors.length) return null;
-    var i;
-    for (i = 0; i < editors.length; i++) {
-      try {
-        if (editors[i].hasTextFocus() && editors[i].getModel()) return editors[i];
-      } catch (e) {
-      }
-    }
-    var best = null;
-    var bestArea = 0;
-    for (i = 0; i < editors.length; i++) {
-      try {
-        var dom = editors[i].getDomNode();
-        if (!dom) continue;
-        var r = dom.getBoundingClientRect();
-        var area = r.width * r.height;
-        if (area > bestArea) {
-          bestArea = area;
-          best = editors[i];
-        }
-      } catch (e2) {
-      }
-    }
-    return best || editors[editors.length - 1];
-  }
-  function fallbackMonacoScrollToLine(lineNum) {
-    var root = document.querySelector(".monaco-editor");
-    if (!root) return false;
-    var scrollable = root.querySelector(".monaco-scrollable-element");
-    if (!scrollable) return false;
-    var lines = root.querySelectorAll(".view-lines .view-line");
-    var lineHeight = 19;
-    if (lines.length >= 2) {
-      var dh = lines[1].offsetTop - lines[0].offsetTop;
-      if (dh > 4) lineHeight = dh;
-    } else if (lines.length === 1) {
-      var rh = lines[0].getBoundingClientRect().height;
-      if (rh > 4) lineHeight = Math.round(rh);
-    }
-    var ln = Math.max(1, Math.floor(lineNum));
-    var targetTop = (ln - 1) * lineHeight - scrollable.clientHeight / 2 + lineHeight / 2;
-    scrollable.scrollTop = Math.max(0, targetTop);
-    var ta = root.querySelector("textarea.inputarea");
-    if (ta) ta.focus();
-    return true;
-  }
-  function captureLineContext(lineNo) {
-    var eds = getMonacoEditorsFromWindow();
-    var ed = pickMonacoEditor(eds);
-    if (!ed) return null;
-    var model;
-    try {
-      model = ed.getModel();
-    } catch (e) {
-      return null;
-    }
-    if (!model) return null;
-    var total = model.getLineCount();
-    function lineContent(n) {
-      return model.getLineContent(n) || "";
-    }
-    function isBlank(n) {
-      return n < 1 || n > total || lineContent(n).trim() === "";
-    }
-    var start = lineNo;
-    var end = lineNo;
-    while (start > 1 && !isBlank(start - 1)) start--;
-    while (end < total && !isBlank(end + 1)) end++;
-    var budget = 10 - (end - start + 1);
-    if (budget < 0) {
-      start = Math.max(1, lineNo - 4);
-      end = Math.min(total, start + 9);
-      budget = 0;
-    }
-    var topCursor = start - 1;
-    var botCursor = end + 1;
-    var upDone = topCursor < 1;
-    var botDone = botCursor > total;
-    var goUp = true;
-    while (budget > 0 && !(upDone && botDone)) {
-      if (goUp && !upDone) {
-        var upBlanks = 0;
-        var upScan = topCursor;
-        while (upScan >= 1 && isBlank(upScan)) {
-          upBlanks++;
-          upScan--;
-        }
-        if (upScan < 1) {
-          upDone = true;
-        } else {
-          var upBEnd = upScan;
-          var upBStart = upScan;
-          while (upBStart > 1 && !isBlank(upBStart - 1)) upBStart--;
-          var upBlanksToTake = Math.min(upBlanks, budget);
-          var upContentToTake = Math.min(upBEnd - upBStart + 1, budget - upBlanksToTake);
-          if (upContentToTake <= 0) {
-            upDone = true;
-          } else {
-            start = start - upBlanksToTake - upContentToTake;
-            topCursor = start - 1;
-            budget -= upBlanksToTake + upContentToTake;
-          }
-        }
-      } else if (!goUp && !botDone) {
-        var botBlanks = 0;
-        var botScan = botCursor;
-        while (botScan <= total && isBlank(botScan)) {
-          botBlanks++;
-          botScan++;
-        }
-        if (botScan > total) {
-          botDone = true;
-        } else {
-          var botBStart = botScan;
-          var botBEnd = botScan;
-          while (botBEnd < total && !isBlank(botBEnd + 1)) botBEnd++;
-          var botBlanksToTake = Math.min(botBlanks, budget);
-          var botContentToTake = Math.min(botBEnd - botBStart + 1, budget - botBlanksToTake);
-          if (botContentToTake <= 0) {
-            botDone = true;
-          } else {
-            end = end + botBlanksToTake + botContentToTake;
-            botCursor = end + 1;
-            budget -= botBlanksToTake + botContentToTake;
-          }
-        }
-      }
-      goUp = !goUp;
-    }
-    var lines = [];
-    for (var i = start; i <= end; i++) lines.push(lineContent(i));
-    return {
-      code: lines.join("\n"),
-      capturedAt: (/* @__PURE__ */ new Date()).toISOString(),
-      startLine: start,
-      endLine: end,
-      capturedForLine: lineNo
-    };
-  }
-  function getMonacoLinesInRange(start, end) {
-    var eds = getMonacoEditorsFromWindow();
-    var ed = pickMonacoEditor(eds);
-    if (!ed) return null;
-    var model;
-    try {
-      model = ed.getModel();
-    } catch (e) {
-      return null;
-    }
-    if (!model) return null;
-    var total = model.getLineCount();
-    var s = Math.max(1, start);
-    var e2 = Math.min(total, end);
-    if (s > e2) return null;
-    var result = [];
-    for (var i = s; i <= e2; i++) result.push(model.getLineContent(i) || "");
-    return result;
-  }
-  function goToMonacoLine(lineNum) {
-    var eds = getMonacoEditorsFromWindow();
-    var ed = pickMonacoEditor(eds);
-    if (ed) {
-      try {
-        var model = ed.getModel();
-        if (model) {
-          var max = model.getLineCount();
-          var ln = Math.min(Math.max(1, Math.floor(lineNum)), max);
-          ed.revealLineInCenter(ln);
-          ed.setPosition({ lineNumber: ln, column: 1 });
-          ed.focus();
-          return true;
-        }
-      } catch (e) {
-      }
-    }
-    if (fallbackMonacoScrollToLine(lineNum)) return true;
-    flashNotesHint("No Monaco editor found", true);
-    return false;
-  }
-  function onNotesPanelLineNavActivate(e) {
-    var chip = e.target.closest ? e.target.closest("[data-qaw-notes-go-line]") : null;
-    if (!chip) return;
-    if (e.type === "keydown") {
-      var ke = e;
-      if (ke.key !== "Enter" && ke.key !== " ") return;
-      e.preventDefault();
-    }
-    var ln = parseInt(chip.getAttribute("data-qaw-notes-go-line") || "", 10);
-    if (!Number.isFinite(ln) || ln < 1) return;
-    if (!state.panelEl) return;
-    var ek = state.panelEl.getAttribute("data-qaw-edit-key");
-    if (!ek) return;
-    e.preventDefault();
-    e.stopPropagation();
-    e.stopImmediatePropagation();
-    if (!noteMatchesActiveEditorFile(ek)) {
-      flashNotesHint("Open this file in the active tab first", true);
-      return;
-    }
-    goToMonacoLine(ln);
-  }
-  function ensureNotesLineNavDelegation() {
-    if (!state.panelEl || state.panelEl.getAttribute("data-qaw-line-nav") === "1") return;
-    state.panelEl.setAttribute("data-qaw-line-nav", "1");
-    state.panelEl.addEventListener("click", onNotesPanelLineNavActivate, true);
-    state.panelEl.addEventListener("keydown", onNotesPanelLineNavActivate, true);
-  }
-  function onNotesPanelOccChipCapture(e) {
-    if (e.type !== "click") return;
-    var chip = e.target.closest ? e.target.closest("[data-qaw-notes-occ-chip]") : null;
-    if (!chip) return;
-    e.preventDefault();
-    e.stopPropagation();
-    e.stopImmediatePropagation();
-    var idx = parseInt(chip.getAttribute("data-bullet-index") || "", 10);
-    var ek = state.panelEl && state.panelEl.getAttribute("data-qaw-edit-key");
-    if (!Number.isFinite(idx) || idx < 0 || !ek) return;
-    var note = state.store.notes[ek];
-    if (!note || !note.bullets || !note.bullets[idx]) return;
-    var bullet = note.bullets[idx];
-    var current = normalOccurrences(bullet);
-    var me = e;
-    bullet.occurrences = me.metaKey || me.ctrlKey ? Math.max(1, current - 1) : current + 1;
-    saveStoreImmediate();
-    var vc = state.panelEl && state.panelEl.querySelector("[data-qaw-notes-viewer]");
-    if (vc && vc._qawRedrawCards) vc._qawRedrawCards();
-  }
-  function ensureNotesOccChipDelegation() {
-    if (!state.panelEl || state.panelEl.getAttribute("data-qaw-occ-nav") === "1") return;
-    state.panelEl.setAttribute("data-qaw-occ-nav", "1");
-    state.panelEl.addEventListener("click", onNotesPanelOccChipCapture, true);
-  }
-  function navigateToHelperFile(stem, fn) {
-    var tabs = document.querySelectorAll('[class*="styles_tab__"]');
-    for (var i = 0; i < tabs.length; i++) {
-      var t = tabs[i];
-      var clone = t.cloneNode(true);
-      var cbs = clone.querySelectorAll('[class*="styles_closeButton__"]');
-      for (var j = 0; j < cbs.length; j++) cbs[j].remove();
-      var raw = (clone.innerText || clone.textContent || "").trim().replace(/\s+/g, " ");
-      var name = raw.split(/[/\\]/).pop() || "";
-      if (name === stem + ".js" || name === stem + ".ts") {
-        t.click();
-        if (fn) setTimeout(function() {
-          searchForHelperFn(fn);
-        }, 350);
-        return;
-      }
-    }
-    var indexedPath = bestIndexedHelperPath(stem);
-    openHelperViaFileTree(stem, fn, indexedPath);
-  }
-  function hsl(msg) {
-    helperSearchLog.push("[" + (/* @__PURE__ */ new Date()).toISOString().slice(11, 23) + "] " + msg);
-    if (helperSearchLog.length > HELPER_LOG_MAX_LINES) {
-      helperSearchLog = helperSearchLog.slice(helperSearchLog.length - HELPER_LOG_MAX_LINES);
-    }
-  }
-  function showHelperNotFoundToast(stem) {
-    var items = document.querySelectorAll('[role="treeitem"]');
-    var labels = [];
-    var maxItems = Math.min(items.length, 14);
-    for (var i = 0; i < maxItems; i++) {
-      var el = items[i];
-      var lbl = (el.getAttribute("aria-label") || el.textContent || "").trim().slice(0, 60);
-      var isFolder = el.hasAttribute("aria-expanded");
-      var expanded = el.getAttribute("aria-expanded");
-      labels.push((isFolder ? "[folder:" + expanded + "] " : "[file] ") + lbl);
-    }
-    hsl("Final visible treeitems (showing " + labels.length + " of " + items.length + "):");
-    labels.forEach(function(l) {
-      hsl("  " + l);
-    });
-    var logTail = helperSearchLog.slice(Math.max(0, helperSearchLog.length - 36));
-    var logText = logTail.join("\n");
-    var toast = document.createElement("div");
-    toast.setAttribute("data-qaw-overlay", "1");
-    toast.style.cssText = [
-      "position:fixed",
-      "bottom:28px",
-      "right:28px",
-      "z-index:2147483647",
-      "background:#1e293b",
-      "border:1.5px solid #ef4444",
-      "border-radius:10px",
-      "padding:10px 14px",
-      "color:#e2e8f0",
-      "font-size:12px",
-      'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif',
-      "box-shadow:0 4px 24px rgba(0,0,0,0.55)",
-      "display:flex",
-      "flex-direction:column",
-      "gap:8px",
-      "max-width:300px"
-    ].join(";");
-    var header = document.createElement("div");
-    header.style.cssText = "display:flex;align-items:center;gap:7px;";
-    var icon = document.createElement("span");
-    icon.textContent = "\u2717";
-    icon.style.cssText = "color:#ef4444;font-size:14px;flex-shrink:0;";
-    var msg = document.createElement("span");
-    msg.textContent = "Helper file \u201C" + stem + "\u201D not found";
-    header.appendChild(icon);
-    header.appendChild(msg);
-    toast.appendChild(header);
-    var copyBtn = document.createElement("button");
-    copyBtn.type = "button";
-    copyBtn.textContent = "Copy short debug log";
-    copyBtn.style.cssText = "background:#334155;color:#94a3b8;border:none;border-radius:5px;padding:5px 10px;cursor:pointer;font-size:11px;font-family:monospace;text-align:left;width:100%;";
-    copyBtn.addEventListener("click", function(e) {
-      e.stopPropagation();
-      var fallback = function() {
-        var ta = document.createElement("textarea");
-        ta.value = logText;
-        ta.style.cssText = "position:fixed;top:-9999px;left:-9999px;opacity:0;";
-        document.body.appendChild(ta);
-        ta.select();
-        try {
-          document.execCommand("copy");
-        } catch (_) {
-        }
-        ta.remove();
-      };
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(logText).catch(fallback);
-      } else {
-        fallback();
-      }
-      copyBtn.textContent = "\u2713 Copied";
-      setTimeout(function() {
-        copyBtn.textContent = "Copy debug logs";
-      }, 2e3);
-    });
-    toast.appendChild(copyBtn);
-    document.body.appendChild(toast);
-    var tid = setTimeout(function() {
-      if (toast.parentNode) toast.parentNode.removeChild(toast);
-    }, 2e4);
-    toast.querySelector("span").parentElement.addEventListener("click", function() {
-      clearTimeout(tid);
-      if (toast.parentNode) toast.parentNode.removeChild(toast);
-    });
-  }
-  function openHelperViaFileTree(stem, fn, indexedPathHint) {
-    helperSearchLog = [];
-    _helperTreeTargetPath = normaliseRepoPath(indexedPathHint || "");
-    hsl("stem=" + stem + " fn=" + fn);
-    if (_helperTreeTargetPath) hsl("targetPath=" + _helperTreeTargetPath);
-    flashNotesHint("Looking for " + stem + "\u2026", false);
-    var hideBtn = document.querySelector('[data-e2e="tooltip-hide-file-explorer"]');
-    var showBtn = document.querySelector('[data-e2e="tooltip-show-file-explorer"]');
-    hsl("explorer: hide=" + !!hideBtn + " show=" + !!showBtn);
-    if (!hideBtn && showBtn) {
-      showBtn.click();
-      hsl("clicked show-file-explorer, waiting 500ms");
-      setTimeout(function() {
-        findAndClickHelperFile(stem, fn, 0);
-      }, 500);
-    } else {
-      findAndClickHelperFile(stem, fn, 0);
-    }
-  }
-  function normaliseRepoPath(raw) {
-    var p = String(raw || "").trim().replace(/\\/g, "/").replace(/^\/+/, "");
-    if (!p) return "";
-    var srcIdx = p.indexOf("src/");
-    if (srcIdx >= 0) return p.slice(srcIdx);
-    return p;
-  }
-  function readPathIndexForHelpers() {
-    try {
-      return JSON.parse(localStorage.getItem(FILE_PATH_INDEX_KEY2) || "{}");
-    } catch (_e) {
-      return {};
-    }
-  }
-  function bestIndexedHelperPath(stem) {
-    var ctx = parseContext();
-    if (!ctx) return null;
-    var ctxClient = ctx.client;
-    var ctxEnvId = ctx.envId;
-    var idx = readPathIndexForHelpers();
-    var candidates = [];
-    Object.keys(idx).forEach(function(k) {
-      var parts = k.split(FILE_INDEX_SEP2);
-      if (parts.length !== 3) return;
-      if (parts[0] !== ctxClient || parts[1] !== ctxEnvId) return;
-      var base = parts[2] || "";
-      if (base !== stem + ".ts" && base !== stem + ".js" && base !== stem) return;
-      var p = normaliseRepoPath(String(idx[k] || ""));
-      if (p) candidates.push(p);
-    });
-    if (!candidates.length) return null;
-    if (candidates.length === 1) return candidates[0];
-    var hints = activeFlowPathHints();
-    var best = candidates[0];
-    var bestScore = -Infinity;
-    candidates.forEach(function(p) {
-      var score = 0;
-      for (var i = 0; i < hints.prefixes.length; i++) {
-        var pref = hints.prefixes[i];
-        if (pref && p.indexOf(pref + "/") === 0) score += 60 + i * 8;
-      }
-      for (var j = 0; j < hints.leafDirs.length; j++) {
-        var leaf = hints.leafDirs[j];
-        if (!leaf) continue;
-        if (p.indexOf("/" + leaf + "/") !== -1 || p.indexOf(leaf + "/") === 0) score += 8;
-      }
-      if (score > bestScore) {
-        bestScore = score;
-        best = p;
-      }
-    });
-    return best;
-  }
-  function activeFlowPathHints() {
-    var raw = "";
-    try {
-      var sp = new URLSearchParams(window.location.search);
-      raw = sp.get("file") || "";
-    } catch (_e) {
-    }
-    var p = normaliseRepoPath(raw);
-    if (!p) return { prefixes: [], leafDirs: [] };
-    var parts = p.split("/");
-    if (parts.length < 2) return { prefixes: [], leafDirs: [] };
-    var dirs = parts.slice(0, -1);
-    var prefixes = [];
-    for (var i = 0; i < dirs.length; i++) prefixes.push(dirs.slice(0, i + 1).join("/"));
-    var leafDirs = dirs.slice(Math.max(0, dirs.length - 3));
-    return { prefixes, leafDirs };
-  }
-  function helperTreeTargetHints() {
-    var p = normaliseRepoPath(_helperTreeTargetPath || "");
-    if (!p) return activeFlowPathHints();
-    var parts = p.split("/");
-    if (parts.length < 2) return activeFlowPathHints();
-    var dirs = parts.slice(0, -1);
-    var prefixes = [];
-    for (var i = 0; i < dirs.length; i++) prefixes.push(dirs.slice(0, i + 1).join("/"));
-    var leafDirs = dirs.slice(Math.max(0, dirs.length - 4));
-    return { prefixes, leafDirs };
-  }
-  function getTreeScrollContainer() {
-    var tree = document.querySelector('[role="tree"]');
-    if (!tree) return null;
-    var sc = tree.closest(".monaco-scrollable-element");
-    if (sc) return sc;
-    var p = tree.parentElement;
-    while (p) {
-      if (p.scrollHeight > p.clientHeight + 8) return p;
-      p = p.parentElement;
-    }
-    return null;
-  }
-  function nudgeTreeScroll(attempt, stem) {
-    var sc = getTreeScrollContainer();
-    if (!sc) return;
-    var max = Math.max(0, sc.scrollHeight - sc.clientHeight);
-    if (max <= 0) return;
-    var targetStem = String(stem || "").toLowerCase();
-    var visibleFiles = [];
-    var items = document.querySelectorAll('[role="treeitem"]');
-    for (var i = 0; i < items.length; i++) {
-      var el = items[i];
-      if (el.hasAttribute("aria-expanded")) continue;
-      var lbl = (el.getAttribute("aria-label") || el.textContent || "").trim().toLowerCase();
-      if (!/\.(ts|js)$/.test(lbl)) continue;
-      visibleFiles.push(lbl);
-    }
-    var target = sc.scrollTop;
-    if (visibleFiles.length && targetStem) {
-      visibleFiles.sort();
-      var first = visibleFiles[0];
-      var last = visibleFiles[visibleFiles.length - 1];
-      if (targetStem + ".zz" < first) {
-        target = Math.max(0, sc.scrollTop - Math.max(120, Math.round(sc.clientHeight * 0.75)));
-      } else if (targetStem > last) {
-        target = Math.min(max, sc.scrollTop + Math.max(120, Math.round(sc.clientHeight * 0.75)));
-      } else {
-        target = Math.min(max, sc.scrollTop + Math.max(60, Math.round(sc.clientHeight * 0.35)));
-      }
-    } else {
-      var cycle = Math.floor(attempt / 3) % 6;
-      if (cycle === 0) target = Math.round(max * 0.3);
-      else if (cycle === 1) target = Math.round(max * 0.6);
-      else if (cycle === 2) target = max;
-      else if (cycle === 3) target = Math.round(max * 0.7);
-      else if (cycle === 4) target = Math.round(max * 0.35);
-      else target = 0;
-    }
-    if (Math.abs(sc.scrollTop - target) < 6) return;
-    sc.scrollTop = target;
-    hsl("scroll tree to " + target + "/" + max + " (target=" + targetStem + ")");
-  }
-  function findHelperFileItem(stem) {
-    var items = document.querySelectorAll('[role="treeitem"]');
-    var candidates = [];
-    for (var i = 0; i < items.length; i++) {
-      var el = items[i];
-      if (el.hasAttribute("aria-expanded")) continue;
-      var lbl = (el.getAttribute("aria-label") || el.textContent || "").trim();
-      if (lbl === stem + ".ts" || lbl === stem + ".js" || lbl === stem) {
-        candidates.push({ el, idx: i, path: normaliseRepoPath(getTreeItemPath(el) || lbl) });
-      }
-    }
-    if (!candidates.length) return null;
-    if (candidates.length === 1) return candidates[0].el;
-    var hints = helperTreeTargetHints();
-    var best = candidates[0];
-    var bestScore = -Infinity;
-    var anchorIdx = Math.floor(items.length / 2);
-    for (var ci = 0; ci < candidates.length; ci++) {
-      var c = candidates[ci];
-      var score = 0;
-      for (var pi = 0; pi < hints.prefixes.length; pi++) {
-        var pref = hints.prefixes[pi];
-        if (pref && c.path.indexOf(pref + "/") === 0) score += 60 + pi * 8;
-      }
-      for (var li = 0; li < hints.leafDirs.length; li++) {
-        var leaf = hints.leafDirs[li];
-        if (!leaf) continue;
-        if (c.path.indexOf("/" + leaf + "/") !== -1 || c.path.indexOf(leaf + "/") === 0) score += 8;
-      }
-      score -= Math.abs(c.idx - anchorIdx) * 0.04;
-      if (score > bestScore) {
-        bestScore = score;
-        best = c;
-      }
-    }
-    hsl("findHelperFileItem: chose path=" + (best.path || "(unknown)") + " among " + candidates.length + " matches");
-    return best.el;
-  }
-  function getTreeItemPath(el) {
-    var level = parseInt(el.getAttribute("aria-level") || "0", 10);
-    if (level <= 0) return null;
-    var label = (el.getAttribute("aria-label") || el.textContent || "").trim();
-    if (!label) return null;
-    if (level === 1) return label;
-    var items = Array.from(document.querySelectorAll('[role="treeitem"]'));
-    var idx = items.indexOf(el);
-    if (idx === -1) return null;
-    var parts = [label];
-    var curLevel = level;
-    for (var ii = idx - 1; ii >= 0 && curLevel > 1; ii--) {
-      var it = items[ii];
-      var itLevel = parseInt(it.getAttribute("aria-level") || "0", 10);
-      if (itLevel > 0 && itLevel < curLevel && it.hasAttribute("aria-expanded")) {
-        parts.unshift((it.getAttribute("aria-label") || it.textContent || "").trim());
-        curLevel = itLevel;
-      }
-    }
-    return parts.join("/");
-  }
-  function findTreeExpandState() {
-    var items = document.querySelectorAll('[role="treeitem"]');
-    if (!items.length) return null;
-    var el = items[0];
-    var fk = Object.keys(el).find(function(k) {
-      return k.startsWith("__reactFiber") || k.startsWith("__reactInternalInstance");
-    });
-    if (!fk) return null;
-    var n = el[fk];
-    var depth = 0;
-    while (n && depth < 70) {
-      var s = n.memoizedState;
-      while (s) {
-        var ms = s.memoizedState;
-        var disp = s.queue && s.queue.dispatch;
-        if (Array.isArray(ms) && typeof disp === "function") {
-          if (ms.every(function(v) {
-            return typeof v === "string";
-          }) && ms.some(function(v) {
-            return v === "src" || v.indexOf("/") !== -1;
-          })) {
-            var sig = JSON.stringify(ms);
-            if (_lastExpandStateSig !== sig) {
-              _lastExpandStateSig = sig;
-              hsl("findTreeExpandState: depth=" + depth + " current=" + sig);
-            }
-            return { dispatch: disp, current: ms };
-          }
-        }
-        s = s.next;
-      }
-      n = n.return;
-      depth++;
-    }
-    hsl("findTreeExpandState: not found after " + depth + " nodes");
-    return null;
-  }
-  function elementFromPointClick(cx, cy) {
-    var hit = document.elementFromPoint(cx, cy);
-    var target = hit || document.body;
-    var pageWin = document.defaultView;
-    var base = { bubbles: true, cancelable: true, view: pageWin, clientX: cx, clientY: cy };
-    if (typeof PointerEvent === "function") {
-      target.dispatchEvent(new PointerEvent("pointerdown", Object.assign({}, base, { pointerId: 1, pointerType: "mouse", isPrimary: true, buttons: 1 })));
-    }
-    target.dispatchEvent(new MouseEvent("mousedown", Object.assign({}, base, { buttons: 1 })));
-    setTimeout(function() {
-      target.dispatchEvent(new MouseEvent("mouseup", Object.assign({}, base, { buttons: 0 })));
-      if (typeof PointerEvent === "function") {
-        target.dispatchEvent(new PointerEvent("pointerup", Object.assign({}, base, { pointerId: 1, pointerType: "mouse", isPrimary: true, buttons: 0 })));
-      }
-      target.dispatchEvent(new MouseEvent("click", Object.assign({}, base, { buttons: 0 })));
-    }, 0);
-  }
-  function nearestAncestorFolderLabel(items, idx) {
-    var curLevel = parseInt(items[idx].getAttribute("aria-level") || "0", 10);
-    if (!Number.isFinite(curLevel) || curLevel <= 1) return "";
-    for (var i = idx - 1; i >= 0; i--) {
-      var it = items[i];
-      if (!it.hasAttribute("aria-expanded")) continue;
-      var itLevel = parseInt(it.getAttribute("aria-level") || "0", 10);
-      if (itLevel > 0 && itLevel < curLevel) {
-        return (it.getAttribute("aria-label") || it.textContent || "").trim();
-      }
-    }
-    return "";
-  }
-  function robustTreeItemClick(el) {
-    var panel = state.panelEl;
-    if (panel) panel.style.visibility = "hidden";
-    try {
-      var row2 = el.querySelector('[class*="treeItemRow"]') || el.closest('[class*="treeItemRow"]') || el;
-      row2.setAttribute("tabindex", "0");
-      try {
-        row2.focus();
-      } catch (_f) {
-      }
-      var r = row2.getBoundingClientRect();
-      var cx = Math.round(Math.min(Math.max(r.left + r.width / 2, 0), window.innerWidth - 1));
-      var cy = Math.round(Math.min(Math.max(r.top + r.height / 2, 0), window.innerHeight - 1));
-      var hit = document.elementFromPoint(cx, cy);
-      if (hit && row2.contains(hit)) elementFromPointClick(cx, cy);
-      else {
-        var cxCaret = Math.round(r.left + Math.min(14, Math.max(6, r.width * 0.12)));
-        elementFromPointClick(cxCaret, cy);
-        setTimeout(function() {
-          elementFromPointClick(cx, cy);
-        }, 40);
-      }
-      setTimeout(function() {
-        if (panel) panel.style.visibility = "";
-      }, 90);
-    } catch (_e) {
-      try {
-        el.click();
-      } catch (_e2) {
-      }
-      if (panel) panel.style.visibility = "";
-    }
-  }
-  function tryExpandByVisibleFolderClicks(hints, attempt) {
-    var items = Array.from(document.querySelectorAll('[role="treeitem"]'));
-    if (!items.length) return;
-    var clicked = false;
-    for (var pi = 0; pi < hints.prefixes.length; pi++) {
-      var pref = hints.prefixes[pi];
-      if (!pref) continue;
-      var segs = pref.split("/");
-      var target = segs[segs.length - 1];
-      var parent = segs.length > 1 ? segs[segs.length - 2] : "";
-      for (var i = 0; i < items.length; i++) {
-        var el = items[i];
-        var lbl = (el.getAttribute("aria-label") || el.textContent || "").trim();
-        if (lbl !== target) continue;
-        var hasExpandAttr = el.hasAttribute("aria-expanded");
-        if (!hasExpandAttr && lbl !== "src" && lbl !== "utilities" && lbl !== "nav") continue;
-        if (parent) {
-          var anc = nearestAncestorFolderLabel(items, i);
-          if (anc && anc !== parent) continue;
-        }
-        var expanded = el.getAttribute("aria-expanded");
-        if (!hasExpandAttr || expanded === "false") {
-          robustTreeItemClick(el);
-          clicked = true;
-          hsl("fallback expand click: " + pref + (hasExpandAttr ? "" : " (no aria-expanded)"));
-          break;
-        }
-      }
-      if (clicked) break;
-    }
-    if (!clicked && attempt % 5 === 0) {
-      hsl("fallback expand click: no matching collapsed folder currently visible");
-    }
-  }
-  function tryExpandHelperFolders(attempt) {
-    var expandState = findTreeExpandState();
-    var hints = helperTreeTargetHints();
-    if (!expandState) {
-      if (attempt % 5 === 0) hsl("tryExpandHelperFolders: no expand state found; using click fallback");
-      tryExpandByVisibleFolderClicks(hints, attempt);
-      return;
-    }
-    var items = document.querySelectorAll('[role="treeitem"]');
-    var toAdd = [];
-    for (var pi = 0; pi < hints.prefixes.length; pi++) {
-      var pref0 = hints.prefixes[pi];
-      if (pref0 && expandState.current.indexOf(pref0) === -1 && toAdd.indexOf(pref0) === -1) {
-        toAdd.push(pref0);
-      }
-    }
-    for (var i = 0; i < items.length; i++) {
-      var el = items[i];
-      if (!el.hasAttribute("aria-expanded")) continue;
-      if (el.getAttribute("aria-expanded") === "true") continue;
-      var lbl = (el.getAttribute("aria-label") || el.textContent || "").trim();
-      var path = getTreeItemPath(el);
-      if (!path) continue;
-      var isCommonRoot = lbl === "src" || lbl === "nav" || lbl === "utilities";
-      var matchesHint = false;
-      for (var hi = 0; hi < hints.prefixes.length; hi++) {
-        var pref = hints.prefixes[hi];
-        if (pref && (path === pref || pref.indexOf(path + "/") === 0)) {
-          matchesHint = true;
-          break;
-        }
-      }
-      if (!isCommonRoot && !matchesHint) continue;
-      if (path && expandState.current.indexOf(path) === -1 && toAdd.indexOf(path) === -1) {
-        hsl("queueing expand: " + path);
-        toAdd.push(path);
-      }
-    }
-    if (toAdd.length > 0) {
-      var next = expandState.current.concat(toAdd);
-      hsl("dispatching expanded: " + JSON.stringify(next));
-      expandState.dispatch(next);
-    }
-  }
-  function isHelperTabOpen(stem) {
-    var tabs = document.querySelectorAll('[class*="styles_tab__"]');
-    for (var i = 0; i < tabs.length; i++) {
-      var t = tabs[i];
-      var clone = t.cloneNode(true);
-      var cbs = clone.querySelectorAll('[class*="styles_closeButton__"]');
-      for (var j = 0; j < cbs.length; j++) cbs[j].remove();
-      var raw = (clone.innerText || clone.textContent || "").trim().replace(/\s+/g, " ");
-      var name = raw.split(/[/\\]/).pop() || "";
-      if (name === stem + ".js" || name === stem + ".ts") return true;
-    }
-    return false;
-  }
-  function clickHelperFileItem(el, stem, fn) {
-    el.scrollIntoView({ block: "center" });
-    setTimeout(function() {
-      var rect = el.getBoundingClientRect();
-      var cx = Math.round(rect.left + rect.width / 2);
-      var cy = Math.round(rect.top + rect.height / 2);
-      var panel = state.panelEl;
-      if (panel) panel.style.visibility = "hidden";
-      elementFromPointClick(cx, cy);
-      setTimeout(function() {
-        if (panel) panel.style.visibility = "";
-        if (!isHelperTabOpen(stem)) {
-          hsl("first click did not open tab; retry click");
-          if (panel) panel.style.visibility = "hidden";
-          elementFromPointClick(cx, cy);
-          setTimeout(function() {
-            if (panel) panel.style.visibility = "";
-          }, 80);
-        }
-        hsl("clicked file item, waiting for Monaco");
-        if (fn) setTimeout(function() {
-          searchForHelperFn(fn);
-        }, 800);
-      }, 80);
-    }, 100);
-  }
-  function findAndClickHelperFile(stem, fn, attempt) {
-    var MAX_ATTEMPTS = 25;
-    if (attempt >= MAX_ATTEMPTS) {
-      hsl("gave up after " + MAX_ATTEMPTS + " attempts");
-      showHelperNotFoundToast(stem);
-      return;
-    }
-    if (attempt % 5 === 0) {
-      var items = document.querySelectorAll('[role="treeitem"]');
-      var summary = [];
-      var maxSummary = Math.min(items.length, 18);
-      for (var i = 0; i < maxSummary; i++) {
-        var el = items[i];
-        var lbl = (el.getAttribute("aria-label") || el.textContent || "").trim().slice(0, 40);
-        summary.push((el.hasAttribute("aria-expanded") ? "F" : "f") + ":" + lbl);
-      }
-      hsl("attempt " + attempt + " tree[" + items.length + "] sample: " + summary.join(", "));
-    }
-    var fileEl = findHelperFileItem(stem);
-    if (fileEl) {
-      hsl('found "' + stem + '" at attempt ' + attempt);
-      clickHelperFileItem(fileEl, stem, fn);
-      return;
-    }
-    tryExpandHelperFolders(attempt);
-    nudgeTreeScroll(attempt, stem);
-    setTimeout(function() {
-      findAndClickHelperFile(stem, fn, attempt + 1);
-    }, 300);
-  }
-  function searchForHelperFn(fn) {
-    var eds = getMonacoEditorsFromWindow();
-    var ed = pickMonacoEditor(eds);
-    if (!ed) return;
-    var model;
-    try {
-      model = ed.getModel();
-    } catch (e) {
-      return;
-    }
-    if (!model) return;
-    var content;
-    try {
-      content = model.getValue();
-    } catch (e) {
-      return;
-    }
-    var lines = content.split("\n");
-    var fnEsc = fn.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    var patterns = [
-      new RegExp("^\\s*(export\\s+)?(async\\s+)?function\\s+" + fnEsc + "\\s*[(<]"),
-      new RegExp("^\\s*(export\\s+)?const\\s+" + fnEsc + "\\s*="),
-      new RegExp("^\\s*" + fnEsc + "\\s*[=:]\\s*(async\\s+)?function"),
-      new RegExp("\\b" + fnEsc + "\\b")
-    ];
-    var foundLine = null;
-    outer: for (var p = 0; p < patterns.length; p++) {
-      for (var li = 0; li < lines.length; li++) {
-        if (patterns[p].test(lines[li])) {
-          foundLine = li + 1;
-          break outer;
-        }
-      }
-    }
-    if (foundLine != null) {
-      goToMonacoLine(foundLine);
-      setTimeout(function() {
-        var active = document.activeElement;
-        if (active && active !== document.body) active.blur();
-      }, 50);
-    }
-  }
-  function getThrowLines() {
-    var eds = getMonacoEditorsFromWindow();
-    var ed = pickMonacoEditor(eds);
-    if (!ed) return [];
-    var model;
-    try {
-      model = ed.getModel();
-    } catch (e) {
-      return [];
-    }
-    if (!model) return [];
-    var content;
-    try {
-      content = model.getValue();
-    } catch (e) {
-      return [];
-    }
-    var lines = content.split("\n");
-    var result = [];
-    for (var i = 0; i < lines.length; i++) {
-      if (/throw new Error\s*\(\s*['"`]debug/.test(lines[i])) result.push(i + 1);
-    }
-    return result;
-  }
-  var helperSearchLog, HELPER_LOG_MAX_LINES, FILE_PATH_INDEX_KEY2, FILE_INDEX_SEP2, _helperTreeTargetPath, _lastExpandStateSig;
-  var init_context = __esm({
-    "src/notes/04-context.ts"() {
-      "use strict";
-      init_state();
-      init_constants();
-      init_store();
-      init_shift();
-      init_shift();
-      init_panel_shell();
-      init_render_panel();
-      helperSearchLog = [];
-      HELPER_LOG_MAX_LINES = 80;
-      FILE_PATH_INDEX_KEY2 = "_qawFilePathIndex";
-      FILE_INDEX_SEP2 = "";
-      _helperTreeTargetPath = "";
-      _lastExpandStateSig = "";
-    }
-  });
-
   // src/notes/09-quicklinks.ts
   function isValidHttpUrl(str) {
     try {
@@ -22270,12 +21147,1311 @@ This won't delete the actual file.`)) return;
     }
   });
 
+  // src/notes/10-panel-shell.ts
+  var panel_shell_exports = {};
+  __export(panel_shell_exports, {
+    applyDrawerWidth: () => applyDrawerWidth2,
+    clampDrawerWidth: () => clampDrawerWidth,
+    mountNotesPanelShell: () => mountNotesPanelShell,
+    wireDrawerResize: () => wireDrawerResize
+  });
+  function clampDrawerWidth(px) {
+    var w = Math.round(px);
+    return Math.max(280, Math.min(w, window.innerWidth - 24));
+  }
+  function applyDrawerWidth2(el) {
+    var w = clampDrawerWidth(state.store.drawerWidth != null ? state.store.drawerWidth : 540);
+    el.style.width = w + "px";
+    el.style.maxWidth = "none";
+  }
+  function wireDrawerResize(panel) {
+    var handle = document.createElement("div");
+    handle.setAttribute("data-e2e", "investigation-panel-resize-handle");
+    handle.title = "Drag to resize drawer";
+    handle.setAttribute("tabindex", "-1");
+    handle.style.cssText = "position:absolute;top:0;right:0;width:8px;height:100%;cursor:ew-resize;z-index:20;background:linear-gradient(90deg,transparent,rgba(148,163,184,0.12));";
+    handle.addEventListener("mousedown", function(e) {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      var startX = e.clientX;
+      var startW = panel.getBoundingClientRect().width;
+      function onMove(ev) {
+        var nw = clampDrawerWidth(startW + (ev.clientX - startX));
+        panel.style.width = nw + "px";
+      }
+      function onUp() {
+        document.removeEventListener("mousemove", onMove);
+        document.removeEventListener("mouseup", onUp);
+        state.store.drawerWidth = clampDrawerWidth(panel.getBoundingClientRect().width);
+        saveStoreImmediate();
+      }
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup", onUp);
+    });
+    panel.appendChild(handle);
+  }
+  function mountNotesPanelShell() {
+    if (state.panelEl) return;
+    state.panelEl = document.createElement("div");
+    state.panelEl.setAttribute("data-qaw-overlay", "1");
+    state.panelEl.setAttribute("data-qaw-inv-notes", "1");
+    state.panelEl.setAttribute("data-e2e", "investigation-panel");
+    state.panelEl.style.cssText = [
+      "position:fixed",
+      "top:0",
+      "left:0",
+      "height:100vh",
+      "background:#1e293b",
+      "color:#f1f5f9",
+      "border-right:1px solid #475569",
+      "z-index:" + Z_INV_DRAWER,
+      "box-shadow:4px 0 16px rgba(0,0,0,0.35)",
+      "display:flex",
+      "flex-direction:column",
+      "font-family:monospace",
+      "font-size:12px",
+      "box-sizing:border-box"
+    ].join(";");
+    applyDrawerWidth2(state.panelEl);
+    var head = document.createElement("div");
+    head.setAttribute("data-qaw-notes-head", "1");
+    head.setAttribute("data-e2e", "investigation-panel-header");
+    head.style.cssText = "padding:10px 14px;border-bottom:1px solid #334155;flex-shrink:0;";
+    var titleRow = document.createElement("div");
+    titleRow.style.cssText = "display:flex;align-items:center;justify-content:space-between;margin-bottom:2px;";
+    var ht = document.createElement("span");
+    ht.setAttribute("data-e2e", "investigation-panel-title");
+    ht.style.cssText = "font-weight:bold;display:flex;align-items:baseline;gap:6px;";
+    var htText = document.createElement("span");
+    htText.textContent = "GitWolf Notes";
+    function resolveNotesScriptVersion2() {
+      try {
+        var gm = typeof GM_info !== "undefined" && GM_info && GM_info.script && GM_info.script.version ? String(GM_info.script.version) : "";
+        if (gm && gm !== "0.0") return gm;
+      } catch (e) {
+      }
+      try {
+        if ("1.513") return "1.513";
+      } catch (e2) {
+      }
+      return "unknown";
+    }
+    var htVer = document.createElement("span");
+    htVer.textContent = "v" + resolveNotesScriptVersion2();
+    htVer.style.cssText = "font-size:10px;font-weight:400;color:#64748b;font-family:monospace;";
+    ht.appendChild(htText);
+    ht.appendChild(htVer);
+    var feed = document.createElement("span");
+    feed.setAttribute("data-qaw-save-feedback", "1");
+    feed.setAttribute("data-e2e", "investigation-save-indicator");
+    feed.style.cssText = "font-size:10px;color:#34d399;opacity:0;transition:opacity 0.25s ease;margin-left:6px;";
+    ht.appendChild(feed);
+    var iconBtnCss = "background:none;border:none;color:#64748b;cursor:pointer;font-size:15px;flex-shrink:0;line-height:1;padding:0 2px;transition:color 0.12s;";
+    var hx = document.createElement("button");
+    hx.setAttribute("data-e2e", "investigation-panel-close");
+    hx.textContent = "\u2715";
+    hx.style.cssText = iconBtnCss + "font-size:16px;";
+    hx.addEventListener("mouseover", function() {
+      hx.style.color = "#e2e8f0";
+    });
+    hx.addEventListener("mouseout", function() {
+      hx.style.color = "#64748b";
+    });
+    hx.addEventListener("click", closePanel);
+    titleRow.appendChild(ht);
+    titleRow.appendChild(hx);
+    head.appendChild(titleRow);
+    var body = document.createElement("div");
+    body.setAttribute("data-qaw-notes-body", "1");
+    body.setAttribute("data-e2e", "investigation-panel-body");
+    body.style.cssText = "flex:1;overflow-y:auto;padding:12px 14px;display:flex;flex-direction:column;min-height:0;";
+    var foot = document.createElement("div");
+    foot.setAttribute("data-qaw-drawer-footer", "1");
+    foot.setAttribute("data-e2e", "investigation-drawer-footer");
+    foot.style.cssText = "flex-shrink:0;border-top:1px solid #334155;padding:10px 14px;background:#0f172a;";
+    state.panelEl.appendChild(head);
+    state.panelEl.appendChild(body);
+    state.panelEl.appendChild(foot);
+    wireDrawerResize(state.panelEl);
+    document.body.appendChild(state.panelEl);
+    refreshInvestigationShiftBar();
+    refreshDrawerFooter();
+  }
+  var init_panel_shell = __esm({
+    "src/notes/10-panel-shell.ts"() {
+      "use strict";
+      init_state();
+      init_constants();
+      init_store();
+      init_shift();
+      init_quicklinks();
+      init_chime_ingest();
+    }
+  });
+
+  // src/notes/04-context.ts
+  function parseContext() {
+    var path = window.location.pathname;
+    var m = path.match(/^\/([^/]+)\/environments\/([^/]+)/);
+    if (!m) return null;
+    return { client: m[1], envId: m[2] };
+  }
+  function getActiveFileName() {
+    var tabs = document.querySelectorAll('[class*="styles_tab__"]');
+    var active = null;
+    for (var i = 0; i < tabs.length; i++) {
+      var t = tabs[i];
+      var cls = t.className;
+      if (typeof cls === "string" && cls.indexOf("styles_tabActive__") !== -1) {
+        active = t;
+        break;
+      }
+    }
+    if (!active) return null;
+    var closeBtn = active.querySelector('[class*="styles_closeButton__"]');
+    var clone = active.cloneNode(true);
+    if (closeBtn) {
+      var cbs = clone.querySelectorAll('[class*="styles_closeButton__"]');
+      for (var j = 0; j < cbs.length; j++) cbs[j].remove();
+    }
+    var text = (clone.innerText || clone.textContent || "").trim().replace(/\s+/g, " ");
+    if (!text) return null;
+    var parts = text.split(/[/\\]/);
+    var name = parts[parts.length - 1].trim();
+    if (!name || name.length > 200) return null;
+    return name;
+  }
+  function noteKey(client, envId, fileName) {
+    return client + "" + envId + "" + fileName;
+  }
+  function clientScopedNotesKey(client) {
+    return noteKey(client, CLIENT_SCOPE_ENV, CLIENT_NOTES_FILE);
+  }
+  function isClientScopedNoteKey(editKey) {
+    var m = parseNoteKey(editKey);
+    return !!(m && m.envId === CLIENT_SCOPE_ENV && m.fileName === CLIENT_NOTES_FILE);
+  }
+  function displayNoteFileLabel(metaOrKey) {
+    var m = typeof metaOrKey === "string" ? parseNoteKey(metaOrKey) : metaOrKey;
+    if (!m) return "";
+    if (m.envId === CLIENT_SCOPE_ENV && m.fileName === CLIENT_NOTES_FILE) return "Client notes";
+    return m.fileName;
+  }
+  function getActiveNoteKey() {
+    var ctx = parseContext();
+    var fn = getActiveFileName();
+    if (!ctx || !fn) return null;
+    return noteKey(ctx.client, ctx.envId, fn);
+  }
+  function syncFollowTabState() {
+    state.prevFollowActiveKey = getActiveNoteKey();
+  }
+  function relocateOrMergeToFileKey(sourceKey, newKey) {
+    if (!newKey) return false;
+    var meta = parseNoteKey(newKey);
+    if (!meta) return false;
+    ensureEnvMetadata(meta.client, meta.envId);
+    if (sourceKey && sourceKey === newKey) return true;
+    if (sourceKey) {
+      var n = state.store.notes[sourceKey];
+      if (!n) return false;
+      if (state.store.notes[newKey]) {
+        var target = state.store.notes[newKey];
+        target.bullets = (target.bullets || []).concat(n.bullets || []);
+        if (n.status && n.status !== "empty") target.status = n.status;
+        delete state.store.notes[sourceKey];
+      } else {
+        state.store.notes[newKey] = n;
+        delete state.store.notes[sourceKey];
+      }
+      try {
+        localStorage.removeItem(NOTE_LS_KEY_PREFIX + sourceKey);
+      } catch (_r) {
+      }
+    } else {
+      getOrCreateNote(meta.client, meta.envId, meta.fileName);
+    }
+    touchNote(newKey);
+    saveStoreImmediate();
+    if (!state.panelEl) mountNotesPanelShell();
+    renderPanelForKey(newKey);
+    return true;
+  }
+  function parseNoteKey(key) {
+    var p = key.split("");
+    if (p.length !== 3) return null;
+    return { client: p[0], envId: p[1], fileName: p[2] };
+  }
+  function caseMatchesNoteClient(c, noteClientSlug) {
+    if (!c || !c.id) return false;
+    var scope = String(c.scope || "").toLowerCase();
+    if (scope === "global") return true;
+    if (scope === "client") {
+      return String(c.clientSlug || "").trim() === String(noteClientSlug || "").trim();
+    }
+    if (c.clientSlug) return String(c.clientSlug).trim() === String(noteClientSlug || "").trim();
+    return true;
+  }
+  function ensureEnvMetadata(client, envId) {
+    if (envId === CLIENT_SCOPE_ENV) return;
+    if (!state.store.clientEnvOrder[client]) state.store.clientEnvOrder[client] = [];
+    var order = state.store.clientEnvOrder[client];
+    if (order.indexOf(envId) === -1) order.push(envId);
+    if (!state.store.envLabels[envId]) {
+      var _fileExplorerHdr = document.querySelector('[aria-label="File Explorer Header"]');
+      var _domEnvLabel = _fileExplorerHdr ? (_fileExplorerHdr.textContent || "").trim() : "";
+      if (_domEnvLabel) {
+        state.store.envLabels[envId] = _domEnvLabel;
+      } else if (order.length === 1) {
+        state.store.envLabels[envId] = "Production";
+      } else {
+        state.store.envLabels[envId] = "Env " + order.length;
+      }
+    }
+    scheduleSave();
+  }
+  function getEnvDisplayName(envId) {
+    if (envId === CLIENT_SCOPE_ENV) return "All envs";
+    return state.store.envLabels[envId] || envId.slice(0, 8) + "\u2026";
+  }
+  function getClientDisplayName(client) {
+    return state.store.clientNicknames[client] || client;
+  }
+  function getOrCreateNote(client, envId, fileName) {
+    ensureEnvMetadata(client, envId);
+    var k = noteKey(client, envId, fileName);
+    if (!state.store.notes[k]) {
+      state.store.notes[k] = {
+        status: "empty",
+        workMode: "follow",
+        bullets: [],
+        updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+      };
+      if (envId === CLIENT_SCOPE_ENV && fileName === CLIENT_NOTES_FILE) {
+        state.store.notes[k].clientPlain = "";
+      }
+      saveStoreImmediate();
+    }
+    return state.store.notes[k];
+  }
+  function touchNote(k) {
+    if (state.store.notes[k]) {
+      state.store.notes[k].updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+      scheduleSave();
+    }
+  }
+  function noteMatchesActiveEditorFile(editKey) {
+    var ctx = parseContext();
+    var fn = getActiveFileName();
+    var meta = parseNoteKey(editKey);
+    if (!ctx || !fn || !meta) return false;
+    return meta.client === ctx.client && meta.envId === ctx.envId && meta.fileName === fn;
+  }
+  function detectTerminalOutcomeFromPanel() {
+    try {
+      var panel = document.getElementById("gitwolf-file-editor-panel") || document.body;
+      var txt = String(panel && (panel.innerText || panel.textContent) || "").toLowerCase();
+      if (txt.indexOf("flow passed") !== -1) return "passed";
+      if (txt.indexOf("flow stopped") !== -1) return "stopped";
+      if (txt.indexOf("flow failed") !== -1) return "failed";
+    } catch (_e) {
+    }
+    return "";
+  }
+  function readRunMetricsSlot(fileName) {
+    try {
+      var raw = localStorage.getItem(RUN_CHIME_METRICS_KEY);
+      if (!raw) return null;
+      var metrics = JSON.parse(raw);
+      return metrics && metrics.byFile && metrics.byFile[fileName] ? metrics.byFile[fileName] : null;
+    } catch (_e) {
+    }
+    return null;
+  }
+  function runTimesMatch(a, b) {
+    return Number.isFinite(a) && Number.isFinite(b) && Math.abs(a - b) <= 5e3;
+  }
+  function tabMatchesNote(t, client, envId, fileName) {
+    if (!t) return false;
+    if (String(t.client || "") !== String(client)) return false;
+    if (String(t.envId || "") !== String(envId)) return false;
+    return String(t.flowName || "") === String(fileName);
+  }
+  function getCompletedFailedRunLineFromOpenTabs(client, envId, fileName) {
+    try {
+      var raw = localStorage.getItem(OPEN_TABS_KEY);
+      if (!raw) return null;
+      var openTabs = JSON.parse(raw);
+      var wn = window.name || "";
+      var t = wn ? openTabs[wn] : null;
+      if (!tabMatchesNote(t, client, envId, fileName)) return null;
+      if (t.isRunning) return null;
+      if (t.lastRunPassed === true) return null;
+      var slot = readRunMetricsSlot(fileName);
+      var completedStart = Number(slot && slot.completedRunStartedAt);
+      var completedEnd = Number(slot && slot.completedRunEndedAt);
+      var lineRunStart = Number(t.currentLineRunStartedAt);
+      var lineSeenAt = Number(t.currentLineSeenAt);
+      if (!runTimesMatch(lineRunStart, completedStart)) return null;
+      if (Number.isFinite(completedEnd) && Number.isFinite(lineSeenAt) && lineSeenAt > completedEnd + 5e3) return null;
+      var ln = Number(t.currentLine);
+      if (Number.isFinite(ln) && ln > 0) return Math.floor(ln);
+    } catch (_e) {
+    }
+    return null;
+  }
+  function getFailedRunLineForNote(editKey) {
+    var meta = parseNoteKey(editKey);
+    if (!meta) return null;
+    if (!noteMatchesActiveEditorFile(editKey)) return null;
+    var panelOutcome = detectTerminalOutcomeFromPanel();
+    if (panelOutcome !== "failed") return null;
+    return getCompletedFailedRunLineFromOpenTabs(meta.client, meta.envId, meta.fileName);
+  }
+  function getMonacoEditorsFromWindow() {
+    try {
+      if (typeof monaco !== "undefined" && monaco.editor && typeof monaco.editor.getEditors === "function") {
+        return monaco.editor.getEditors() || [];
+      }
+    } catch (e) {
+    }
+    return [];
+  }
+  function pickMonacoEditor(editors) {
+    if (!editors || !editors.length) return null;
+    var i;
+    for (i = 0; i < editors.length; i++) {
+      try {
+        if (editors[i].hasTextFocus() && editors[i].getModel()) return editors[i];
+      } catch (e) {
+      }
+    }
+    var best = null;
+    var bestArea = 0;
+    for (i = 0; i < editors.length; i++) {
+      try {
+        var dom = editors[i].getDomNode();
+        if (!dom) continue;
+        var r = dom.getBoundingClientRect();
+        var area = r.width * r.height;
+        if (area > bestArea) {
+          bestArea = area;
+          best = editors[i];
+        }
+      } catch (e2) {
+      }
+    }
+    return best || editors[editors.length - 1];
+  }
+  function fallbackMonacoScrollToLine(lineNum) {
+    var root = document.querySelector(".monaco-editor");
+    if (!root) return false;
+    var scrollable = root.querySelector(".monaco-scrollable-element");
+    if (!scrollable) return false;
+    var lines = root.querySelectorAll(".view-lines .view-line");
+    var lineHeight = 19;
+    if (lines.length >= 2) {
+      var dh = lines[1].offsetTop - lines[0].offsetTop;
+      if (dh > 4) lineHeight = dh;
+    } else if (lines.length === 1) {
+      var rh = lines[0].getBoundingClientRect().height;
+      if (rh > 4) lineHeight = Math.round(rh);
+    }
+    var ln = Math.max(1, Math.floor(lineNum));
+    var targetTop = (ln - 1) * lineHeight - scrollable.clientHeight / 2 + lineHeight / 2;
+    scrollable.scrollTop = Math.max(0, targetTop);
+    var ta = root.querySelector("textarea.inputarea");
+    if (ta) ta.focus();
+    return true;
+  }
+  function captureLineContext(lineNo) {
+    var eds = getMonacoEditorsFromWindow();
+    var ed = pickMonacoEditor(eds);
+    if (!ed) return null;
+    var model;
+    try {
+      model = ed.getModel();
+    } catch (e) {
+      return null;
+    }
+    if (!model) return null;
+    var total = model.getLineCount();
+    function lineContent(n) {
+      return model.getLineContent(n) || "";
+    }
+    function isBlank(n) {
+      return n < 1 || n > total || lineContent(n).trim() === "";
+    }
+    var start = lineNo;
+    var end = lineNo;
+    while (start > 1 && !isBlank(start - 1)) start--;
+    while (end < total && !isBlank(end + 1)) end++;
+    var budget = 10 - (end - start + 1);
+    if (budget < 0) {
+      start = Math.max(1, lineNo - 4);
+      end = Math.min(total, start + 9);
+      budget = 0;
+    }
+    var topCursor = start - 1;
+    var botCursor = end + 1;
+    var upDone = topCursor < 1;
+    var botDone = botCursor > total;
+    var goUp = true;
+    while (budget > 0 && !(upDone && botDone)) {
+      if (goUp && !upDone) {
+        var upBlanks = 0;
+        var upScan = topCursor;
+        while (upScan >= 1 && isBlank(upScan)) {
+          upBlanks++;
+          upScan--;
+        }
+        if (upScan < 1) {
+          upDone = true;
+        } else {
+          var upBEnd = upScan;
+          var upBStart = upScan;
+          while (upBStart > 1 && !isBlank(upBStart - 1)) upBStart--;
+          var upBlanksToTake = Math.min(upBlanks, budget);
+          var upContentToTake = Math.min(upBEnd - upBStart + 1, budget - upBlanksToTake);
+          if (upContentToTake <= 0) {
+            upDone = true;
+          } else {
+            start = start - upBlanksToTake - upContentToTake;
+            topCursor = start - 1;
+            budget -= upBlanksToTake + upContentToTake;
+          }
+        }
+      } else if (!goUp && !botDone) {
+        var botBlanks = 0;
+        var botScan = botCursor;
+        while (botScan <= total && isBlank(botScan)) {
+          botBlanks++;
+          botScan++;
+        }
+        if (botScan > total) {
+          botDone = true;
+        } else {
+          var botBStart = botScan;
+          var botBEnd = botScan;
+          while (botBEnd < total && !isBlank(botBEnd + 1)) botBEnd++;
+          var botBlanksToTake = Math.min(botBlanks, budget);
+          var botContentToTake = Math.min(botBEnd - botBStart + 1, budget - botBlanksToTake);
+          if (botContentToTake <= 0) {
+            botDone = true;
+          } else {
+            end = end + botBlanksToTake + botContentToTake;
+            botCursor = end + 1;
+            budget -= botBlanksToTake + botContentToTake;
+          }
+        }
+      }
+      goUp = !goUp;
+    }
+    var lines = [];
+    for (var i = start; i <= end; i++) lines.push(lineContent(i));
+    return {
+      code: lines.join("\n"),
+      capturedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      startLine: start,
+      endLine: end,
+      capturedForLine: lineNo
+    };
+  }
+  function getMonacoLinesInRange(start, end) {
+    var eds = getMonacoEditorsFromWindow();
+    var ed = pickMonacoEditor(eds);
+    if (!ed) return null;
+    var model;
+    try {
+      model = ed.getModel();
+    } catch (e) {
+      return null;
+    }
+    if (!model) return null;
+    var total = model.getLineCount();
+    var s = Math.max(1, start);
+    var e2 = Math.min(total, end);
+    if (s > e2) return null;
+    var result = [];
+    for (var i = s; i <= e2; i++) result.push(model.getLineContent(i) || "");
+    return result;
+  }
+  function goToMonacoLine(lineNum) {
+    var eds = getMonacoEditorsFromWindow();
+    var ed = pickMonacoEditor(eds);
+    if (ed) {
+      try {
+        var model = ed.getModel();
+        if (model) {
+          var max = model.getLineCount();
+          var ln = Math.min(Math.max(1, Math.floor(lineNum)), max);
+          ed.revealLineInCenter(ln);
+          ed.setPosition({ lineNumber: ln, column: 1 });
+          ed.focus();
+          return true;
+        }
+      } catch (e) {
+      }
+    }
+    if (fallbackMonacoScrollToLine(lineNum)) return true;
+    flashNotesHint("No Monaco editor found", true);
+    return false;
+  }
+  function onNotesPanelLineNavActivate(e) {
+    var chip = e.target.closest ? e.target.closest("[data-qaw-notes-go-line]") : null;
+    if (!chip) return;
+    if (e.type === "keydown") {
+      var ke = e;
+      if (ke.key !== "Enter" && ke.key !== " ") return;
+      e.preventDefault();
+    }
+    var ln = parseInt(chip.getAttribute("data-qaw-notes-go-line") || "", 10);
+    if (!Number.isFinite(ln) || ln < 1) return;
+    if (!state.panelEl) return;
+    var ek = state.panelEl.getAttribute("data-qaw-edit-key");
+    if (!ek) return;
+    e.preventDefault();
+    e.stopPropagation();
+    e.stopImmediatePropagation();
+    if (!noteMatchesActiveEditorFile(ek)) {
+      flashNotesHint("Open this file in the active tab first", true);
+      return;
+    }
+    goToMonacoLine(ln);
+  }
+  function ensureNotesLineNavDelegation() {
+    if (!state.panelEl || state.panelEl.getAttribute("data-qaw-line-nav") === "1") return;
+    state.panelEl.setAttribute("data-qaw-line-nav", "1");
+    state.panelEl.addEventListener("click", onNotesPanelLineNavActivate, true);
+    state.panelEl.addEventListener("keydown", onNotesPanelLineNavActivate, true);
+  }
+  function onNotesPanelOccChipCapture(e) {
+    if (e.type !== "click") return;
+    var chip = e.target.closest ? e.target.closest("[data-qaw-notes-occ-chip]") : null;
+    if (!chip) return;
+    e.preventDefault();
+    e.stopPropagation();
+    e.stopImmediatePropagation();
+    var idx = parseInt(chip.getAttribute("data-bullet-index") || "", 10);
+    var ek = state.panelEl && state.panelEl.getAttribute("data-qaw-edit-key");
+    if (!Number.isFinite(idx) || idx < 0 || !ek) return;
+    var note = state.store.notes[ek];
+    if (!note || !note.bullets || !note.bullets[idx]) return;
+    var bullet = note.bullets[idx];
+    var current = normalOccurrences(bullet);
+    var me = e;
+    bullet.occurrences = me.metaKey || me.ctrlKey ? Math.max(1, current - 1) : current + 1;
+    saveStoreImmediate();
+    var vc = state.panelEl && state.panelEl.querySelector("[data-qaw-notes-viewer]");
+    if (vc && vc._qawRedrawCards) vc._qawRedrawCards();
+  }
+  function ensureNotesOccChipDelegation() {
+    if (!state.panelEl || state.panelEl.getAttribute("data-qaw-occ-nav") === "1") return;
+    state.panelEl.setAttribute("data-qaw-occ-nav", "1");
+    state.panelEl.addEventListener("click", onNotesPanelOccChipCapture, true);
+  }
+  function navigateToHelperFile(stem, fn, scope) {
+    var client = scope && scope.client ? scope.client : "";
+    var envId = scope && scope.envId ? scope.envId : "";
+    if (!client || !envId) {
+      var ctx = parseContext();
+      if (ctx) {
+        client = ctx.client;
+        envId = ctx.envId;
+      }
+    }
+    var tabs = document.querySelectorAll('[class*="styles_tab__"]');
+    for (var i = 0; i < tabs.length; i++) {
+      var t = tabs[i];
+      var clone = t.cloneNode(true);
+      var cbs = clone.querySelectorAll('[class*="styles_closeButton__"]');
+      for (var j = 0; j < cbs.length; j++) cbs[j].remove();
+      var raw = (clone.innerText || clone.textContent || "").trim().replace(/\s+/g, " ");
+      var name = raw.split(/[/\\]/).pop() || "";
+      if (name === stem + ".js" || name === stem + ".ts") {
+        t.click();
+        if (fn) setTimeout(function() {
+          searchForHelperFn(fn);
+        }, 350);
+        return;
+      }
+    }
+    if (client && envId) {
+      var fullPath = resolveIndexedFilePath(client, envId, stem + ".ts") || resolveIndexedFilePath(client, envId, stem + ".js");
+      if (fullPath) {
+        if (fn) {
+          try {
+            sessionStorage.setItem(PENDING_HELPER_FN_KEY, fn);
+          } catch (_e) {
+          }
+        }
+        flashNotesHint("Opening " + stem + "\u2026", false);
+        window.location.href = fileUrl(client, envId, fullPath);
+        return;
+      }
+    }
+    var indexedPath = bestIndexedHelperPath(stem, client, envId);
+    openHelperViaFileTree(stem, fn, indexedPath);
+  }
+  function processPendingHelperFnJump() {
+    var fn = "";
+    try {
+      fn = String(sessionStorage.getItem(PENDING_HELPER_FN_KEY) || "").trim();
+    } catch (_e) {
+    }
+    if (!fn) return;
+    try {
+      sessionStorage.removeItem(PENDING_HELPER_FN_KEY);
+    } catch (_e2) {
+    }
+    setTimeout(function() {
+      searchForHelperFn(fn);
+    }, 900);
+  }
+  function hsl(msg) {
+    helperSearchLog.push("[" + (/* @__PURE__ */ new Date()).toISOString().slice(11, 23) + "] " + msg);
+    if (helperSearchLog.length > HELPER_LOG_MAX_LINES) {
+      helperSearchLog = helperSearchLog.slice(helperSearchLog.length - HELPER_LOG_MAX_LINES);
+    }
+  }
+  function showHelperNotFoundToast(stem) {
+    var items = document.querySelectorAll('[role="treeitem"]');
+    var labels = [];
+    var maxItems = Math.min(items.length, 14);
+    for (var i = 0; i < maxItems; i++) {
+      var el = items[i];
+      var lbl = (el.getAttribute("aria-label") || el.textContent || "").trim().slice(0, 60);
+      var isFolder = el.hasAttribute("aria-expanded");
+      var expanded = el.getAttribute("aria-expanded");
+      labels.push((isFolder ? "[folder:" + expanded + "] " : "[file] ") + lbl);
+    }
+    hsl("Final visible treeitems (showing " + labels.length + " of " + items.length + "):");
+    labels.forEach(function(l) {
+      hsl("  " + l);
+    });
+    var logTail = helperSearchLog.slice(Math.max(0, helperSearchLog.length - 36));
+    var logText = logTail.join("\n");
+    var toast = document.createElement("div");
+    toast.setAttribute("data-qaw-overlay", "1");
+    toast.style.cssText = [
+      "position:fixed",
+      "bottom:28px",
+      "right:28px",
+      "z-index:2147483647",
+      "background:#1e293b",
+      "border:1.5px solid #ef4444",
+      "border-radius:10px",
+      "padding:10px 14px",
+      "color:#e2e8f0",
+      "font-size:12px",
+      'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif',
+      "box-shadow:0 4px 24px rgba(0,0,0,0.55)",
+      "display:flex",
+      "flex-direction:column",
+      "gap:8px",
+      "max-width:300px"
+    ].join(";");
+    var header = document.createElement("div");
+    header.style.cssText = "display:flex;align-items:center;gap:7px;";
+    var icon = document.createElement("span");
+    icon.textContent = "\u2717";
+    icon.style.cssText = "color:#ef4444;font-size:14px;flex-shrink:0;";
+    var msg = document.createElement("span");
+    msg.textContent = "Helper file \u201C" + stem + "\u201D not found";
+    header.appendChild(icon);
+    header.appendChild(msg);
+    toast.appendChild(header);
+    var copyBtn = document.createElement("button");
+    copyBtn.type = "button";
+    copyBtn.textContent = "Copy short debug log";
+    copyBtn.style.cssText = "background:#334155;color:#94a3b8;border:none;border-radius:5px;padding:5px 10px;cursor:pointer;font-size:11px;font-family:monospace;text-align:left;width:100%;";
+    copyBtn.addEventListener("click", function(e) {
+      e.stopPropagation();
+      var fallback = function() {
+        var ta = document.createElement("textarea");
+        ta.value = logText;
+        ta.style.cssText = "position:fixed;top:-9999px;left:-9999px;opacity:0;";
+        document.body.appendChild(ta);
+        ta.select();
+        try {
+          document.execCommand("copy");
+        } catch (_) {
+        }
+        ta.remove();
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(logText).catch(fallback);
+      } else {
+        fallback();
+      }
+      copyBtn.textContent = "\u2713 Copied";
+      setTimeout(function() {
+        copyBtn.textContent = "Copy debug logs";
+      }, 2e3);
+    });
+    toast.appendChild(copyBtn);
+    document.body.appendChild(toast);
+    var tid = setTimeout(function() {
+      if (toast.parentNode) toast.parentNode.removeChild(toast);
+    }, 2e4);
+    toast.querySelector("span").parentElement.addEventListener("click", function() {
+      clearTimeout(tid);
+      if (toast.parentNode) toast.parentNode.removeChild(toast);
+    });
+  }
+  function openHelperViaFileTree(stem, fn, indexedPathHint) {
+    helperSearchLog = [];
+    _helperTreeTargetPath = normaliseRepoPath(indexedPathHint || "");
+    hsl("stem=" + stem + " fn=" + fn);
+    if (_helperTreeTargetPath) hsl("targetPath=" + _helperTreeTargetPath);
+    flashNotesHint("Looking for " + stem + "\u2026", false);
+    var hideBtn = document.querySelector('[data-e2e="tooltip-hide-file-explorer"]');
+    var showBtn = document.querySelector('[data-e2e="tooltip-show-file-explorer"]');
+    hsl("explorer: hide=" + !!hideBtn + " show=" + !!showBtn);
+    if (!hideBtn && showBtn) {
+      showBtn.click();
+      hsl("clicked show-file-explorer, waiting 500ms");
+      setTimeout(function() {
+        findAndClickHelperFile(stem, fn, 0);
+      }, 500);
+    } else {
+      findAndClickHelperFile(stem, fn, 0);
+    }
+  }
+  function normaliseRepoPath(raw) {
+    var p = String(raw || "").trim().replace(/\\/g, "/").replace(/^\/+/, "");
+    if (!p) return "";
+    var srcIdx = p.indexOf("src/");
+    if (srcIdx >= 0) return p.slice(srcIdx);
+    return p;
+  }
+  function readPathIndexForHelpers() {
+    try {
+      return JSON.parse(localStorage.getItem(FILE_PATH_INDEX_KEY2) || "{}");
+    } catch (_e) {
+      return {};
+    }
+  }
+  function bestIndexedHelperPath(stem, client, envId) {
+    var ctx = parseContext();
+    var ctxClient = client || ctx && ctx.client || "";
+    var ctxEnvId = envId || ctx && ctx.envId || "";
+    if (!ctxClient || !ctxEnvId) return null;
+    var idx = readPathIndexForHelpers();
+    var candidates = [];
+    Object.keys(idx).forEach(function(k) {
+      var parts = k.split(FILE_INDEX_SEP2);
+      if (parts.length !== 3) return;
+      if (parts[0] !== ctxClient || parts[1] !== ctxEnvId) return;
+      var base = parts[2] || "";
+      if (base !== stem + ".ts" && base !== stem + ".js" && base !== stem) return;
+      var p = normaliseRepoPath(String(idx[k] || ""));
+      if (p) candidates.push(p);
+    });
+    if (!candidates.length) return null;
+    if (candidates.length === 1) return candidates[0];
+    var hints = activeFlowPathHints();
+    var best = candidates[0];
+    var bestScore = -Infinity;
+    candidates.forEach(function(p) {
+      var score = 0;
+      for (var i = 0; i < hints.prefixes.length; i++) {
+        var pref = hints.prefixes[i];
+        if (pref && p.indexOf(pref + "/") === 0) score += 60 + i * 8;
+      }
+      for (var j = 0; j < hints.leafDirs.length; j++) {
+        var leaf = hints.leafDirs[j];
+        if (!leaf) continue;
+        if (p.indexOf("/" + leaf + "/") !== -1 || p.indexOf(leaf + "/") === 0) score += 8;
+      }
+      if (score > bestScore) {
+        bestScore = score;
+        best = p;
+      }
+    });
+    return best;
+  }
+  function activeFlowPathHints() {
+    var raw = "";
+    try {
+      var sp = new URLSearchParams(window.location.search);
+      raw = sp.get("file") || "";
+    } catch (_e) {
+    }
+    var p = normaliseRepoPath(raw);
+    if (!p) return { prefixes: [], leafDirs: [] };
+    var parts = p.split("/");
+    if (parts.length < 2) return { prefixes: [], leafDirs: [] };
+    var dirs = parts.slice(0, -1);
+    var prefixes = [];
+    for (var i = 0; i < dirs.length; i++) prefixes.push(dirs.slice(0, i + 1).join("/"));
+    var leafDirs = dirs.slice(Math.max(0, dirs.length - 3));
+    return { prefixes, leafDirs };
+  }
+  function helperTreeTargetHints() {
+    var p = normaliseRepoPath(_helperTreeTargetPath || "");
+    if (!p) return activeFlowPathHints();
+    var parts = p.split("/");
+    if (parts.length < 2) return activeFlowPathHints();
+    var dirs = parts.slice(0, -1);
+    var prefixes = [];
+    for (var i = 0; i < dirs.length; i++) prefixes.push(dirs.slice(0, i + 1).join("/"));
+    var leafDirs = dirs.slice(Math.max(0, dirs.length - 4));
+    return { prefixes, leafDirs };
+  }
+  function getTreeScrollContainer() {
+    var tree = document.querySelector('[role="tree"]');
+    if (!tree) return null;
+    var sc = tree.closest(".monaco-scrollable-element");
+    if (sc) return sc;
+    var p = tree.parentElement;
+    while (p) {
+      if (p.scrollHeight > p.clientHeight + 8) return p;
+      p = p.parentElement;
+    }
+    return null;
+  }
+  function nudgeTreeScroll(attempt, stem) {
+    var sc = getTreeScrollContainer();
+    if (!sc) return;
+    var max = Math.max(0, sc.scrollHeight - sc.clientHeight);
+    if (max <= 0) return;
+    var targetStem = String(stem || "").toLowerCase();
+    var visibleFiles = [];
+    var items = document.querySelectorAll('[role="treeitem"]');
+    for (var i = 0; i < items.length; i++) {
+      var el = items[i];
+      if (el.hasAttribute("aria-expanded")) continue;
+      var lbl = (el.getAttribute("aria-label") || el.textContent || "").trim().toLowerCase();
+      if (!/\.(ts|js)$/.test(lbl)) continue;
+      visibleFiles.push(lbl);
+    }
+    var target = sc.scrollTop;
+    if (visibleFiles.length && targetStem) {
+      visibleFiles.sort();
+      var first = visibleFiles[0];
+      var last = visibleFiles[visibleFiles.length - 1];
+      if (targetStem + ".zz" < first) {
+        target = Math.max(0, sc.scrollTop - Math.max(120, Math.round(sc.clientHeight * 0.75)));
+      } else if (targetStem > last) {
+        target = Math.min(max, sc.scrollTop + Math.max(120, Math.round(sc.clientHeight * 0.75)));
+      } else {
+        target = Math.min(max, sc.scrollTop + Math.max(60, Math.round(sc.clientHeight * 0.35)));
+      }
+    } else {
+      var cycle = Math.floor(attempt / 3) % 6;
+      if (cycle === 0) target = Math.round(max * 0.3);
+      else if (cycle === 1) target = Math.round(max * 0.6);
+      else if (cycle === 2) target = max;
+      else if (cycle === 3) target = Math.round(max * 0.7);
+      else if (cycle === 4) target = Math.round(max * 0.35);
+      else target = 0;
+    }
+    if (Math.abs(sc.scrollTop - target) < 6) return;
+    sc.scrollTop = target;
+    hsl("scroll tree to " + target + "/" + max + " (target=" + targetStem + ")");
+  }
+  function findHelperFileItem(stem) {
+    var items = document.querySelectorAll('[role="treeitem"]');
+    var candidates = [];
+    for (var i = 0; i < items.length; i++) {
+      var el = items[i];
+      if (el.hasAttribute("aria-expanded")) continue;
+      var lbl = (el.getAttribute("aria-label") || el.textContent || "").trim();
+      if (lbl === stem + ".ts" || lbl === stem + ".js" || lbl === stem) {
+        candidates.push({ el, idx: i, path: normaliseRepoPath(getTreeItemPath(el) || lbl) });
+      }
+    }
+    if (!candidates.length) return null;
+    if (candidates.length === 1) return candidates[0].el;
+    var hints = helperTreeTargetHints();
+    var best = candidates[0];
+    var bestScore = -Infinity;
+    var anchorIdx = Math.floor(items.length / 2);
+    for (var ci = 0; ci < candidates.length; ci++) {
+      var c = candidates[ci];
+      var score = 0;
+      for (var pi = 0; pi < hints.prefixes.length; pi++) {
+        var pref = hints.prefixes[pi];
+        if (pref && c.path.indexOf(pref + "/") === 0) score += 60 + pi * 8;
+      }
+      for (var li = 0; li < hints.leafDirs.length; li++) {
+        var leaf = hints.leafDirs[li];
+        if (!leaf) continue;
+        if (c.path.indexOf("/" + leaf + "/") !== -1 || c.path.indexOf(leaf + "/") === 0) score += 8;
+      }
+      score -= Math.abs(c.idx - anchorIdx) * 0.04;
+      if (score > bestScore) {
+        bestScore = score;
+        best = c;
+      }
+    }
+    hsl("findHelperFileItem: chose path=" + (best.path || "(unknown)") + " among " + candidates.length + " matches");
+    return best.el;
+  }
+  function getTreeItemPath(el) {
+    var level = parseInt(el.getAttribute("aria-level") || "0", 10);
+    if (level <= 0) return null;
+    var label = (el.getAttribute("aria-label") || el.textContent || "").trim();
+    if (!label) return null;
+    if (level === 1) return label;
+    var items = Array.from(document.querySelectorAll('[role="treeitem"]'));
+    var idx = items.indexOf(el);
+    if (idx === -1) return null;
+    var parts = [label];
+    var curLevel = level;
+    for (var ii = idx - 1; ii >= 0 && curLevel > 1; ii--) {
+      var it = items[ii];
+      var itLevel = parseInt(it.getAttribute("aria-level") || "0", 10);
+      if (itLevel > 0 && itLevel < curLevel && it.hasAttribute("aria-expanded")) {
+        parts.unshift((it.getAttribute("aria-label") || it.textContent || "").trim());
+        curLevel = itLevel;
+      }
+    }
+    return parts.join("/");
+  }
+  function findTreeExpandState() {
+    var items = document.querySelectorAll('[role="treeitem"]');
+    if (!items.length) return null;
+    var el = items[0];
+    var fk = Object.keys(el).find(function(k) {
+      return k.startsWith("__reactFiber") || k.startsWith("__reactInternalInstance");
+    });
+    if (!fk) return null;
+    var n = el[fk];
+    var depth = 0;
+    while (n && depth < 70) {
+      var s = n.memoizedState;
+      while (s) {
+        var ms = s.memoizedState;
+        var disp = s.queue && s.queue.dispatch;
+        if (Array.isArray(ms) && typeof disp === "function") {
+          if (ms.every(function(v) {
+            return typeof v === "string";
+          }) && ms.some(function(v) {
+            return v === "src" || v.indexOf("/") !== -1;
+          })) {
+            var sig = JSON.stringify(ms);
+            if (_lastExpandStateSig !== sig) {
+              _lastExpandStateSig = sig;
+              hsl("findTreeExpandState: depth=" + depth + " current=" + sig);
+            }
+            return { dispatch: disp, current: ms };
+          }
+        }
+        s = s.next;
+      }
+      n = n.return;
+      depth++;
+    }
+    hsl("findTreeExpandState: not found after " + depth + " nodes");
+    return null;
+  }
+  function elementFromPointClick(cx, cy) {
+    var hit = document.elementFromPoint(cx, cy);
+    var target = hit || document.body;
+    var pageWin = document.defaultView;
+    var base = { bubbles: true, cancelable: true, view: pageWin, clientX: cx, clientY: cy };
+    if (typeof PointerEvent === "function") {
+      target.dispatchEvent(new PointerEvent("pointerdown", Object.assign({}, base, { pointerId: 1, pointerType: "mouse", isPrimary: true, buttons: 1 })));
+    }
+    target.dispatchEvent(new MouseEvent("mousedown", Object.assign({}, base, { buttons: 1 })));
+    setTimeout(function() {
+      target.dispatchEvent(new MouseEvent("mouseup", Object.assign({}, base, { buttons: 0 })));
+      if (typeof PointerEvent === "function") {
+        target.dispatchEvent(new PointerEvent("pointerup", Object.assign({}, base, { pointerId: 1, pointerType: "mouse", isPrimary: true, buttons: 0 })));
+      }
+      target.dispatchEvent(new MouseEvent("click", Object.assign({}, base, { buttons: 0 })));
+    }, 0);
+  }
+  function nearestAncestorFolderLabel(items, idx) {
+    var curLevel = parseInt(items[idx].getAttribute("aria-level") || "0", 10);
+    if (!Number.isFinite(curLevel) || curLevel <= 1) return "";
+    for (var i = idx - 1; i >= 0; i--) {
+      var it = items[i];
+      if (!it.hasAttribute("aria-expanded")) continue;
+      var itLevel = parseInt(it.getAttribute("aria-level") || "0", 10);
+      if (itLevel > 0 && itLevel < curLevel) {
+        return (it.getAttribute("aria-label") || it.textContent || "").trim();
+      }
+    }
+    return "";
+  }
+  function robustTreeItemClick(el) {
+    var panel = state.panelEl;
+    if (panel) panel.style.visibility = "hidden";
+    try {
+      var row2 = el.querySelector('[class*="treeItemRow"]') || el.closest('[class*="treeItemRow"]') || el;
+      row2.setAttribute("tabindex", "0");
+      try {
+        row2.focus();
+      } catch (_f) {
+      }
+      var r = row2.getBoundingClientRect();
+      var cx = Math.round(Math.min(Math.max(r.left + r.width / 2, 0), window.innerWidth - 1));
+      var cy = Math.round(Math.min(Math.max(r.top + r.height / 2, 0), window.innerHeight - 1));
+      var hit = document.elementFromPoint(cx, cy);
+      if (hit && row2.contains(hit)) elementFromPointClick(cx, cy);
+      else {
+        var cxCaret = Math.round(r.left + Math.min(14, Math.max(6, r.width * 0.12)));
+        elementFromPointClick(cxCaret, cy);
+        setTimeout(function() {
+          elementFromPointClick(cx, cy);
+        }, 40);
+      }
+      setTimeout(function() {
+        if (panel) panel.style.visibility = "";
+      }, 90);
+    } catch (_e) {
+      try {
+        el.click();
+      } catch (_e2) {
+      }
+      if (panel) panel.style.visibility = "";
+    }
+  }
+  function tryExpandByVisibleFolderClicks(hints, attempt) {
+    var items = Array.from(document.querySelectorAll('[role="treeitem"]'));
+    if (!items.length) return;
+    var clicked = false;
+    for (var pi = 0; pi < hints.prefixes.length; pi++) {
+      var pref = hints.prefixes[pi];
+      if (!pref) continue;
+      var segs = pref.split("/");
+      var target = segs[segs.length - 1];
+      var parent = segs.length > 1 ? segs[segs.length - 2] : "";
+      for (var i = 0; i < items.length; i++) {
+        var el = items[i];
+        var lbl = (el.getAttribute("aria-label") || el.textContent || "").trim();
+        if (lbl !== target) continue;
+        var hasExpandAttr = el.hasAttribute("aria-expanded");
+        if (!hasExpandAttr && lbl !== "src" && lbl !== "utilities" && lbl !== "nav") continue;
+        if (parent) {
+          var anc = nearestAncestorFolderLabel(items, i);
+          if (anc && anc !== parent) continue;
+        }
+        var expanded = el.getAttribute("aria-expanded");
+        if (!hasExpandAttr || expanded === "false") {
+          robustTreeItemClick(el);
+          clicked = true;
+          hsl("fallback expand click: " + pref + (hasExpandAttr ? "" : " (no aria-expanded)"));
+          break;
+        }
+      }
+      if (clicked) break;
+    }
+    if (!clicked && attempt % 5 === 0) {
+      hsl("fallback expand click: no matching collapsed folder currently visible");
+    }
+  }
+  function tryExpandHelperFolders(attempt) {
+    var expandState = findTreeExpandState();
+    var hints = helperTreeTargetHints();
+    if (!expandState) {
+      if (attempt % 5 === 0) hsl("tryExpandHelperFolders: no expand state found; using click fallback");
+      tryExpandByVisibleFolderClicks(hints, attempt);
+      return;
+    }
+    var items = document.querySelectorAll('[role="treeitem"]');
+    var toAdd = [];
+    for (var pi = 0; pi < hints.prefixes.length; pi++) {
+      var pref0 = hints.prefixes[pi];
+      if (pref0 && expandState.current.indexOf(pref0) === -1 && toAdd.indexOf(pref0) === -1) {
+        toAdd.push(pref0);
+      }
+    }
+    for (var i = 0; i < items.length; i++) {
+      var el = items[i];
+      if (!el.hasAttribute("aria-expanded")) continue;
+      if (el.getAttribute("aria-expanded") === "true") continue;
+      var lbl = (el.getAttribute("aria-label") || el.textContent || "").trim();
+      var path = getTreeItemPath(el);
+      if (!path) continue;
+      var isCommonRoot = lbl === "src" || lbl === "nav" || lbl === "utilities";
+      var matchesHint = false;
+      for (var hi = 0; hi < hints.prefixes.length; hi++) {
+        var pref = hints.prefixes[hi];
+        if (pref && (path === pref || pref.indexOf(path + "/") === 0)) {
+          matchesHint = true;
+          break;
+        }
+      }
+      if (!isCommonRoot && !matchesHint) continue;
+      if (path && expandState.current.indexOf(path) === -1 && toAdd.indexOf(path) === -1) {
+        hsl("queueing expand: " + path);
+        toAdd.push(path);
+      }
+    }
+    if (toAdd.length > 0) {
+      var next = expandState.current.concat(toAdd);
+      hsl("dispatching expanded: " + JSON.stringify(next));
+      expandState.dispatch(next);
+    }
+  }
+  function isHelperTabOpen(stem) {
+    var tabs = document.querySelectorAll('[class*="styles_tab__"]');
+    for (var i = 0; i < tabs.length; i++) {
+      var t = tabs[i];
+      var clone = t.cloneNode(true);
+      var cbs = clone.querySelectorAll('[class*="styles_closeButton__"]');
+      for (var j = 0; j < cbs.length; j++) cbs[j].remove();
+      var raw = (clone.innerText || clone.textContent || "").trim().replace(/\s+/g, " ");
+      var name = raw.split(/[/\\]/).pop() || "";
+      if (name === stem + ".js" || name === stem + ".ts") return true;
+    }
+    return false;
+  }
+  function clickHelperFileItem(el, stem, fn) {
+    el.scrollIntoView({ block: "center" });
+    setTimeout(function() {
+      var rect = el.getBoundingClientRect();
+      var cx = Math.round(rect.left + rect.width / 2);
+      var cy = Math.round(rect.top + rect.height / 2);
+      var panel = state.panelEl;
+      if (panel) panel.style.visibility = "hidden";
+      elementFromPointClick(cx, cy);
+      setTimeout(function() {
+        if (panel) panel.style.visibility = "";
+        if (!isHelperTabOpen(stem)) {
+          hsl("first click did not open tab; retry click");
+          if (panel) panel.style.visibility = "hidden";
+          elementFromPointClick(cx, cy);
+          setTimeout(function() {
+            if (panel) panel.style.visibility = "";
+          }, 80);
+        }
+        hsl("clicked file item, waiting for Monaco");
+        if (fn) setTimeout(function() {
+          searchForHelperFn(fn);
+        }, 800);
+      }, 80);
+    }, 100);
+  }
+  function findAndClickHelperFile(stem, fn, attempt) {
+    var MAX_ATTEMPTS = 25;
+    if (attempt >= MAX_ATTEMPTS) {
+      hsl("gave up after " + MAX_ATTEMPTS + " attempts");
+      showHelperNotFoundToast(stem);
+      return;
+    }
+    if (attempt % 5 === 0) {
+      var items = document.querySelectorAll('[role="treeitem"]');
+      var summary = [];
+      var maxSummary = Math.min(items.length, 18);
+      for (var i = 0; i < maxSummary; i++) {
+        var el = items[i];
+        var lbl = (el.getAttribute("aria-label") || el.textContent || "").trim().slice(0, 40);
+        summary.push((el.hasAttribute("aria-expanded") ? "F" : "f") + ":" + lbl);
+      }
+      hsl("attempt " + attempt + " tree[" + items.length + "] sample: " + summary.join(", "));
+    }
+    var fileEl = findHelperFileItem(stem);
+    if (fileEl) {
+      hsl('found "' + stem + '" at attempt ' + attempt);
+      clickHelperFileItem(fileEl, stem, fn);
+      return;
+    }
+    tryExpandHelperFolders(attempt);
+    nudgeTreeScroll(attempt, stem);
+    setTimeout(function() {
+      findAndClickHelperFile(stem, fn, attempt + 1);
+    }, 300);
+  }
+  function searchForHelperFn(fn) {
+    var eds = getMonacoEditorsFromWindow();
+    var ed = pickMonacoEditor(eds);
+    if (!ed) return;
+    var model;
+    try {
+      model = ed.getModel();
+    } catch (e) {
+      return;
+    }
+    if (!model) return;
+    var content;
+    try {
+      content = model.getValue();
+    } catch (e) {
+      return;
+    }
+    var lines = content.split("\n");
+    var fnEsc = fn.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    var patterns = [
+      new RegExp("^\\s*(export\\s+)?(async\\s+)?function\\s+" + fnEsc + "\\s*[(<]"),
+      new RegExp("^\\s*(export\\s+)?const\\s+" + fnEsc + "\\s*="),
+      new RegExp("^\\s*" + fnEsc + "\\s*[=:]\\s*(async\\s+)?function"),
+      new RegExp("\\b" + fnEsc + "\\b")
+    ];
+    var foundLine = null;
+    outer: for (var p = 0; p < patterns.length; p++) {
+      for (var li = 0; li < lines.length; li++) {
+        if (patterns[p].test(lines[li])) {
+          foundLine = li + 1;
+          break outer;
+        }
+      }
+    }
+    if (foundLine != null) {
+      goToMonacoLine(foundLine);
+      setTimeout(function() {
+        var active = document.activeElement;
+        if (active && active !== document.body) active.blur();
+      }, 50);
+    }
+  }
+  function getThrowLines() {
+    var eds = getMonacoEditorsFromWindow();
+    var ed = pickMonacoEditor(eds);
+    if (!ed) return [];
+    var model;
+    try {
+      model = ed.getModel();
+    } catch (e) {
+      return [];
+    }
+    if (!model) return [];
+    var content;
+    try {
+      content = model.getValue();
+    } catch (e) {
+      return [];
+    }
+    var lines = content.split("\n");
+    var result = [];
+    for (var i = 0; i < lines.length; i++) {
+      if (/throw new Error\s*\(\s*['"`]debug/.test(lines[i])) result.push(i + 1);
+    }
+    return result;
+  }
+  var helperSearchLog, HELPER_LOG_MAX_LINES, FILE_PATH_INDEX_KEY2, FILE_INDEX_SEP2, _helperTreeTargetPath, _lastExpandStateSig;
+  var init_context = __esm({
+    "src/notes/04-context.ts"() {
+      "use strict";
+      init_state();
+      init_constants();
+      init_map_tab();
+      init_store();
+      init_shift();
+      init_shift();
+      init_panel_shell();
+      init_render_panel();
+      helperSearchLog = [];
+      HELPER_LOG_MAX_LINES = 80;
+      FILE_PATH_INDEX_KEY2 = "_qawFilePathIndex";
+      FILE_INDEX_SEP2 = "";
+      _helperTreeTargetPath = "";
+      _lastExpandStateSig = "";
+    }
+  });
+
   // src/notes/13-init.ts
   init_state();
   init_constants();
   init_store();
   init_store();
   init_shift();
+  init_context();
   init_quicklinks();
   init_panel_shell();
   init_open_export();
@@ -23958,7 +24134,7 @@ This won't delete the actual file.`)) return;
     } catch (_) {
     }
     try {
-      if ("1.509") return "1.509";
+      if ("1.513") return "1.513";
     } catch (_) {
     }
     return "unknown";
@@ -24216,7 +24392,7 @@ This won't delete the actual file.`)) return;
     window.addEventListener("storage", onStorage);
     window.addEventListener("storage", onWatchLineTriggerStorage);
     window.addEventListener("resize", function() {
-      if (state.panelEl) applyDrawerWidth(state.panelEl);
+      if (state.panelEl) applyDrawerWidth2(state.panelEl);
       repositionInvTooltipIfOpen();
     });
     if (typeof GM_addValueChangeListener === "function") {
@@ -24250,6 +24426,7 @@ This won't delete the actual file.`)) return;
     initBugReport();
     initRunLogActions();
     processPendingDiscoverOpen();
+    processPendingHelperFnJump();
     ingestChimeMetricsIntoStore(readRunChimeMetrics());
     window.addEventListener("qaw-run-chime-metrics", function(e) {
       var m = e.detail ? e.detail : readRunChimeMetrics();
