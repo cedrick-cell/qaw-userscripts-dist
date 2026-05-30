@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         QA Wolf Investigation Notes
 // @namespace    http://tampermonkey.net/
-// @version      1.498
+// @version      1.509
 // @description  Per-file investigation notes: quick links (new-tab opens, PoC textarea, client-wide notes), client/env chips, instant tooltips, run timing, shift sync, work mode, export, search. data-e2e investigation-* hooks.
 // @author       You
 // @match        https://app.qawolf.com/*
@@ -509,11 +509,6 @@
   function slugifyClientNoteTitleLocal(title) {
     return String(title || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64);
   }
-  function serializeClientNotesMarkdownLocal(items) {
-    return (items || []).map(function(item) {
-      return "## " + String(item.title || "Client note") + " [" + String(item.slug || "client-note") + "]" + (String(item.body || "").trim() ? "\n" + String(item.body || "").trim() : "");
-    }).join("\n\n");
-  }
   function ensureClientNoteBucketForMigration(p, clientSlug) {
     var key = clientSlug + NOTE_KEY_SEP + CLIENT_SCOPE_ENV + NOTE_KEY_SEP + CLIENT_NOTES_FILE;
     var now = (/* @__PURE__ */ new Date()).toISOString();
@@ -542,6 +537,8 @@
           updatedAt: String(note.updatedAt || now)
         });
       }
+      note.clientPlain = "";
+      note.bullets = [];
     }
     return note;
   }
@@ -570,9 +567,8 @@
           updatedAt: now
         });
         note.updatedAt = now;
-        note.clientPlain = serializeClientNotesMarkdownLocal(note.clientNotes);
-        var bid = note.bullets && note.bullets[0] && note.bullets[0].id ? note.bullets[0].id : uid();
-        note.bullets = [{ id: bid, text: note.clientPlain || "", tag: null, occurrences: 1 }];
+        note.clientPlain = "";
+        note.bullets = [];
       }
       row2.poc = "";
     });
@@ -880,11 +876,17 @@
       try {
         localStorage.setItem(NOTE_LS_KEY_PREFIX + noteK, JSON.stringify(state.store.notes[noteK]));
       } catch (e) {
+        console.warn("[qaw-store] failed to save note", {
+          noteKey: noteK,
+          size: JSON.stringify(state.store.notes[noteK] || {}).length,
+          error: e
+        });
       }
     });
     try {
       localStorage.setItem(META_STORAGE_KEY, JSON.stringify(buildMeta(state.store)));
     } catch (e) {
+      console.warn("[qaw-store] failed to save meta", { error: e });
     }
     saveBackupSnapshot();
     writeShiftBridgeFromStore();
@@ -2503,7 +2505,7 @@
       } catch (e) {
       }
       try {
-        if ("1.498") return "1.498";
+        if ("1.509") return "1.509";
       } catch (e2) {
       }
       return "unknown";
@@ -3189,7 +3191,7 @@
       }
     }
     note.clientNotes = out;
-    note.clientPlain = serializeClientNotesMarkdown(out);
+    note.clientPlain = "";
     return out;
   }
   function serializeClientNotesMarkdown(items) {
@@ -3203,10 +3205,13 @@
   }
   function syncClientNotePlain(note) {
     if (!note) return;
-    var items = normalizeClientNoteItems(note);
-    note.clientPlain = serializeClientNotesMarkdown(items);
-    var bid = note.bullets && note.bullets[0] && note.bullets[0].id ? note.bullets[0].id : uid();
-    note.bullets = [{ id: bid, text: note.clientPlain || "", tag: null, occurrences: 1 }];
+    normalizeClientNoteItems(note);
+    note.clientPlain = "";
+    note.bullets = [];
+  }
+  function clientNotePlainForNote(note) {
+    if (!note || typeof note !== "object") return "";
+    return serializeClientNotesMarkdown(normalizeClientNoteItems(note));
   }
   function clientNoteItemsForClient(clientSlug) {
     var key = clientScopedNotesKey(clientSlug);
@@ -3477,7 +3482,7 @@
         var _expLabel = displayNoteFileLabel(m);
         lines.push("### " + (_expIdeUrl ? "[" + _expLabel + "](" + _expIdeUrl + ")" : _expLabel) + " \u2014 " + envDisp);
         if (isClientScopedNoteKey(k)) {
-          var plain = n.clientPlain != null ? String(n.clientPlain) : bulletsToRawText(n.bullets || []);
+          var plain = clientNotePlainForNote(n);
           lines.push("");
           if (plain.trim()) {
             plain.split("\n").forEach(function(ln) {
@@ -14774,6 +14779,7 @@
     return "background:#0f172a;color:#94a3b8;border:1px solid #334155;border-radius:6px;padding:4px 9px;cursor:pointer;font:10px monospace;";
   }
   function persistClientNotes(editKey, note) {
+    if (state.store && state.store.notes) state.store.notes[editKey] = note;
     syncClientNotePlain(note);
     touchNote(editKey);
     saveStoreImmediate();
@@ -14804,12 +14810,24 @@
     ];
     await slackPostKitToSelfDm(token, memberId, "QA Wolf client note \xB7 " + title, blocks, []);
   }
+  function flushPendingClientNoteEdits(editKey) {
+    var fn = pendingClientNoteFlush[editKey];
+    if (fn) {
+      delete pendingClientNoteFlush[editKey];
+      fn();
+    }
+  }
+  function storeNoteForEditKey(editKey) {
+    return state.store && state.store.notes ? state.store.notes[editKey] : null;
+  }
   function mountClientNotesView(container, editKey, note) {
     ensureClientNotesCss();
+    flushPendingClientNoteEdits(editKey);
+    var needsLegacyPersist = !Array.isArray(note.clientNotes) && (!!String(note.clientPlain || "").trim() || !!(note.bullets && note.bullets[0] && String(note.bullets[0].text || "").trim()));
     container.innerHTML = "";
     container.style.cssText = "display:flex;flex-direction:column;gap:10px;";
     var items = normalizeClientNoteItems(note);
-    persistClientNotes(editKey, note);
+    if (needsLegacyPersist) persistClientNotes(editKey, note);
     var header = document.createElement("div");
     header.style.cssText = "display:flex;align-items:center;gap:8px;flex-wrap:wrap;";
     var title = document.createElement("div");
@@ -14825,11 +14843,15 @@
     var list = document.createElement("div");
     list.style.cssText = "display:flex;flex-direction:column;gap:8px;";
     container.appendChild(list);
+    var cardSavers = [];
+    var saveTimers = {};
     function saveAndRender() {
-      persistClientNotes(editKey, note);
-      mountClientNotesView(container, editKey, note);
+      flushPendingClientNoteEdits(editKey);
+      var latest = storeNoteForEditKey(editKey) || note;
+      mountClientNotesView(container, editKey, latest);
     }
     function renderItem(item) {
+      var slugManual = item.slug !== "new-client-note" && item.slug !== slugifyClientNoteTitle(item.title);
       var card = document.createElement("div");
       card.setAttribute("data-qaw-client-note-card", item.slug);
       card.style.cssText = "border:1px solid #334155;border-radius:10px;background:#0f172a;padding:10px;display:flex;flex-direction:column;gap:8px;box-shadow:inset 0 1px 0 rgba(255,255,255,0.03);";
@@ -14863,8 +14885,7 @@
         e.stopPropagation();
         item.favorite = !item.favorite;
         kebabMenu.classList.remove("open");
-        persistClientNotes(editKey, note);
-        mountClientNotesView(container, editKey, note);
+        saveAndRender();
       });
       kebabMenu.appendChild(pinItem);
       var copyItem = document.createElement("button");
@@ -14979,22 +15000,50 @@
       body.style.cssText = "width:100%;box-sizing:border-box;background:#020617;color:#cbd5e1;border:1px solid #334155;border-radius:8px;padding:8px;font:11px/1.5 monospace;resize:vertical;min-height:96px;";
       card.appendChild(body);
       function saveItem() {
-        item.title = titleInput.value.trim() || "Client note";
-        item.slug = slugifyClientNoteTitle(slugInput.value || item.title) || item.slug || "client-note";
-        slugInput.value = item.slug;
-        item.body = body.value.trim();
-        item.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-        note.clientPlain = serializeClientNotesMarkdown(note.clientNotes || []);
-        persistClientNotes(editKey, note);
+        var storeNote = storeNoteForEditKey(editKey) || note;
+        var list2 = storeNote.clientNotes || [];
+        var target = null;
+        for (var i = 0; i < list2.length; i++) {
+          if (list2[i] && list2[i].id === item.id) {
+            target = list2[i];
+            break;
+          }
+        }
+        if (!target) target = item;
+        var nextTitle = titleInput.value.trim() || "Client note";
+        var nextSlug = slugifyClientNoteTitle(slugInput.value || nextTitle) || target.slug || "client-note";
+        var nextBody = body.value.trim();
+        target.title = nextTitle;
+        target.slug = nextSlug;
+        target.body = nextBody;
+        target.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+        item.title = target.title;
+        item.slug = target.slug;
+        item.body = target.body;
+        slugInput.value = target.slug;
+        persistClientNotes(editKey, storeNote);
       }
+      function scheduleSave2() {
+        var id = item.id;
+        if (saveTimers[id]) clearTimeout(saveTimers[id]);
+        saveTimers[id] = setTimeout(function() {
+          delete saveTimers[id];
+          saveItem();
+        }, 400);
+      }
+      cardSavers.push(saveItem);
       titleInput.addEventListener("blur", saveItem);
       slugInput.addEventListener("blur", saveItem);
       body.addEventListener("blur", saveItem);
       titleInput.addEventListener("input", function() {
-        if (!slugInput.value.trim() || slugInput.value === item.slug) {
-          slugInput.value = slugifyClientNoteTitle(titleInput.value);
-        }
+        if (!slugManual) slugInput.value = slugifyClientNoteTitle(titleInput.value);
+        scheduleSave2();
       });
+      slugInput.addEventListener("input", function() {
+        slugManual = true;
+        scheduleSave2();
+      });
+      body.addEventListener("input", scheduleSave2);
       list.appendChild(card);
     }
     if (!items.length) {
@@ -15038,7 +15087,17 @@
         }, 1600);
       }, 0);
     }
+    pendingClientNoteFlush[editKey] = function() {
+      Object.keys(saveTimers).forEach(function(id) {
+        clearTimeout(saveTimers[id]);
+        delete saveTimers[id];
+      });
+      cardSavers.forEach(function(fn) {
+        fn();
+      });
+    };
   }
+  var pendingClientNoteFlush;
   var init_client_notes_view = __esm({
     "src/notes/45-client-notes-view.ts"() {
       "use strict";
@@ -15047,6 +15106,7 @@
       init_context();
       init_slack_self_dm();
       init_client_note_refs();
+      pendingClientNoteFlush = {};
     }
   });
 
@@ -18063,7 +18123,7 @@ This won't delete the actual file.`)) return;
       var c = state.store.casesById[b.caseId];
       if (c) parts.push(String(c.title || ""));
     }
-    if (note && note.clientPlain) parts.push(String(note.clientPlain));
+    if (note && note.clientNotes) parts.push(clientNotePlainForNote(note));
     return parts.join(" ").toLowerCase();
   }
   function collectDiscoverHits(query, dayRange) {
@@ -18783,6 +18843,7 @@ This won't delete the actual file.`)) return;
       init_facet_hashtag();
       init_cards();
       init_floating_panel();
+      init_client_note_refs();
       HASHTAG_TOKEN_RE2 = /(^|[\s(])#([a-z][a-z0-9-]*)\b/gi;
       DISCOVER_PENDING_OPEN_KEY = "_qawDiscoverPendingOpen_v1";
       MAX_BULLETS_SCAN = 5e3;
@@ -18847,6 +18908,7 @@ This won't delete the actual file.`)) return;
     state.pendingProtectedPanelRenderKey = null;
     state.pendingProtectedPanelRenderReason = "";
     if (state.panelEl) state.panelEl.removeAttribute("data-qaw-protected-render-pending");
+    flushPendingClientNoteEdits(editKey);
     renderFn(editKey);
     return true;
   }
@@ -18854,6 +18916,7 @@ This won't delete the actual file.`)) return;
     "src/notes/39-editor-protection.ts"() {
       "use strict";
       init_state();
+      init_client_notes_view();
     }
   });
 
@@ -19839,6 +19902,8 @@ This won't delete the actual file.`)) return;
       if (activeEk) queueProtectedPanelRender(activeEk, "storage");
       return;
     }
+    var ekFlush = state.panelEl.getAttribute("data-qaw-edit-key");
+    if (ekFlush) flushPendingClientNoteEdits(ekFlush);
     applyStoreFromDiskMergedNotes();
     var ek = state.panelEl.getAttribute("data-qaw-edit-key");
     if (ek && state.store.notes[ek]) renderPanelForKey(ek);
@@ -19969,6 +20034,7 @@ This won't delete the actual file.`)) return;
       init_discover();
       init_panel_bootstrap();
       init_editor_protection();
+      init_client_notes_view();
       init_bug_logic();
       init_maintenance_logic();
       init_context();
@@ -20217,9 +20283,33 @@ This won't delete the actual file.`)) return;
     var extrasHtml = '<div data-qaw-extras-section style="">' + bugSummaryHtml + maintenanceSummaryHtml + "<div data-qaw-quick-links-host></div></div>";
     var FAV_BTN_STYLE = "font-size:10px;padding:2px 9px;border-radius:999px;border:1px solid #334155;background:transparent;color:#64748b;cursor:pointer;font-family:monospace;white-space:nowrap;";
     var WATCH_BTN_STYLE = "display:none;font-size:10px;padding:2px 9px;border-radius:999px;border:1px solid #6d28d9;background:transparent;color:#a78bfa;cursor:pointer;font-family:monospace;white-space:nowrap;margin-left:auto;";
-    var TAB_ACTIVE_STYLE = "font-family:monospace;font-size:11px;font-weight:600;padding:4px 10px;background:none;border:none;border-bottom:2px solid #38bdf8;color:#e2e8f0;cursor:pointer;margin-bottom:-1px;";
-    var TAB_INACTIVE_STYLE = "font-family:monospace;font-size:11px;font-weight:600;padding:4px 10px;background:none;border:none;border-bottom:2px solid transparent;color:#64748b;cursor:pointer;margin-bottom:-1px;";
-    var notesSectionHtml = '<div data-qaw-notes-section style="margin-top:14px;border-top:1px solid #334155;padding-top:12px;display:flex;flex-direction:column;gap:6px;flex:1;min-height:0;"><div style="display:flex;align-items:center;gap:0;border-bottom:1px solid #1e293b;margin-bottom:2px;flex-shrink:0;overflow-x:auto;scrollbar-width:none;-ms-overflow-style:none;"><button type="button" data-qaw-tab-btn="notes" data-e2e="investigation-panel-tab-notes" style="' + TAB_ACTIVE_STYLE + '">Notes</button><button type="button" data-qaw-tab-btn="history" data-e2e="investigation-panel-tab-history" style="' + TAB_INACTIVE_STYLE + '">History</button><button type="button" data-qaw-tab-btn="bugs" style="' + TAB_INACTIVE_STYLE + '">Bugs</button><button type="button" data-qaw-tab-btn="maintenance" style="' + TAB_INACTIVE_STYLE + '">Maint</button><button type="button" data-qaw-tab-btn="ai" style="' + TAB_INACTIVE_STYLE + '">AI</button><button type="button" data-qaw-tab-btn="cases" style="' + TAB_INACTIVE_STYLE + '">Cases</button><button type="button" data-qaw-tab-btn="work" style="' + TAB_INACTIVE_STYLE + '">Work</button><button type="button" data-qaw-tab-btn="map" style="' + TAB_INACTIVE_STYLE + '">Helpers</button><button type="button" data-qaw-tab-btn="cleaning" style="' + TAB_INACTIVE_STYLE + '">Clean</button><button type="button" data-qaw-tab-btn="settings" data-e2e="investigation-panel-tab-settings" style="' + TAB_INACTIVE_STYLE + '">Settings</button></div><div data-qaw-tab-content="notes" style="flex:1;min-height:0;display:flex;flex-direction:column;gap:6px;"><div style="display:flex;align-items:center;gap:6px;"><span data-qaw-notes-syntax-info-wrap></span><button type="button" data-qaw-filter-favs data-e2e="investigation-filter-favs" style="' + FAV_BTN_STYLE + '">\u2606 Pinned</button><button type="button" data-qaw-watch-count-btn style="' + WATCH_BTN_STYLE + '">\u26A1 0 tracked</button></div><div data-qaw-notes-view-wrap data-e2e="investigation-notes-region" style="position:relative;flex:1;min-height:0;display:flex;flex-direction:column;"><div data-qaw-notes-viewer data-e2e="investigation-notes-viewer" tabindex="0" style="display:flex;flex-direction:column;flex:1;min-height:180px;overflow-y:auto;box-sizing:border-box;background:#0f172a;border:1px solid #475569;border-radius:8px;padding:10px 8px;cursor:text;outline:none;"></div><textarea data-qaw-raw data-e2e="investigation-notes-editor" wrap="soft" spellcheck="false" style="display:none;width:100%;flex:1;min-height:180px;resize:vertical;box-sizing:border-box;background:#0f172a;color:#e2e8f0;border:1px solid #475569;border-radius:8px;padding:8px;font-family:monospace;font-size:11px;line-height:1.45;white-space:pre-wrap;word-break:break-word;overflow-x:hidden;"></textarea></div><div data-qaw-raw-status data-e2e="investigation-notes-parse-status" style="font-size:10px;min-height:14px;line-height:1.3;flex-shrink:0;"></div></div><div data-qaw-tab-content="history" style="flex:1;min-height:0;overflow-y:auto;display:none;"><div data-qaw-history-toolbar style="padding:8px 8px 4px;display:flex;justify-content:flex-end;"></div><div data-qaw-history-list></div></div><div data-qaw-tab-content="settings" data-qaw-settings-view style="display:none;flex:1;min-height:0;"></div><div data-qaw-tab-content="cases" style="display:none;flex:1;min-height:0;overflow-y:auto;"></div><div data-qaw-tab-content="bugs" style="display:none;flex:1;min-height:0;overflow-y:auto;"></div><div data-qaw-tab-content="maintenance" style="display:none;flex:1;min-height:0;overflow-y:auto;"></div><div data-qaw-tab-content="work" style="display:none;flex:1;min-height:0;overflow-y:auto;"></div><div data-qaw-tab-content="map" style="display:none;flex:1;min-height:0;overflow-y:auto;flex-direction:column;padding:4px 0;"></div><div data-qaw-tab-content="ai" style="display:none;flex:1;min-height:0;overflow-y:auto;padding:12px 8px;"></div><div data-qaw-tab-content="cleaning" style="display:none;flex:1;min-height:0;overflow-y:auto;padding:4px 0;"></div></div>';
+    var TAB_ICON_STYLE = "width:15px;height:15px;display:block;flex-shrink:0;";
+    var TAB_BASE_STYLE = "font-family:monospace;font-size:11px;font-weight:600;height:28px;min-width:32px;flex:1 0 auto;padding:4px 9px;background:none;border:none;border-bottom:2px solid transparent;color:#64748b;cursor:pointer;margin-bottom:-1px;display:inline-flex;align-items:center;justify-content:center;gap:6px;white-space:nowrap;";
+    var TAB_ACTIVE_STYLE = TAB_BASE_STYLE + "border-bottom-color:#38bdf8;color:#e2e8f0;";
+    var TAB_INACTIVE_STYLE = TAB_BASE_STYLE;
+    var TAB_ICONS = {
+      notes: '<svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" style="' + TAB_ICON_STYLE + '" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3h7l4 4v14H7z"/><path d="M14 3v5h5"/><path d="M9 12h6M9 16h6"/></svg>',
+      history: '<svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" style="' + TAB_ICON_STYLE + '" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h4M4 12h10M4 18h16"/><circle cx="10" cy="6" r="2"/><circle cx="16" cy="12" r="2"/><circle cx="20" cy="18" r="2"/></svg>',
+      bugs: '<svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" style="' + TAB_ICON_STYLE + '" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20v-9"/><path d="M14 7a4 4 0 0 1 4 4v3a6 6 0 0 1-12 0v-3a4 4 0 0 1 4-4z"/><path d="M14.12 3.88 16 2"/><path d="M21 21a4 4 0 0 0-3.81-4"/><path d="M21 5a4 4 0 0 1-3.55 3.97"/><path d="M22 13h-4"/><path d="M3 21a4 4 0 0 1 3.81-4"/><path d="M3 5a4 4 0 0 0 3.55 3.97"/><path d="M6 13H2"/><path d="m8 2 1.88 1.88"/><path d="M9 7.13V6a3 3 0 1 1 6 0v1.13"/></svg>',
+      maintenance: '<svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" style="' + TAB_ICON_STYLE + '" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>',
+      ai: '<svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" style="' + TAB_ICON_STYLE + '" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/><path d="M19 16l.8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8z"/></svg>',
+      cases: '<svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" style="' + TAB_ICON_STYLE + '" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7h7l2 2h9v10H3z"/><path d="M3 7v12"/></svg>',
+      work: '<svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" style="' + TAB_ICON_STYLE + '" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2-6 4 12 2-6h6"/></svg>',
+      map: '<svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" style="' + TAB_ICON_STYLE + '" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 4 3 12l5 8"/><path d="m16 4 5 8-5 8"/><path d="m14 5-4 14"/></svg>',
+      cleaning: '<svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" style="' + TAB_ICON_STYLE + '" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 9h14"/><path d="M7 9l1 12h8l1-12"/><path d="M8 9V7a4 4 0 0 1 8 0v2"/><path d="M4 9V7h16v2"/><path d="M10 12v5M12 12v4M14 12v5"/></svg>',
+      settings: '<svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" style="' + TAB_ICON_STYLE + '" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.65 1.65 0 0 0 15 19.4a1.65 1.65 0 0 0-1 .6 1.65 1.65 0 0 0-.4 1.1V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 8.6 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-.6-1 1.65 1.65 0 0 0-1.1-.4H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 8.6a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-.6 1.65 1.65 0 0 0 .4-1.1V3a2 2 0 1 1 4 0v.09A1.65 1.65 0 0 0 15.4 4.6a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9c.2.32.4.66.6 1h1a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>'
+    };
+    function tabBtnHtml(tab, label, e2e, active) {
+      return '<button type="button" data-qaw-tab-btn="' + tab + '"' + (e2e ? ' data-e2e="' + e2e + '"' : "") + ' title="' + escAttr(label) + '" aria-label="' + escAttr(label) + '" aria-selected="' + (active ? "true" : "false") + '" style="' + (active ? TAB_ACTIVE_STYLE : TAB_INACTIVE_STYLE) + '">' + (TAB_ICONS[tab] || "") + '<span data-qaw-tab-label style="display:' + (active ? "inline" : "none") + ';">' + esc3(label) + "</span></button>";
+    }
+    function setTabButtonVisual(btn, active) {
+      if (!btn) return;
+      btn.style.cssText = active ? TAB_ACTIVE_STYLE : TAB_INACTIVE_STYLE;
+      btn.setAttribute("aria-selected", active ? "true" : "false");
+      var label = btn.querySelector("[data-qaw-tab-label]");
+      if (label) label.style.display = active ? "inline" : "none";
+    }
+    var notesSectionHtml = '<div data-qaw-notes-section style="margin-top:14px;border-top:1px solid #334155;padding-top:12px;display:flex;flex-direction:column;gap:6px;flex:1;min-height:0;"><div style="border-bottom:1px solid #1e293b;margin-bottom:2px;flex-shrink:0;overflow-x:auto;scrollbar-width:none;-ms-overflow-style:none;"><div style="display:flex;align-items:center;gap:0;width:max-content;min-width:365px;">' + tabBtnHtml("notes", "Notes", "investigation-panel-tab-notes", true) + tabBtnHtml("history", "History", "investigation-panel-tab-history", false) + tabBtnHtml("bugs", "Bugs", null, false) + tabBtnHtml("maintenance", "Maint", null, false) + tabBtnHtml("ai", "AI", null, false) + tabBtnHtml("cases", "Cases", null, false) + tabBtnHtml("work", "Work", null, false) + tabBtnHtml("map", "Helpers", null, false) + tabBtnHtml("cleaning", "Clean", null, false) + tabBtnHtml("settings", "Settings", "investigation-panel-tab-settings", false) + '</div></div><div data-qaw-tab-content="notes" style="flex:1;min-height:0;display:flex;flex-direction:column;gap:6px;"><div style="display:flex;align-items:center;gap:6px;"><span data-qaw-notes-syntax-info-wrap></span><button type="button" data-qaw-filter-favs data-e2e="investigation-filter-favs" style="' + FAV_BTN_STYLE + '">\u2606 Pinned</button><button type="button" data-qaw-watch-count-btn style="' + WATCH_BTN_STYLE + '">\u26A1 0 tracked</button></div><div data-qaw-notes-view-wrap data-e2e="investigation-notes-region" style="position:relative;flex:1;min-height:0;display:flex;flex-direction:column;"><div data-qaw-notes-viewer data-e2e="investigation-notes-viewer" tabindex="0" style="display:flex;flex-direction:column;flex:1;min-height:180px;overflow-y:auto;box-sizing:border-box;background:#0f172a;border:1px solid #475569;border-radius:8px;padding:10px 8px;cursor:text;outline:none;"></div><textarea data-qaw-raw data-e2e="investigation-notes-editor" wrap="soft" spellcheck="false" style="display:none;width:100%;flex:1;min-height:180px;resize:vertical;box-sizing:border-box;background:#0f172a;color:#e2e8f0;border:1px solid #475569;border-radius:8px;padding:8px;font-family:monospace;font-size:11px;line-height:1.45;white-space:pre-wrap;word-break:break-word;overflow-x:hidden;"></textarea></div><div data-qaw-raw-status data-e2e="investigation-notes-parse-status" style="font-size:10px;min-height:14px;line-height:1.3;flex-shrink:0;"></div></div><div data-qaw-tab-content="history" style="flex:1;min-height:0;overflow-y:auto;display:none;"><div data-qaw-history-toolbar style="padding:8px 8px 4px;display:flex;justify-content:flex-end;"></div><div data-qaw-history-list></div></div><div data-qaw-tab-content="settings" data-qaw-settings-view style="display:none;flex:1;min-height:0;"></div><div data-qaw-tab-content="cases" style="display:none;flex:1;min-height:0;overflow-y:auto;"></div><div data-qaw-tab-content="bugs" style="display:none;flex:1;min-height:0;overflow-y:auto;"></div><div data-qaw-tab-content="maintenance" style="display:none;flex:1;min-height:0;overflow-y:auto;"></div><div data-qaw-tab-content="work" style="display:none;flex:1;min-height:0;overflow-y:auto;"></div><div data-qaw-tab-content="map" style="display:none;flex:1;min-height:0;overflow-y:auto;flex-direction:column;padding:4px 0;"></div><div data-qaw-tab-content="ai" style="display:none;flex:1;min-height:0;overflow-y:auto;padding:12px 8px;"></div><div data-qaw-tab-content="cleaning" style="display:none;flex:1;min-height:0;overflow-y:auto;padding:4px 0;"></div></div>';
     var notesSectionHtmlClient = '<div data-qaw-notes-section style="margin-top:14px;border-top:1px solid #334155;padding-top:12px;display:flex;flex-direction:column;gap:6px;"><div data-qaw-client-notes-view data-e2e="investigation-client-notes-view" style="min-height:200px;"></div></div>';
     if (state.rawSaveTimer) {
       clearTimeout(state.rawSaveTimer);
@@ -20239,16 +20329,16 @@ This won't delete the actual file.`)) return;
         if (tabMapContent) tabMapContent.style.display = tab === "map" ? "flex" : "none";
         if (tabAiContent) tabAiContent.style.display = tab === "ai" ? "block" : "none";
         if (tabCleaningContent) tabCleaningContent.style.display = tab === "cleaning" ? "flex" : "none";
-        if (tabNotesBtn2) tabNotesBtn2.style.cssText = tab === "notes" ? TAB_ACTIVE_STYLE : TAB_INACTIVE_STYLE;
-        if (tabHistoryBtn2) tabHistoryBtn2.style.cssText = tab === "history" ? TAB_ACTIVE_STYLE : TAB_INACTIVE_STYLE;
-        if (tabSettingsBtn2) tabSettingsBtn2.style.cssText = tab === "settings" ? TAB_ACTIVE_STYLE : TAB_INACTIVE_STYLE;
-        if (tabCasesBtn2) tabCasesBtn2.style.cssText = tab === "cases" ? TAB_ACTIVE_STYLE : TAB_INACTIVE_STYLE;
-        if (tabBugsBtn2) tabBugsBtn2.style.cssText = tab === "bugs" ? TAB_ACTIVE_STYLE : TAB_INACTIVE_STYLE;
-        if (tabMaintenanceBtn2) tabMaintenanceBtn2.style.cssText = tab === "maintenance" ? TAB_ACTIVE_STYLE : TAB_INACTIVE_STYLE;
-        if (tabWorkBtn2) tabWorkBtn2.style.cssText = tab === "work" ? TAB_ACTIVE_STYLE : TAB_INACTIVE_STYLE;
-        if (tabMapBtn2) tabMapBtn2.style.cssText = tab === "map" ? TAB_ACTIVE_STYLE : TAB_INACTIVE_STYLE;
-        if (tabAiBtn2) tabAiBtn2.style.cssText = tab === "ai" ? TAB_ACTIVE_STYLE : TAB_INACTIVE_STYLE;
-        if (tabCleaningBtn2) tabCleaningBtn2.style.cssText = tab === "cleaning" ? TAB_ACTIVE_STYLE : TAB_INACTIVE_STYLE;
+        setTabButtonVisual(tabNotesBtn2, tab === "notes");
+        setTabButtonVisual(tabHistoryBtn2, tab === "history");
+        setTabButtonVisual(tabSettingsBtn2, tab === "settings");
+        setTabButtonVisual(tabCasesBtn2, tab === "cases");
+        setTabButtonVisual(tabBugsBtn2, tab === "bugs");
+        setTabButtonVisual(tabMaintenanceBtn2, tab === "maintenance");
+        setTabButtonVisual(tabWorkBtn2, tab === "work");
+        setTabButtonVisual(tabMapBtn2, tab === "map");
+        setTabButtonVisual(tabAiBtn2, tab === "ai");
+        setTabButtonVisual(tabCleaningBtn2, tab === "cleaning");
         if (tab === "history" && tabHistoryContent) {
           var histList = tabHistoryContent.querySelector("[data-qaw-history-list]");
           if (histList) {
@@ -21819,9 +21909,9 @@ This won't delete the actual file.`)) return;
       flashNotesHint("Open a file under a client first", true);
       return;
     }
-    applyStoreFromDiskMergedNotes();
     var kClient = clientScopedNotesKey(slug);
     if (currentEditKey === kClient) {
+      flushPendingClientNoteEdits(kClient);
       var back = state.pendingReturnFromClientNotesKey;
       if (back && back !== kClient && state.store.notes[back] != null) {
         state.pendingReturnFromClientNotesKey = null;
@@ -21837,6 +21927,7 @@ This won't delete the actual file.`)) return;
       flashNotesHint("Open a file tab to return to file notes", true);
       return;
     }
+    applyStoreFromDiskMergedNotes();
     state.pendingReturnFromClientNotesKey = currentEditKey || null;
     getOrCreateNote(slug, "__client_scope__", "__client_notes__");
     saveStoreImmediate();
@@ -21983,7 +22074,7 @@ This won't delete the actual file.`)) return;
     })();
     addLinkRow("Client notes", null, function(row2) {
       var note = kClient ? state.store.notes[kClient] : null;
-      var count = clientSlug && note && Array.isArray(note.clientNotes) ? note.clientNotes.length : clientSlug && note && String(note.clientPlain || "").trim() ? 1 : 0;
+      var count = clientSlug && note && Array.isArray(note.clientNotes) ? note.clientNotes.length : clientSlug && note && clientNotePlainForNote(note).trim() ? 1 : 0;
       var cn = miniBtn(onClientNotes ? "Back to file" : "Open", !!clientSlug);
       cn.setAttribute("data-e2e", "investigation-quicklink-client-notes");
       if (count > 0) {
@@ -22172,6 +22263,8 @@ This won't delete the actual file.`)) return;
       init_store();
       init_shift();
       init_context();
+      init_client_notes_view();
+      init_client_note_refs();
       init_chime_ingest();
       SLACK_CHANNEL_ICON_SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M5.042 15.165a2.528 2.528 0 0 1-2.52 2.523A2.528 2.528 0 0 1 0 15.165a2.527 2.527 0 0 1 2.522-2.52h2.52v2.52zM6.313 15.165a2.527 2.527 0 0 1 2.521-2.52 2.527 2.527 0 0 1 2.521 2.52v6.313A2.528 2.528 0 0 1 8.834 24a2.528 2.528 0 0 1-2.521-2.522v-6.313zM8.834 5.042a2.528 2.528 0 0 1-2.521-2.52A2.528 2.528 0 0 1 8.834 0a2.528 2.528 0 0 1 2.521 2.522v2.52H8.834zM8.834 6.313a2.528 2.528 0 0 1 2.521 2.521 2.528 2.528 0 0 1-2.521 2.521H2.522A2.528 2.528 0 0 1 0 8.834a2.528 2.528 0 0 1 2.522-2.521h6.312zM18.956 8.834a2.528 2.528 0 0 1 2.522-2.521A2.528 2.528 0 0 1 24 8.834a2.528 2.528 0 0 1-2.522 2.521h-2.522V8.834zM17.688 8.834a2.528 2.528 0 0 1-2.523 2.521 2.527 2.527 0 0 1-2.52-2.521V2.522A2.527 2.527 0 0 1 15.165 0a2.528 2.528 0 0 1 2.523 2.522v6.312zM15.165 18.956a2.528 2.528 0 0 1 2.523 2.522A2.528 2.528 0 0 1 15.165 24a2.527 2.527 0 0 1-2.52-2.522v-2.522h2.52zM15.165 17.688a2.527 2.527 0 0 1-2.52-2.523 2.526 2.526 0 0 1 2.52-2.52h6.313A2.527 2.527 0 0 1 24 15.165a2.528 2.528 0 0 1-2.522 2.523h-6.313z"/></svg>';
     }
@@ -23865,7 +23958,7 @@ This won't delete the actual file.`)) return;
     } catch (_) {
     }
     try {
-      if ("1.498") return "1.498";
+      if ("1.509") return "1.509";
     } catch (_) {
     }
     return "unknown";
