@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         QA Wolf Shortcuts
 // @namespace    http://tampermonkey.net/
-// @version      4.146
+// @version      4.165
 // @description  Keyboard shortcut hints for app.qawolf.com. Header nav shortcuts live in JSON key __global__ (editable). File tabs: Shift+right-click = Close other tabs. Violet badges = Meta chord. task-wolf.com: Select All button for Bug Revalidation Tasks.
 // @author       You
 // @match        https://app.qawolf.com/*
@@ -568,9 +568,7 @@
         }
       }
       if (window.__qawAllKeys.indexOf(k) === -1 && !isNav) return;
-      var tag = t.tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA") return;
-      if (t.isContentEditable) return;
+      if (__qawIsTypingTarget(t) || __qawIsTypingTarget(focused)) return;
       var ae = document.activeElement;
       var role = ae && ae.getAttribute && ae.getAttribute("role");
       if (role === "tablist" || role === "tab") ae.blur();
@@ -597,6 +595,7 @@
     handleKey(e.detail);
   });
   function handleKey(k) {
+    if (isTypingTarget(document.activeElement)) return;
     if (k === "alt+arrowright") {
       window.__qawLastKeyConsumed = true;
       cycleTab(1);
