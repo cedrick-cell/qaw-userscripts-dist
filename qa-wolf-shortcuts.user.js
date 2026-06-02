@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         QA Wolf Shortcuts
 // @namespace    http://tampermonkey.net/
-// @version      4.165
+// @version      4.168
 // @description  Keyboard shortcut hints for app.qawolf.com. Header nav shortcuts live in JSON key __global__ (editable). File tabs: Shift+right-click = Close other tabs. Violet badges = Meta chord. task-wolf.com: Select All button for Bug Revalidation Tasks.
 // @author       You
 // @match        https://app.qawolf.com/*
@@ -19,12 +19,28 @@
   var STORAGE_KEY_SHORTCUTS = "_qaWolfShortcuts";
   var STORAGE_KEY_OPEN_TABS = "_qawOpenTabs";
   var STORAGE_KEY_FILE_INDEX = "_qawFileIndex";
+  var STORAGE_KEY_SAFE_MODE = "_qawUserscriptsSafeMode";
   var GLOBAL_PAGE_KEY = "__global__";
   var ANCHOR_THRESHOLD = 120;
   var POLL_INTERVAL = 600;
   function getNavActionRow() {
     var link = document.querySelector('#app-header-navigation a[href*="maintenance"]');
     return link ? link.parentElement : null;
+  }
+  function getRunAttemptHeader() {
+    var back = document.querySelector('[data-e2e="button-back"]');
+    var interval = document.querySelector('[data-e2e="RunTimeInterval"]');
+    var header = back && back.closest("header") || interval && interval.closest("header");
+    if (!header) return null;
+    if (!/\/environments\/[^/]+\/runs\/[^/]+\/flows\/[^/]+\/attempt\//.test(window.location.pathname)) return null;
+    return header;
+  }
+  function getToggleHost() {
+    var nav = getNavActionRow();
+    if (nav) return { el: nav, variant: "nav" };
+    var runHeader = getRunAttemptHeader();
+    if (runHeader) return { el: runHeader, variant: "runHeader" };
+    return null;
   }
   var NAV_SHORTCUTS = [
     { key: "m", selector: '[data-e2e="app-primary-nav-map"]' },
@@ -46,8 +62,19 @@
   var tabContextMenu = null;
   var shortcutsDrawer = null;
   var helpDrawer = null;
+  var healthHud = null;
+  var healthTimer = null;
+  var healthMutationObserver = null;
+  var healthMutationCount = 0;
+  var healthLog = [];
+  var healthRestoreFocus = null;
+  var healthRestoreBlur = null;
+  var healthDragCleanup = null;
+  var safeModeChip = null;
+  var safeModeStyle = null;
   var lastOverlaySig = "";
   var _lineChip = null;
+  var _lineMenu = null;
   var _isPartialRun = false;
   var _lastExecutingLine = null;
   var _lastExecutingLineSeenAt = 0;
@@ -318,6 +345,315 @@
     setTimeout(function() {
       t.remove();
     }, 1800);
+  }
+  function describeEl(el) {
+    if (!el) return "(none)";
+    if (el === document) return "document";
+    if (el === window) return "window";
+    var tag = (el.tagName || String(el.nodeName || "node")).toLowerCase();
+    var bits = [tag];
+    if (el.id) bits.push("#" + el.id);
+    if (el.getAttribute) {
+      var e2e = el.getAttribute("data-e2e");
+      var role = el.getAttribute("role");
+      if (e2e) bits.push('[data-e2e="' + e2e + '"]');
+      if (role) bits.push('[role="' + role + '"]');
+      if (el.getAttribute("data-qaw-overlay")) bits.push("[data-qaw-overlay]");
+    }
+    var txt = (el.innerText || el.textContent || "").trim().replace(/\s+/g, " ");
+    if (txt) bits.push('"' + txt.slice(0, 32) + (txt.length > 32 ? "..." : "") + '"');
+    return bits.join("");
+  }
+  function healthAddLog(msg) {
+    var line = (/* @__PURE__ */ new Date()).toISOString().slice(11, 23) + " " + msg;
+    healthLog.push(line);
+    if (healthLog.length > 160) healthLog = healthLog.slice(healthLog.length - 160);
+  }
+  function healthCounts() {
+    return {
+      overlays: document.querySelectorAll("[data-qaw-overlay]").length,
+      shortcutBadges: document.querySelectorAll("[data-qaw-chord]").length,
+      notePanels: document.querySelectorAll("[data-qaw-inv-notes], [data-qaw-notes-viewer]").length,
+      noteEditors: document.querySelectorAll('[data-qaw-single-note-edit], [data-e2e="investigation-notes-single-editor"]').length,
+      dropdowns: document.querySelectorAll("[data-qaw-ref-drop], [data-qaw-client-note-ref-drop], .qaw-note-kebab-menu.open").length
+    };
+  }
+  function renderHealthHud() {
+    if (!healthHud) return;
+    var counts = healthCounts();
+    var activeEl = document.activeElement;
+    var activeGone = !!(activeEl && activeEl !== document.body && !document.documentElement.contains(activeEl));
+    var body = healthHud.querySelector("[data-qaw-health-body]");
+    if (!body) return;
+    body.textContent = "active: " + describeEl(activeEl) + (activeGone ? " (REMOVED)" : "") + "\nmutations/s: " + healthMutationCount + "\noverlays: " + counts.overlays + "  badges: " + counts.shortcutBadges + "\nnotes: " + counts.notePanels + "  note editors: " + counts.noteEditors + "\ndropdowns: " + counts.dropdowns + "\nsafe mode: " + (isSafeModeEnabled() ? "ON" : "off") + "\n\n" + healthLog.slice(Math.max(0, healthLog.length - 14)).join("\n");
+    healthMutationCount = 0;
+  }
+  function clampHealthHud() {
+    if (!healthHud) return;
+    var rect = healthHud.getBoundingClientRect();
+    var maxLeft = Math.max(8, window.innerWidth - rect.width - 8);
+    var maxTop = Math.max(8, window.innerHeight - rect.height - 8);
+    var left = Math.min(Math.max(8, rect.left), maxLeft);
+    var top = Math.min(Math.max(8, rect.top), maxTop);
+    healthHud.style.left = Math.round(left) + "px";
+    healthHud.style.top = Math.round(top) + "px";
+    healthHud.style.right = "auto";
+    healthHud.style.bottom = "auto";
+  }
+  function makeHealthHudDraggable(handle) {
+    var dragging = false;
+    var dragDx = 0;
+    var dragDy = 0;
+    function onMouseMove(e) {
+      if (!dragging || !healthHud) return;
+      healthHud.style.left = Math.round(e.clientX - dragDx) + "px";
+      healthHud.style.top = Math.round(e.clientY - dragDy) + "px";
+      healthHud.style.right = "auto";
+      healthHud.style.bottom = "auto";
+    }
+    function onMouseUp() {
+      if (!dragging) return;
+      dragging = false;
+      clampHealthHud();
+    }
+    function onResize() {
+      clampHealthHud();
+    }
+    handle.addEventListener("mousedown", function(e) {
+      if (e.target && e.target.closest && e.target.closest("button")) return;
+      if (!healthHud) return;
+      dragging = true;
+      var rect = healthHud.getBoundingClientRect();
+      dragDx = e.clientX - rect.left;
+      dragDy = e.clientY - rect.top;
+      e.preventDefault();
+    });
+    document.addEventListener("mousemove", onMouseMove);
+    document.addEventListener("mouseup", onMouseUp);
+    window.addEventListener("resize", onResize);
+    return function() {
+      document.removeEventListener("mousemove", onMouseMove);
+      document.removeEventListener("mouseup", onMouseUp);
+      window.removeEventListener("resize", onResize);
+      healthDragCleanup = null;
+    };
+  }
+  function startHealthHud() {
+    if (healthHud) return;
+    healthLog = [];
+    healthMutationCount = 0;
+    healthAddLog("health HUD started");
+    healthHud = document.createElement("div");
+    healthHud.setAttribute("data-qaw-overlay", "1");
+    healthHud.setAttribute("data-qaw-health-hud", "1");
+    healthHud.style.cssText = [
+      "position:fixed",
+      "right:12px",
+      "bottom:12px",
+      "width:420px",
+      "max-width:calc(100vw - 24px)",
+      "max-height:55vh",
+      "z-index:2147483647",
+      "background:#020617",
+      "color:#cbd5e1",
+      "border:1px solid #38bdf8",
+      "border-radius:10px",
+      "box-shadow:0 10px 32px rgba(0,0,0,0.65)",
+      "font:11px ui-monospace,SFMono-Regular,Menlo,monospace",
+      "overflow:hidden"
+    ].join(";");
+    var head = document.createElement("div");
+    head.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 10px;background:#0f172a;border-bottom:1px solid #1e293b;cursor:move;user-select:none;";
+    var title = document.createElement("strong");
+    title.textContent = "QAW health";
+    title.style.cssText = "color:#7dd3fc;font-size:12px;";
+    var actions = document.createElement("div");
+    actions.style.cssText = "display:flex;gap:6px;";
+    function tinyBtn(label, onClick) {
+      var b = document.createElement("button");
+      b.type = "button";
+      b.textContent = label;
+      b.style.cssText = "background:#1e293b;color:#cbd5e1;border:1px solid #475569;border-radius:5px;padding:3px 7px;cursor:pointer;font:11px monospace;";
+      b.addEventListener("click", function(e) {
+        e.stopPropagation();
+        onClick();
+      });
+      return b;
+    }
+    actions.appendChild(tinyBtn("copy", function() {
+      fallbackCopy(healthLog.join("\n"));
+    }));
+    actions.appendChild(tinyBtn("safe", function() {
+      enableSafeMode();
+    }));
+    actions.appendChild(tinyBtn("stop", stopHealthHud));
+    head.appendChild(title);
+    head.appendChild(actions);
+    var pre = document.createElement("pre");
+    pre.setAttribute("data-qaw-health-body", "1");
+    pre.style.cssText = "margin:0;padding:9px 10px;white-space:pre-wrap;overflow:auto;max-height:calc(55vh - 38px);line-height:1.35;";
+    healthHud.appendChild(head);
+    healthHud.appendChild(pre);
+    document.body.appendChild(healthHud);
+    healthDragCleanup = makeHealthHudDraggable(head);
+    document.addEventListener("focusin", onHealthFocusIn, true);
+    document.addEventListener("focusout", onHealthFocusOut, true);
+    healthMutationObserver = new MutationObserver(function(records) {
+      healthMutationCount += records.length;
+      var ae = document.activeElement;
+      if (ae && ae !== document.body && !document.documentElement.contains(ae)) {
+        healthAddLog("active element removed: " + describeEl(ae));
+      }
+    });
+    healthMutationObserver.observe(document.documentElement, { childList: true, subtree: true });
+    var proto = HTMLElement.prototype;
+    var oldFocus = proto.focus;
+    var oldBlur = proto.blur;
+    proto.focus = function() {
+      healthAddLog("focus() " + describeEl(this));
+      return oldFocus.apply(this, arguments);
+    };
+    proto.blur = function() {
+      healthAddLog("blur() " + describeEl(this));
+      return oldBlur.apply(this, arguments);
+    };
+    healthRestoreFocus = function() {
+      proto.focus = oldFocus;
+    };
+    healthRestoreBlur = function() {
+      proto.blur = oldBlur;
+    };
+    renderHealthHud();
+    healthTimer = setInterval(renderHealthHud, 1e3);
+    setTimeout(function() {
+      if (healthHud) {
+        healthAddLog("auto-stop after 5 minutes");
+        stopHealthHud();
+      }
+    }, 5 * 60 * 1e3);
+  }
+  function onHealthFocusIn(e) {
+    healthAddLog("focusin  " + describeEl(e.target));
+  }
+  function onHealthFocusOut(e) {
+    var related = e.relatedTarget ? " -> " + describeEl(e.relatedTarget) : "";
+    healthAddLog("focusout " + describeEl(e.target) + related);
+  }
+  function stopHealthHud() {
+    document.removeEventListener("focusin", onHealthFocusIn, true);
+    document.removeEventListener("focusout", onHealthFocusOut, true);
+    if (healthMutationObserver) {
+      healthMutationObserver.disconnect();
+      healthMutationObserver = null;
+    }
+    if (healthTimer) {
+      clearInterval(healthTimer);
+      healthTimer = null;
+    }
+    if (healthRestoreFocus) {
+      healthRestoreFocus();
+      healthRestoreFocus = null;
+    }
+    if (healthRestoreBlur) {
+      healthRestoreBlur();
+      healthRestoreBlur = null;
+    }
+    if (healthDragCleanup) {
+      healthDragCleanup();
+    }
+    if (healthHud) {
+      healthHud.remove();
+      healthHud = null;
+    }
+  }
+  function isSafeModeEnabled() {
+    return localStorage.getItem(STORAGE_KEY_SAFE_MODE) === "1";
+  }
+  function removeShortcutUi() {
+    activeOverlays.forEach(function(ov) {
+      ov.remove();
+    });
+    activeOverlays = [];
+    lastOverlaySig = "";
+    closeDropdown();
+    closeAssignPrompt();
+    closeShortcutsDrawer();
+    closeHelpDrawer();
+    stopHealthHud();
+    if (editMode) stopEditMode();
+    if (toggleBtn) {
+      toggleBtn.remove();
+      toggleBtn = null;
+    }
+    if (_lineChip) {
+      _lineChip.remove();
+      _lineChip = null;
+    }
+    if (_lineMenu) {
+      _lineMenu.remove();
+      _lineMenu = null;
+    }
+  }
+  function renderSafeModeChip() {
+    if (!document.body) return;
+    if (safeModeStyle && safeModeStyle.isConnected && safeModeChip && safeModeChip.isConnected) return;
+    if (!safeModeStyle) {
+      safeModeStyle = document.createElement("style");
+      safeModeStyle.setAttribute("data-qaw-safe-mode-style", "1");
+      safeModeStyle.textContent = "[data-qaw-overlay]:not([data-qaw-safe-mode-chip]){display:none!important;}";
+    }
+    if (!safeModeStyle.isConnected) document.head.appendChild(safeModeStyle);
+    if (!safeModeChip) {
+      safeModeChip = document.createElement("button");
+      safeModeChip.type = "button";
+      safeModeChip.setAttribute("data-qaw-overlay", "1");
+      safeModeChip.setAttribute("data-qaw-safe-mode-chip", "1");
+      safeModeChip.textContent = "QAW scripts paused - Resume";
+      safeModeChip.title = 'DevTools: localStorage.removeItem("' + STORAGE_KEY_SAFE_MODE + '"); location.reload();';
+      safeModeChip.style.cssText = [
+        "position:fixed",
+        "right:12px",
+        "bottom:12px",
+        "z-index:2147483647",
+        "background:#7f1d1d",
+        "color:#fee2e2",
+        "border:1px solid #fca5a5",
+        "border-radius:999px",
+        "padding:7px 12px",
+        "font:12px ui-monospace,SFMono-Regular,Menlo,monospace",
+        "cursor:pointer",
+        "box-shadow:0 6px 20px rgba(0,0,0,0.45)"
+      ].join(";");
+      safeModeChip.addEventListener("click", function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        disableSafeMode();
+      });
+    }
+    if (!safeModeChip.isConnected) document.body.appendChild(safeModeChip);
+  }
+  function enableSafeMode() {
+    localStorage.setItem(STORAGE_KEY_SAFE_MODE, "1");
+    active = false;
+    localStorage.setItem(STORAGE_KEY_ACTIVE, "0");
+    window.__qawShortcutsActive = false;
+    window.__qawEditMode = false;
+    removeShortcutUi();
+    renderSafeModeChip();
+    console.info('QAW userscripts safe mode enabled. To disable from DevTools: localStorage.removeItem("' + STORAGE_KEY_SAFE_MODE + '"); location.reload();');
+  }
+  function disableSafeMode() {
+    localStorage.removeItem(STORAGE_KEY_SAFE_MODE);
+    if (safeModeStyle) {
+      safeModeStyle.remove();
+      safeModeStyle = null;
+    }
+    if (safeModeChip) {
+      safeModeChip.remove();
+      safeModeChip = null;
+    }
+    injectToggleBtn();
+    showToast("QAW scripts resumed");
   }
   function getTabEl(el) {
     var cur = el;
@@ -595,6 +931,7 @@
     handleKey(e.detail);
   });
   function handleKey(k) {
+    if (isSafeModeEnabled()) return;
     if (isTypingTarget(document.activeElement)) return;
     if (k === "alt+arrowright") {
       window.__qawLastKeyConsumed = true;
@@ -691,6 +1028,11 @@
       ov.remove();
     });
     activeOverlays = [];
+    if (isSafeModeEnabled()) {
+      lastOverlaySig = "";
+      renderSafeModeChip();
+      return;
+    }
     if (!active && !editMode) {
       lastOverlaySig = "";
       return;
@@ -1301,14 +1643,38 @@
     toggleBtn.style.opacity = active || editMode ? "1" : "0.5";
   }
   function injectToggleBtn() {
-    var nav = getNavActionRow();
-    if (!nav) return;
-    if (toggleBtn && nav.contains(toggleBtn)) return;
+    if (isSafeModeEnabled()) {
+      removeShortcutUi();
+      renderSafeModeChip();
+      return;
+    }
+    var host = getToggleHost();
+    if (!host) return;
+    if (toggleBtn && host.el.contains(toggleBtn)) {
+      toggleBtn.setAttribute("data-qaw-toggle-host", host.variant);
+      return;
+    }
     if (toggleBtn) toggleBtn.remove();
     toggleBtn = document.createElement("a");
     toggleBtn.setAttribute("data-qaw-overlay", "1");
-    toggleBtn.className = "libraryActionArea ph99vi3 ActionArea-base-1uVdOIRB libraryActionArea ph99vi3";
-    toggleBtn.style.cssText = "cursor:pointer;user-select:none;";
+    toggleBtn.setAttribute("data-qaw-toggle-host", host.variant);
+    toggleBtn.className = host.variant === "nav" ? "libraryActionArea ph99vi3 ActionArea-base-1uVdOIRB libraryActionArea ph99vi3" : "";
+    toggleBtn.style.cssText = host.variant === "nav" ? "cursor:pointer;user-select:none;" : [
+      "cursor:pointer",
+      "user-select:none",
+      "display:inline-flex",
+      "align-items:center",
+      "gap:2px",
+      "margin-left:auto",
+      "padding:4px 8px",
+      "border:1px solid #cbd5e1",
+      "border-radius:6px",
+      "background:#fff",
+      "color:#334155",
+      "font:600 12px ui-monospace,SFMono-Regular,Menlo,monospace",
+      "line-height:1",
+      "text-decoration:none"
+    ].join(";");
     updateToggleBtn();
     toggleBtn.addEventListener("click", function(e) {
       e.preventDefault();
@@ -1316,7 +1682,7 @@
       if (dropdown) closeDropdown();
       else openDropdown();
     });
-    nav.appendChild(toggleBtn);
+    host.el.appendChild(toggleBtn);
   }
   function closeDropdown() {
     if (dropdown) {
@@ -1333,8 +1699,6 @@
     dropdown.setAttribute("data-qaw-overlay", "1");
     dropdown.style.cssText = [
       "position:fixed",
-      "top:" + (rect.bottom + 4) + "px",
-      "left:" + rect.left + "px",
       "background:#1e293b",
       "color:#f1f5f9",
       "border:1px solid #475569",
@@ -1367,6 +1731,19 @@
         }
       },
       {
+        text: healthHud ? "\u{1FA7A} Hide health HUD" : "\u{1FA7A} Debug focus / health",
+        action: function() {
+          if (healthHud) stopHealthHud();
+          else startHealthHud();
+        }
+      },
+      {
+        text: "\u26D4 Emergency safe mode",
+        action: function() {
+          enableSafeMode();
+        }
+      },
+      {
         text: "\u2753 Help",
         action: function() {
           openHelpDrawer();
@@ -1396,6 +1773,9 @@
     });
     updateHighlight();
     document.body.appendChild(dropdown);
+    var dropdownW = dropdown.offsetWidth || 160;
+    dropdown.style.left = Math.max(8, Math.min(rect.left, window.innerWidth - dropdownW - 8)) + "px";
+    dropdown.style.top = rect.bottom + 4 + "px";
     window.__qawDropdownOpen = true;
     function onDropdownKey(e) {
       if (!dropdown) {
@@ -1678,6 +2058,13 @@
     }, 50);
   }
   function setActive(val) {
+    if (isSafeModeEnabled()) {
+      active = false;
+      localStorage.setItem(STORAGE_KEY_ACTIVE, "0");
+      window.__qawShortcutsActive = false;
+      updateToggleBtn();
+      return;
+    }
     if (editMode) stopEditMode();
     active = val;
     window.__qawShortcutsActive = val;
@@ -2101,6 +2488,11 @@
     if (pollTimer) return;
     _installGlyphLocatorProbe();
     pollTimer = setInterval(function() {
+      if (isSafeModeEnabled()) {
+        removeShortcutUi();
+        renderSafeModeChip();
+        return;
+      }
       injectToggleBtn();
       writeTabHeartbeat();
       if (active && !editMode) {
@@ -2266,27 +2658,46 @@
       var should = e.newValue === "1";
       if (should !== active) setActive(should);
     }
+    if (e.key === STORAGE_KEY_SAFE_MODE) {
+      if (e.newValue === "1") enableSafeMode();
+      else disableSafeMode();
+    }
   });
-  var initObserver = new MutationObserver(function() {
-    if (!getNavActionRow()) return;
+  var shortcutsInitialized = false;
+  function initShortcutsIfReady() {
+    if (isSafeModeEnabled()) {
+      if (!document.body) return false;
+      shortcutsInitialized = true;
+      initObserver.disconnect();
+      removeShortcutUi();
+      renderSafeModeChip();
+      return true;
+    }
+    if (!getToggleHost()) return false;
+    if (shortcutsInitialized) {
+      injectToggleBtn();
+      return true;
+    }
+    shortcutsInitialized = true;
     initObserver.disconnect();
     injectToggleBtn();
     if (localStorage.getItem(STORAGE_KEY_ACTIVE) === "1") setActive(true);
     startPolling();
+    return true;
+  }
+  var initObserver = new MutationObserver(function() {
+    initShortcutsIfReady();
   });
-  initObserver.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ["data-e2e"] });
+  initObserver.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ["data-e2e", "class"] });
   (function() {
     var _deadline = Date.now() + 2e3;
     function _initFallback() {
-      if (!getNavActionRow()) {
+      if (!initShortcutsIfReady()) {
         if (Date.now() < _deadline) setTimeout(_initFallback, 100);
         return;
       }
-      initObserver.disconnect();
-      injectToggleBtn();
-      if (localStorage.getItem(STORAGE_KEY_ACTIVE) === "1") setActive(true);
-      startPolling();
     }
+    _initFallback();
     window.addEventListener("load", _initFallback);
   })();
   if (/task-wolf\.com$/i.test(location.hostname)) {

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         QA Wolf Investigation Notes
 // @namespace    http://tampermonkey.net/
-// @version      1.535
+// @version      1.549
 // @description  Per-file investigation notes: quick links (new-tab opens, PoC textarea, client-wide notes), client/env chips, instant tooltips, run timing, shift sync, work mode, export, search. data-e2e investigation-* hooks.
 // @author       You
 // @match        https://app.qawolf.com/*
@@ -759,6 +759,35 @@
       revalReportIntroByClient: p.revalReportIntroByClient || {}
     };
   }
+  function bugRowCollectedAtMs(row2) {
+    var t = row2 && typeof row2.lastCollectedAt === "string" ? Date.parse(row2.lastCollectedAt) : 0;
+    return Number.isFinite(t) ? t : 0;
+  }
+  function mergeBugDashboardRowsForSave(outgoingMeta) {
+    try {
+      var raw = localStorage.getItem(META_STORAGE_KEY);
+      if (!raw) return outgoingMeta;
+      var disk = JSON.parse(raw);
+      if (!disk || typeof disk !== "object") return outgoingMeta;
+      var outgoingByClient = outgoingMeta.bugsDashboardByClient && typeof outgoingMeta.bugsDashboardByClient === "object" ? outgoingMeta.bugsDashboardByClient : {};
+      var diskByClient = disk.bugsDashboardByClient && typeof disk.bugsDashboardByClient === "object" ? disk.bugsDashboardByClient : {};
+      var nextByClient = {};
+      Object.keys(diskByClient).forEach(function(slug) {
+        nextByClient[slug] = diskByClient[slug];
+      });
+      Object.keys(outgoingByClient).forEach(function(slug) {
+        var outRow = outgoingByClient[slug];
+        var diskRow = diskByClient[slug];
+        nextByClient[slug] = bugRowCollectedAtMs(diskRow) > bugRowCollectedAtMs(outRow) ? diskRow : outRow;
+      });
+      outgoingMeta.bugsDashboardByClient = nextByClient;
+      if (bugRowCollectedAtMs(disk.bugsDashboard) > bugRowCollectedAtMs(outgoingMeta.bugsDashboard)) {
+        outgoingMeta.bugsDashboard = disk.bugsDashboard;
+      }
+    } catch (_e) {
+    }
+    return outgoingMeta;
+  }
   function loadStore() {
     try {
       try {
@@ -888,7 +917,7 @@
       }
     });
     try {
-      localStorage.setItem(META_STORAGE_KEY, JSON.stringify(buildMeta(state.store)));
+      localStorage.setItem(META_STORAGE_KEY, JSON.stringify(mergeBugDashboardRowsForSave(buildMeta(state.store))));
     } catch (e) {
       console.warn("[qaw-store] failed to save meta", { error: e });
     }
@@ -956,6 +985,9 @@
     return {
       llmProvider: "",
       llmApiKey: "",
+      llmSimpleModel: "",
+      llmComplexModel: "",
+      llmModelCache: {},
       slackToken: "",
       slackUserToken: "",
       slackBotDefaultChannelId: "",
@@ -984,6 +1016,9 @@
       return {
         llmProvider: p.llmProvider || d.llmProvider,
         llmApiKey: p.llmApiKey || d.llmApiKey,
+        llmSimpleModel: p.llmSimpleModel != null ? String(p.llmSimpleModel) : d.llmSimpleModel,
+        llmComplexModel: p.llmComplexModel != null ? String(p.llmComplexModel) : d.llmComplexModel,
+        llmModelCache: p.llmModelCache && typeof p.llmModelCache === "object" ? p.llmModelCache : d.llmModelCache,
         slackToken: p.slackToken != null ? String(p.slackToken) : d.slackToken,
         slackUserToken: p.slackUserToken != null ? String(p.slackUserToken) : d.slackUserToken,
         slackBotDefaultChannelId: p.slackBotDefaultChannelId != null ? String(p.slackBotDefaultChannelId) : d.slackBotDefaultChannelId,
@@ -1753,6 +1788,16 @@
     var base = String(fileName || "").replace(/\\/g, "/").split("/").pop() || String(fileName || "");
     return /^\d+\.[a-z]+$/i.test(base);
   }
+  function isPlatformHelperPath(fullPath) {
+    var p = String(fullPath || "").replace(/\\/g, "/").toLowerCase().replace(/^\/+/, "");
+    if (!p) return false;
+    var parts = p.split("/").filter(Boolean);
+    for (var i = 0; i < parts.length; i++) {
+      var seg = parts[i];
+      if (seg === "android" || seg === "web" || seg === "ios") return true;
+    }
+    return false;
+  }
   function getCategory(fileName) {
     var base = fileName.split("/").pop() || fileName;
     if (/\.flow\.(js|ts)$/i.test(base)) return "flow";
@@ -1855,13 +1900,81 @@
     }
     return removed;
   }
+  function purgePlatformHelperIndexEntriesForEnv(client, envId) {
+    var prefix = client + SEP + envId + SEP;
+    var removed = 0;
+    var index = readFileIndex();
+    var pathIndex = readPathIndex();
+    var meta = readFileIndexMeta();
+    var cache = readExportsCache();
+    var indexDirty = false;
+    var pathDirty = false;
+    var metaDirty = false;
+    var cacheDirty = false;
+    function dropKey(key) {
+      if (index[key] != null) {
+        delete index[key];
+        indexDirty = true;
+      }
+      if (pathIndex[key] != null) {
+        delete pathIndex[key];
+        pathDirty = true;
+      }
+      if (meta[key] != null) {
+        delete meta[key];
+        metaDirty = true;
+      }
+      if (cache[key] != null) {
+        delete cache[key];
+        cacheDirty = true;
+      }
+      removed++;
+    }
+    function isPlatformKey(key) {
+      if (key.indexOf(prefix) !== 0) return false;
+      var parts = key.split(SEP);
+      if (parts.length !== 3) return false;
+      var stored = pathIndex[key] || index[key] || "";
+      return isPlatformHelperPath(stored);
+    }
+    var seen = {};
+    Object.keys(index).forEach(function(k) {
+      if (!isPlatformKey(k) || seen[k]) return;
+      seen[k] = true;
+      dropKey(k);
+    });
+    Object.keys(pathIndex).forEach(function(k) {
+      if (seen[k] || !isPlatformKey(k)) return;
+      seen[k] = true;
+      dropKey(k);
+    });
+    if (indexDirty) {
+      try {
+        localStorage.setItem(FILE_INDEX_KEY, JSON.stringify(index));
+      } catch (_e) {
+      }
+    }
+    if (pathDirty) writePathIndex(pathIndex);
+    if (metaDirty) writeFileIndexMeta(meta);
+    if (cacheDirty) {
+      try {
+        localStorage.setItem(EXPORTS_CACHE_KEY, JSON.stringify(cache));
+      } catch (_e2) {
+      }
+    }
+    return removed;
+  }
   function resolveIndexedFilePath(client, envId, fileName) {
     var key = fileIndexKey(client, envId, fileName);
     var pidx = readPathIndex();
     var idx = readFileIndex();
     var raw = pidx[key] || idx[key] || "";
     if (!raw) return null;
-    return normalisePath(raw) || String(raw || "").replace(/\\/g, "/");
+    var norm2 = normalisePath(raw) || String(raw || "").replace(/\\/g, "/");
+    var base = norm2.split("/").pop() || norm2;
+    if (isMonacoVirtualBasename(base)) return null;
+    if (isPlatformHelperPath(norm2)) return null;
+    return norm2;
   }
   function hasIndexedFileEntry(client, envId, fileName) {
     return resolveIndexedFilePath(client, envId, fileName) != null;
@@ -1933,6 +2046,7 @@
         var base = fullPath.split("/").pop() || "";
         if (!base) continue;
         if (isMonacoVirtualBasename(base)) continue;
+        if (isPlatformHelperPath(fullPath)) continue;
         if (/\.d\.ts$/i.test(base) && fullPath.indexOf("/") === -1) continue;
         var existing = result.get(base);
         if (!existing || fullPath.length > existing.length) result.set(base, fullPath);
@@ -1951,9 +2065,9 @@
       for (var i = 0; i < models.length; i++) {
         var uriStr = String(models[i].uri);
         var uriBase = uriStr.split("/").pop() || "";
-        if (uriBase === base) {
-          if (!best || uriStr.length > String(best.uri).length) best = models[i];
-        }
+        if (uriBase !== base) continue;
+        if (isMonacoVirtualBasename(uriBase)) continue;
+        if (!best || uriStr.length > String(best.uri).length) best = models[i];
       }
       return best ? best.getValue() : null;
     } catch (e) {
@@ -2162,6 +2276,7 @@
     function renderTree() {
       treeEl.innerHTML = "";
       purgeVirtualIndexEntriesForEnv(client, selectedEnvId);
+      purgePlatformHelperIndexEntriesForEnv(client, selectedEnvId);
       var index = readFileIndex();
       var files = [];
       var monacoMap = buildMonacoPathMap();
@@ -2178,6 +2293,7 @@
         var monacoPath = monacoMap.get(base);
         var storedPath = pathIndex[k];
         var fullPath = monacoPath || normalisePath(storedPath || "") || normalisePath(modelKey || "") || base;
+        if (isPlatformHelperPath(fullPath)) return;
         if (monacoPath && monacoPath !== storedPath) {
           pathIndex[k] = monacoPath;
           pathIndexDirty = true;
@@ -2187,6 +2303,7 @@
       });
       monacoMap.forEach(function(fullPath, base) {
         if (seenBases.has(base)) return;
+        if (isPlatformHelperPath(fullPath)) return;
         var k = client + SEP + selectedEnvId + SEP + base;
         index[k] = fullPath;
         pathIndex[k] = fullPath;
@@ -2205,7 +2322,8 @@
       var nowTs = Date.now();
       var metaDirty = false;
       var meta = readFileIndexMeta();
-      monacoMap.forEach(function(_fullPath, base) {
+      monacoMap.forEach(function(fullPath, base) {
+        if (isPlatformHelperPath(fullPath)) return;
         var k = client + SEP + selectedEnvId + SEP + base;
         if (!meta[k]) meta[k] = {};
         meta[k].lastSeen = nowTs;
@@ -2220,7 +2338,7 @@
         return;
       }
       var helperFiles = files.filter(function(f) {
-        return f.category === "helper" && !isMonacoVirtualBasename(f.base);
+        return f.category === "helper" && !isMonacoVirtualBasename(f.base) && !isPlatformHelperPath(f.fullPath);
       }).sort(function(a, b) {
         var da = a.dir, db = b.dir;
         if (da !== db) return da.localeCompare(db);
@@ -2276,12 +2394,12 @@
           openLink.addEventListener("mouseleave", function() {
             openLink.style.color = "#475569";
           });
-          (function(stem) {
+          (function(stem, fullPath) {
             openLink.addEventListener("click", function(e) {
               e.stopPropagation();
-              navigateToHelperFile(stem, "");
+              navigateToHelperFile(stem, "", { client, envId: selectedEnvId }, fullPath);
             });
-          })(f.base.replace(/\.(js|ts)$/, ""));
+          })(f.base.replace(/\.(js|ts)$/, ""), f.fullPath);
           var delBtn = document.createElement("button");
           delBtn.type = "button";
           delBtn.title = "Remove stale map entry";
@@ -2356,11 +2474,16 @@
               fnName.textContent = exp.name;
               fnRow.appendChild(tag);
               fnRow.appendChild(fnName);
-              (function(stem, fnN) {
+              (function(stem, fnN, fullPath) {
                 fnRow.addEventListener("click", function() {
-                  navigateToHelperFile(stem, fnN);
+                  navigateToHelperFile(
+                    stem,
+                    fnN,
+                    { client, envId: selectedEnvId },
+                    fullPath
+                  );
                 });
-              })(f.base.replace(/\.(js|ts)$/, ""), exp.name);
+              })(f.base.replace(/\.(js|ts)$/, ""), exp.name, f.fullPath);
               fnContainer.appendChild(fnRow);
             });
           }
@@ -2404,6 +2527,167 @@
       FILE_INDEX_SEP = "";
       SEP = FILE_INDEX_SEP;
       _uw = typeof globalThis.unsafeWindow !== "undefined" ? globalThis.unsafeWindow : window;
+    }
+  });
+
+  // src/notes/47-helper-index.ts
+  function isHelperBaseName(base) {
+    if (!/\.(js|ts)$/i.test(base)) return false;
+    if (isMonacoVirtualBasename(base)) return false;
+    if (/\.flow\.(js|ts)$/i.test(base)) return false;
+    if (base === "types.ts" || /\.types\.ts$/i.test(base)) return false;
+    if (/\.json$/i.test(base)) return false;
+    return true;
+  }
+  function helperStemRank(client, envId, stem) {
+    if (isMonacoVirtualBasename(stem + ".ts") || isMonacoVirtualBasename(stem + ".js")) return -1e9;
+    var score = stem.length;
+    var p = resolveIndexedFilePath(client, envId, stem + ".ts") || resolveIndexedFilePath(client, envId, stem + ".js");
+    if (p) {
+      if (isPlatformHelperPath(p)) score -= 500;
+      if (p.indexOf("utilities") !== -1) score += 80;
+    }
+    return score;
+  }
+  function helperBasename(stem, ext) {
+    var s = String(stem || "").trim().replace(/\.(js|ts)$/i, "");
+    return s + "." + ext;
+  }
+  function exportsForStem(cache, client, envId, stem) {
+    var keyTs = fileIndexKey(client, envId, helperBasename(stem, "ts"));
+    var keyJs = fileIndexKey(client, envId, helperBasename(stem, "js"));
+    return cache[keyTs] || cache[keyJs] || [];
+  }
+  function envHasIndexedHelpers(cache, client, envId) {
+    var prefix = client + FILE_INDEX_SEP + envId + FILE_INDEX_SEP;
+    return Object.keys(cache).some(function(k) {
+      if (k.indexOf(prefix) !== 0) return false;
+      var entries = cache[k];
+      return !!(entries && entries.length);
+    });
+  }
+  function refreshHelperExportsForEnv(client, envId) {
+    var cache = readExportsCache();
+    var fileIndex = readFileIndex();
+    var pathIndex = readPathIndex();
+    var monacoMap = buildMonacoPathMap();
+    var bases = /* @__PURE__ */ new Set();
+    var prefix = client + FILE_INDEX_SEP + envId + FILE_INDEX_SEP;
+    var pathDirty = false;
+    var fileDirty = false;
+    Object.keys(fileIndex).forEach(function(k) {
+      if (k.indexOf(prefix) !== 0) return;
+      var parts = k.split(FILE_INDEX_SEP);
+      if (parts.length !== 3) return;
+      var base = parts[2];
+      if (!isHelperBaseName(base)) return;
+      if (isPlatformHelperPath(pathIndex[k] || fileIndex[k] || "")) return;
+      bases.add(base);
+    });
+    Object.keys(pathIndex).forEach(function(k) {
+      if (k.indexOf(prefix) !== 0) return;
+      var parts = k.split(FILE_INDEX_SEP);
+      if (parts.length !== 3) return;
+      var base = parts[2];
+      if (!isHelperBaseName(base)) return;
+      if (isPlatformHelperPath(pathIndex[k] || fileIndex[k] || "")) return;
+      bases.add(base);
+    });
+    monacoMap.forEach(function(fullPath, base) {
+      if (!isHelperBaseName(base)) return;
+      if (isPlatformHelperPath(fullPath)) return;
+      bases.add(base);
+      var key = fileIndexKey(client, envId, base);
+      if (pathIndex[key] !== fullPath) {
+        pathIndex[key] = fullPath;
+        pathDirty = true;
+      }
+      if (fileIndex[key] !== fullPath) {
+        fileIndex[key] = fullPath;
+        fileDirty = true;
+      }
+    });
+    bases.forEach(function(base) {
+      var key = fileIndexKey(client, envId, base);
+      var content = getMonacoModelContent(base);
+      if (!content) return;
+      var exports = parseExports(content);
+      if (!exports.length) return;
+      cache[key] = exports;
+      saveExportsCache(key, exports);
+    });
+    if (pathDirty) {
+      try {
+        localStorage.setItem("_qawFilePathIndex", JSON.stringify(pathIndex));
+      } catch (_e) {
+      }
+    }
+    if (fileDirty) {
+      try {
+        localStorage.setItem("_qawFileIndex", JSON.stringify(fileIndex));
+      } catch (_e1) {
+      }
+    }
+    return cache;
+  }
+  function lookupHelperByCalledName(client, envId, calledName, cache) {
+    var name = String(calledName || "").trim();
+    if (!name) return [];
+    var exportsCache = cache || refreshHelperExportsForEnv(client, envId);
+    var prefix = client + FILE_INDEX_SEP + envId + FILE_INDEX_SEP;
+    var results = [];
+    Object.keys(exportsCache).forEach(function(k) {
+      if (k.indexOf(prefix) !== 0) return;
+      var base = k.split(FILE_INDEX_SEP)[2] || "";
+      if (!isHelperBaseName(base)) return;
+      var stem = base.replace(/\.(js|ts)$/, "");
+      var exps = exportsCache[k] || [];
+      for (var i = 0; i < exps.length; i++) {
+        if (String(exps[i].name || "") !== name) continue;
+        results.push({ stem, fn: name });
+        break;
+      }
+    });
+    results = results.filter(function(m) {
+      return helperStemRank(client, envId, m.stem) > -1e8;
+    });
+    results.sort(function(a, b) {
+      var ra = helperStemRank(client, envId, a.stem);
+      var rb = helperStemRank(client, envId, b.stem);
+      if (ra !== rb) return rb - ra;
+      if (a.stem !== b.stem) return a.stem.localeCompare(b.stem);
+      return a.fn.localeCompare(b.fn);
+    });
+    return results;
+  }
+  function isHelperExportResolved(client, envId, stem, fn) {
+    var stemClean = String(stem || "").trim();
+    var fnClean = String(fn || "").trim();
+    if (!stemClean || !fnClean) return true;
+    var cache = readExportsCache();
+    if (!envHasIndexedHelpers(cache, client, envId)) return true;
+    var entries = exportsForStem(cache, client, envId, stemClean);
+    if (!entries.length) return false;
+    return entries.some(function(e) {
+      return String(e.name || "") === fnClean;
+    });
+  }
+  function listHelperStemsForEnv(client, envId, cache) {
+    var exportsCache = cache || refreshHelperExportsForEnv(client, envId);
+    var prefix = client + FILE_INDEX_SEP + envId + FILE_INDEX_SEP;
+    var stems = /* @__PURE__ */ new Set();
+    Object.keys(exportsCache).forEach(function(k) {
+      if (k.indexOf(prefix) !== 0) return;
+      var base = k.split(FILE_INDEX_SEP)[2] || "";
+      if (!isHelperBaseName(base)) return;
+      stems.add(base.replace(/\.(js|ts)$/, ""));
+    });
+    return Array.from(stems).sort();
+  }
+  var init_helper_index = __esm({
+    "src/notes/47-helper-index.ts"() {
+      "use strict";
+      init_map_tab();
     }
   });
 
@@ -3939,12 +4223,12 @@
     while (head.children.length > 1) head.removeChild(head.lastChild);
     var fileRow = document.createElement("div");
     fileRow.style.cssText = "display:flex;align-items:center;flex-wrap:nowrap;gap:4px;margin-bottom:8px;overflow:hidden;";
-    var fileUrl2 = /flow\.(js|ts)$/i.test(meta.fileName) ? getFlowFileUrl(meta.fileName) : null;
-    var title = document.createElement(fileUrl2 ? "a" : "div");
+    var fileUrl3 = /flow\.(js|ts)$/i.test(meta.fileName) ? getFlowFileUrl(meta.fileName) : null;
+    var title = document.createElement(fileUrl3 ? "a" : "div");
     title.setAttribute("data-e2e", "investigation-note-title");
     title.style.cssText = "font-weight:bold;font-size:13px;line-height:1.35;color:#f8fafc;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;flex-shrink:1;";
-    if (fileUrl2) {
-      title.href = fileUrl2;
+    if (fileUrl3) {
+      title.href = fileUrl3;
       title.target = "_blank";
       title.rel = "noopener noreferrer";
       title.style.textDecoration = "none";
@@ -4380,7 +4664,7 @@
     if (document.getElementById("qaw-inv-notes-cards-css")) return;
     var st = document.createElement("style");
     st.id = "qaw-inv-notes-cards-css";
-    st.textContent = '[data-qaw-notes-section] [style*="overflow-x:auto"]::-webkit-scrollbar{display:none;}[data-qaw-notes-viewer] .qaw-note-card{margin-bottom:4px;background:#1e293b;border:1px solid #334155;border-radius:6px;position:relative;overflow:hidden;}[data-qaw-notes-viewer] .qaw-card-front-content{padding:5px 7px;transition:transform .28s cubic-bezier(.4,0,.2,1),opacity .28s;}[data-qaw-notes-viewer] .qaw-note-card.qaw-logs-open .qaw-card-front-content{transform:translateX(-18%);opacity:0;pointer-events:none;}[data-qaw-notes-viewer] .qaw-card-back{position:absolute;inset:0;background:#1e293b;transform:translateX(105%);transition:transform .28s cubic-bezier(.4,0,.2,1);z-index:2;display:flex;flex-direction:column;overflow:hidden;}[data-qaw-notes-viewer] .qaw-note-card.qaw-logs-open .qaw-card-back{transform:translateX(0);}[data-qaw-notes-viewer] .qaw-note-header{display:flex;align-items:flex-start;gap:4px;}[data-qaw-notes-viewer] .qaw-note-chips{display:flex;flex-direction:column;gap:3px;flex:1;min-width:0;}[data-qaw-notes-viewer] .qaw-note-chips-row{display:flex;flex-wrap:wrap;align-items:center;gap:4px;}[data-qaw-notes-viewer] .qaw-chip-btn{cursor:pointer;background:transparent;padding:0;margin:0;}[data-qaw-notes-viewer] .qaw-note-kebab{position:relative;flex-shrink:0;}[data-qaw-notes-viewer] .qaw-note-kebab-btn{background:none;border:none;color:#475569;font-size:15px;cursor:pointer;padding:0 3px;line-height:1;border-radius:3px;transition:color .1s;}[data-qaw-notes-viewer] .qaw-note-kebab-btn:hover{color:#94a3b8;background:#334155;}[data-qaw-notes-viewer] .qaw-note-kebab-menu{display:none;position:fixed;background:#0f172a;border:1px solid #475569;border-radius:6px;padding:3px;min-width:130px;z-index:2147483647;box-shadow:0 4px 12px rgba(0,0,0,0.5);}[data-qaw-notes-viewer] .qaw-note-kebab-menu.open{display:block;}[data-qaw-notes-viewer] .qaw-note-kebab-menu button{display:block;width:100%;text-align:left;padding:5px 9px;border:none;background:transparent;color:#e2e8f0;cursor:pointer;font-size:11px;font-family:monospace;border-radius:3px;}[data-qaw-notes-viewer] .qaw-note-kebab-menu button:hover{background:#1e293b;}[data-qaw-notes-viewer] .qaw-note-body{white-space:pre-wrap;word-break:break-word;color:#e2e8f0;font-size:12px;line-height:1.55;margin-top:4px;margin-left:8px;padding-left:8px;border-left:2px solid #1e3a5f;cursor:text;min-height:14px;}[data-qaw-notes-viewer] .qaw-note-body:hover{border-left-color:#3b82f6;}[data-qaw-notes-viewer] .qaw-day-divider{display:flex;align-items:center;gap:6px;margin:8px 0 3px;cursor:pointer;user-select:none;}[data-qaw-notes-viewer] .qaw-day-divider:first-child{margin-top:0;}[data-qaw-notes-viewer] .qaw-day-divider:hover .qaw-day-label{color:#94a3b8;}[data-qaw-notes-viewer] .qaw-day-line{flex:1;height:1px;background:#1e293b;}[data-qaw-notes-viewer] .qaw-day-label{font-size:10px;color:#475569;font-family:monospace;white-space:nowrap;}[data-qaw-notes-viewer] .qaw-notes-filter{display:flex;gap:4px;margin-bottom:5px;}[data-qaw-notes-viewer] .qaw-notes-filter button{font-size:10px;padding:2px 8px;border-radius:999px;border:1px solid #334155;background:transparent;color:#64748b;cursor:pointer;font-family:monospace;}[data-qaw-notes-viewer] .qaw-notes-filter button.active{border-color:#6366f1;background:#1e1b4b;color:#c4b5fd;}[data-qaw-notes-viewer] .qaw-add-note{margin-top:6px;padding:7px;text-align:center;color:#64748b;font-size:11px;border:1px dashed #334155;border-radius:6px;cursor:pointer;font-family:monospace;}[data-qaw-notes-viewer] .qaw-add-note:hover{color:#94a3b8;background:#0f172a;}[data-qaw-notes-viewer] .qaw-bug-chip{display:inline-flex;align-items:center;gap:4px;font-size:10px;font-family:monospace;text-decoration:none;padding:2px 8px 2px 6px;border-radius:999px;border:1px solid #7f1d1d;background:#1c0a0a;color:#fca5a5;white-space:nowrap;}[data-qaw-notes-viewer] .qaw-bug-chip.closed{border-color:#334155;background:#0f172a;color:#94a3b8;text-decoration:line-through;}[data-qaw-notes-viewer] .qaw-bug-chip.pending{opacity:0.55;}';
+    st.textContent = '[data-qaw-notes-section] [style*="overflow-x:auto"]::-webkit-scrollbar{display:none;}[data-qaw-notes-viewer] .qaw-note-card{margin-bottom:4px;background:#1e293b;border:1px solid #334155;border-radius:6px;position:relative;overflow:hidden;}[data-qaw-notes-viewer] .qaw-card-front-content{padding:5px 7px;transition:transform .28s cubic-bezier(.4,0,.2,1),opacity .28s;}[data-qaw-notes-viewer] .qaw-note-card.qaw-logs-open .qaw-card-front-content{transform:translateX(-18%);opacity:0;pointer-events:none;}[data-qaw-notes-viewer] .qaw-card-back{position:absolute;inset:0;background:#1e293b;transform:translateX(105%);transition:transform .28s cubic-bezier(.4,0,.2,1);z-index:2;display:flex;flex-direction:column;overflow:hidden;}[data-qaw-notes-viewer] .qaw-note-card.qaw-logs-open .qaw-card-back{transform:translateX(0);}[data-qaw-notes-viewer] .qaw-note-header{display:flex;align-items:flex-start;gap:4px;}[data-qaw-notes-viewer] .qaw-note-chips{display:flex;flex-direction:column;gap:3px;flex:1;min-width:0;}[data-qaw-notes-viewer] .qaw-note-chips-row{display:flex;flex-wrap:wrap;align-items:center;gap:4px;}[data-qaw-notes-viewer] .qaw-chip-btn{cursor:pointer;background:transparent;padding:0;margin:0;}[data-qaw-notes-viewer] .qaw-note-kebab{position:relative;flex-shrink:0;}[data-qaw-notes-viewer] .qaw-note-kebab-btn{background:none;border:none;color:#475569;font-size:15px;cursor:pointer;padding:0 3px;line-height:1;border-radius:3px;transition:color .1s;}[data-qaw-notes-viewer] .qaw-note-kebab-btn:hover{color:#94a3b8;background:#334155;}[data-qaw-notes-viewer] .qaw-note-kebab-menu{display:none;position:fixed;background:#0f172a;border:1px solid #475569;border-radius:6px;padding:3px;min-width:130px;z-index:2147483647;box-shadow:0 4px 12px rgba(0,0,0,0.5);}[data-qaw-notes-viewer] .qaw-note-kebab-menu.open{display:block;}[data-qaw-notes-viewer] .qaw-note-kebab-menu button{display:block;width:100%;text-align:left;padding:5px 9px;border:none;background:transparent;color:#e2e8f0;cursor:pointer;font-size:11px;font-family:monospace;border-radius:3px;}[data-qaw-notes-viewer] .qaw-note-kebab-menu button:hover{background:#1e293b;}[data-qaw-notes-viewer] .qaw-note-body{white-space:pre-wrap;word-break:break-word;color:#e2e8f0;font-size:12px;line-height:1.55;margin-top:4px;margin-left:8px;padding:4px 0 4px 8px;border-left:2px solid #1e3a5f;cursor:pointer;min-height:14px;transition:border-color .12s,background .12s;}[data-qaw-notes-viewer] .qaw-note-body:hover{border-left-color:#3b82f6;background:rgba(59,130,246,0.06);}[data-qaw-notes-viewer] .qaw-note-body [data-qaw-helper-path-row]{cursor:default;}[data-qaw-notes-viewer] .qaw-day-divider{display:flex;align-items:center;gap:6px;margin:8px 0 3px;cursor:pointer;user-select:none;}[data-qaw-notes-viewer] .qaw-day-divider:first-child{margin-top:0;}[data-qaw-notes-viewer] .qaw-day-divider:hover .qaw-day-label{color:#94a3b8;}[data-qaw-notes-viewer] .qaw-day-line{flex:1;height:1px;background:#1e293b;}[data-qaw-notes-viewer] .qaw-day-label{font-size:10px;color:#475569;font-family:monospace;white-space:nowrap;}[data-qaw-notes-viewer] .qaw-notes-filter{display:flex;gap:4px;margin-bottom:5px;}[data-qaw-notes-viewer] .qaw-notes-filter button{font-size:10px;padding:2px 8px;border-radius:999px;border:1px solid #334155;background:transparent;color:#64748b;cursor:pointer;font-family:monospace;}[data-qaw-notes-viewer] .qaw-notes-filter button.active{border-color:#6366f1;background:#1e1b4b;color:#c4b5fd;}[data-qaw-notes-viewer] .qaw-add-note{margin-top:6px;padding:7px;text-align:center;color:#64748b;font-size:11px;border:1px dashed #334155;border-radius:6px;cursor:pointer;font-family:monospace;}[data-qaw-notes-viewer] .qaw-add-note:hover{color:#94a3b8;background:#0f172a;}[data-qaw-notes-viewer] .qaw-bug-chip{display:inline-flex;align-items:center;gap:4px;font-size:10px;font-family:monospace;text-decoration:none;padding:2px 8px 2px 6px;border-radius:999px;border:1px solid #7f1d1d;background:#1c0a0a;color:#fca5a5;white-space:nowrap;}[data-qaw-notes-viewer] .qaw-bug-chip.closed{border-color:#334155;background:#0f172a;color:#94a3b8;text-decoration:line-through;}[data-qaw-notes-viewer] .qaw-bug-chip.pending{opacity:0.55;}';
     document.head.appendChild(st);
   }
   var TAG_LABELS, TAG_PILL_BG, HEAD_NICKNAME_CHIP_STYLE;
@@ -7858,6 +8142,222 @@
     }
   });
 
+  // src/notes/49-llm-models.ts
+  function defaultLlmModel(provider, tier) {
+    var table = tier === "complex" ? COMPLEX_DEFAULTS : SIMPLE_DEFAULTS;
+    return table[provider] || "";
+  }
+  function resolveLlmModel(settings, tier) {
+    var configured = tier === "complex" ? settings.llmComplexModel : settings.llmSimpleModel;
+    return String(configured || "").trim() || defaultLlmModel(settings.llmProvider, tier);
+  }
+  function gmJson(method, url, headers) {
+    var gmReq = globalThis.GM_xmlhttpRequest;
+    if (typeof gmReq !== "function") return Promise.reject(new Error("GM_xmlhttpRequest unavailable"));
+    return new Promise(function(resolve, reject) {
+      gmReq({
+        method,
+        url,
+        headers,
+        onload: function(res) {
+          var text = String(res.responseText || "");
+          if (res.status < 200 || res.status >= 300) {
+            reject(new Error("Model list error " + res.status + ": " + text.slice(0, 240)));
+            return;
+          }
+          try {
+            resolve(JSON.parse(text || "{}"));
+          } catch (_e) {
+            reject(new Error("Failed to parse model list response"));
+          }
+        },
+        onerror: function() {
+          reject(new Error("Network error loading models"));
+        },
+        ontimeout: function() {
+          reject(new Error("Timed out loading models"));
+        }
+      });
+    });
+  }
+  function uniqueSorted(values) {
+    var seen = {};
+    var out = [];
+    values.forEach(function(v) {
+      var s = String(v || "").trim();
+      if (!s || seen[s]) return;
+      seen[s] = true;
+      out.push(s);
+    });
+    return out.sort();
+  }
+  function hasImageInputMetadata(model) {
+    var fields = [
+      model && model.supportedInputModalities,
+      model && model.inputModalities,
+      model && model.modalities
+    ];
+    for (var i = 0; i < fields.length; i++) {
+      var arr = Array.isArray(fields[i]) ? fields[i] : [];
+      for (var j = 0; j < arr.length; j++) {
+        if (String(arr[j]).toLowerCase() === "image") return true;
+      }
+    }
+    return false;
+  }
+  function looksImageCapable(provider, id, raw) {
+    if (raw && hasImageInputMetadata(raw)) return true;
+    var s = String(id || "").toLowerCase();
+    if (provider === "gemini") {
+      return /^gemini-/.test(s) && !/(embedding|aqa|imagen|veo|tts|speech)/.test(s);
+    }
+    if (provider === "claude") {
+      return /^claude-/.test(s) && !/(instant|completion)/.test(s);
+    }
+    if (provider === "openai") {
+      if (/(embedding|audio|tts|transcribe|whisper|realtime|search|image|dall-e|moderation)/.test(s)) return false;
+      return /^(gpt-4o|gpt-4\.1|gpt-5|o3|o4)/.test(s);
+    }
+    return false;
+  }
+  function geminiCanGenerateContent(model) {
+    var methods = model && Array.isArray(model.supportedGenerationMethods) ? model.supportedGenerationMethods : [];
+    return methods.indexOf("generateContent") !== -1;
+  }
+  function listAvailableLlmModels(provider, apiKey) {
+    if (!provider || !apiKey) return Promise.reject(new Error("Choose a provider and enter an API key first"));
+    if (provider === "gemini") {
+      return gmJson("GET", "https://generativelanguage.googleapis.com/v1beta/models?key=" + encodeURIComponent(apiKey), {}).then(function(json) {
+        var raw = json.models || [];
+        var geminiModels = raw.filter(function(m) {
+          var id = String(m.name || "").replace(/^models\//, "");
+          return /^gemini-/.test(id) && geminiCanGenerateContent(m);
+        });
+        var simple = geminiModels.map(function(m) {
+          return String(m.name || "").replace(/^models\//, "");
+        });
+        var complex = geminiModels.filter(function(m) {
+          return looksImageCapable(provider, String(m.name || "").replace(/^models\//, ""), m);
+        }).map(function(m) {
+          return String(m.name || "").replace(/^models\//, "");
+        });
+        return { simple: uniqueSorted(simple), complex: uniqueSorted(complex) };
+      });
+    }
+    if (provider === "claude") {
+      return gmJson("GET", "https://api.anthropic.com/v1/models", {
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01"
+      }).then(function(json) {
+        var raw = json.data || [];
+        var simple = raw.map(function(m) {
+          return String(m.id || "");
+        });
+        var complex = raw.filter(function(m) {
+          return looksImageCapable(provider, String(m.id || ""), m);
+        }).map(function(m) {
+          return String(m.id || "");
+        });
+        return { simple: uniqueSorted(simple), complex: uniqueSorted(complex) };
+      });
+    }
+    if (provider === "openai") {
+      return gmJson("GET", "https://api.openai.com/v1/models", {
+        "Authorization": "Bearer " + apiKey
+      }).then(function(json) {
+        var raw = json.data || [];
+        var simple = raw.map(function(m) {
+          return String(m.id || "");
+        });
+        var complex = raw.filter(function(m) {
+          return looksImageCapable(provider, String(m.id || ""), m);
+        }).map(function(m) {
+          return String(m.id || "");
+        });
+        return { simple: uniqueSorted(simple), complex: uniqueSorted(complex) };
+      });
+    }
+    return Promise.reject(new Error("Unknown LLM provider: " + provider));
+  }
+  function tinyModelCheck(provider, apiKey, model) {
+    var gmReq = globalThis.GM_xmlhttpRequest;
+    if (typeof gmReq !== "function") return Promise.resolve(false);
+    var url = "";
+    var headers = {};
+    var body = "";
+    var prompt2 = "Reply with exactly: ok";
+    if (provider === "gemini") {
+      url = "https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent?key=" + encodeURIComponent(apiKey);
+      headers = { "Content-Type": "application/json" };
+      body = JSON.stringify({
+        contents: [{ parts: [{ text: prompt2 }] }],
+        generationConfig: { maxOutputTokens: 4, temperature: 0 }
+      });
+    } else if (provider === "claude") {
+      url = "https://api.anthropic.com/v1/messages";
+      headers = { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" };
+      body = JSON.stringify({ model, max_tokens: 4, messages: [{ role: "user", content: prompt2 }] });
+    } else if (provider === "openai") {
+      url = "https://api.openai.com/v1/chat/completions";
+      headers = { "Content-Type": "application/json", "Authorization": "Bearer " + apiKey };
+      body = JSON.stringify({ model, max_tokens: 4, messages: [{ role: "user", content: prompt2 }] });
+    } else {
+      return Promise.resolve(false);
+    }
+    return new Promise(function(resolve) {
+      gmReq({
+        method: "POST",
+        url,
+        headers,
+        data: body,
+        timeout: 15e3,
+        onload: function(res) {
+          resolve(res.status >= 200 && res.status < 300);
+        },
+        onerror: function() {
+          resolve(false);
+        },
+        ontimeout: function() {
+          resolve(false);
+        }
+      });
+    });
+  }
+  async function validateAvailableLlmModels(provider, apiKey, models, onProgress) {
+    var all = uniqueSorted(models.simple.concat(models.complex));
+    var valid = {};
+    for (var i = 0; i < all.length; i++) {
+      var model = all[i];
+      var ok = await tinyModelCheck(provider, apiKey, model);
+      if (ok) valid[model] = true;
+      if (onProgress) onProgress(i + 1, all.length, model, ok);
+    }
+    return {
+      simple: models.simple.filter(function(m) {
+        return !!valid[m];
+      }),
+      complex: models.complex.filter(function(m) {
+        return !!valid[m];
+      })
+    };
+  }
+  var SIMPLE_DEFAULTS, COMPLEX_DEFAULTS;
+  var init_llm_models = __esm({
+    "src/notes/49-llm-models.ts"() {
+      "use strict";
+      SIMPLE_DEFAULTS = {
+        gemini: "gemini-2.5-flash",
+        claude: "claude-haiku-4-5",
+        openai: "gpt-4o-mini"
+      };
+      COMPLEX_DEFAULTS = {
+        gemini: "gemini-2.5-pro",
+        claude: "claude-sonnet-4-5",
+        openai: "gpt-4o"
+      };
+    }
+  });
+
   // src/notes/29-note-llm-chat.ts
   function nlcSsKey(bulletId) {
     return NLC_SS_PREFIX + bulletId;
@@ -7891,9 +8391,6 @@
       }
     } catch (_) {
     }
-  }
-  function nlcSmartModel(provider) {
-    return NLC_SMART_MODELS[provider] || "";
   }
   function dataUrlToNlcImage(key, dataUrl, label) {
     var comma = dataUrl.indexOf(",");
@@ -8004,7 +8501,7 @@
     var s = loadSettings();
     var provider = s.llmProvider;
     var apiKey = s.llmApiKey;
-    var model = nlcSmartModel(provider);
+    var model = resolveLlmModel(s, "complex");
     if (!provider || !apiKey) {
       return Promise.reject(new Error("No LLM provider / API key configured in Settings"));
     }
@@ -8202,10 +8699,10 @@
     var s = loadSettings();
     var modelBadge = document.createElement("span");
     modelBadge.style.cssText = "font-size:10px;color:#475569;font-family:monospace;";
-    modelBadge.textContent = nlcSmartModel(s.llmProvider) || s.llmProvider || "";
+    modelBadge.textContent = resolveLlmModel(s, "complex") || s.llmProvider || "";
     shell.header.insertBefore(modelBadge, shell.actions);
     function buildConversationMd() {
-      var modelName = nlcSmartModel(s.llmProvider) || s.llmProvider || "LLM";
+      var modelName = resolveLlmModel(s, "complex") || s.llmProvider || "LLM";
       var noteClean2 = stripTokens(bulletText);
       var lines = [];
       lines.push("# LLM Chat \u2014 " + noteClean2.slice(0, 80));
@@ -8323,7 +8820,7 @@
       wrap.style.cssText = role === "user" ? "align-self:flex-end;max-width:85%;background:#1e293b;border:1px solid #334155;border-radius:8px;padding:9px 12px;" : "align-self:flex-start;max-width:90%;background:#0c1a2e;border:1px solid #1e3a5f;border-radius:8px;padding:9px 12px;";
       var label = document.createElement("div");
       label.style.cssText = "font-size:9px;font-family:monospace;margin-bottom:4px;color:" + (role === "user" ? "#475569" : "#3b82f6") + ";";
-      label.textContent = role === "user" ? "You" : nlcSmartModel(s.llmProvider) || "LLM";
+      label.textContent = role === "user" ? "You" : resolveLlmModel(s, "complex") || "LLM";
       wrap.appendChild(label);
       var body = document.createElement("div");
       body.style.cssText = "font-size:11.5px;color:#cbd5e1;line-height:1.65;font-family:system-ui,sans-serif;word-break:break-word;";
@@ -8422,7 +8919,7 @@
       replyInput.focus();
     }, 50);
   }
-  var NLC_LOG, NLC_SS_PREFIX, NLC_SMART_MODELS;
+  var NLC_LOG, NLC_SS_PREFIX;
   var init_note_llm_chat = __esm({
     "src/notes/29-note-llm-chat.ts"() {
       "use strict";
@@ -8431,13 +8928,9 @@
       init_store();
       init_context();
       init_floating_panel();
+      init_llm_models();
       NLC_LOG = "[QAW NoteChat]";
       NLC_SS_PREFIX = "qaw_nlc_";
-      NLC_SMART_MODELS = {
-        gemini: "gemini-2.5-pro",
-        claude: "claude-sonnet-4-5",
-        openai: "gpt-4o"
-      };
     }
   });
 
@@ -9469,148 +9962,21 @@
     }
   });
 
-  // src/notes/47-helper-index.ts
-  function isHelperBaseName(base) {
-    if (!/\.(js|ts)$/i.test(base)) return false;
-    if (/\.flow\.(js|ts)$/i.test(base)) return false;
-    if (base === "types.ts" || /\.types\.ts$/i.test(base)) return false;
-    if (/\.json$/i.test(base)) return false;
-    return true;
-  }
-  function helperBasename(stem, ext) {
-    var s = String(stem || "").trim().replace(/\.(js|ts)$/i, "");
-    return s + "." + ext;
-  }
-  function exportsForStem(cache, client, envId, stem) {
-    var keyTs = fileIndexKey(client, envId, helperBasename(stem, "ts"));
-    var keyJs = fileIndexKey(client, envId, helperBasename(stem, "js"));
-    return cache[keyTs] || cache[keyJs] || [];
-  }
-  function envHasIndexedHelpers(cache, client, envId) {
-    var prefix = client + FILE_INDEX_SEP + envId + FILE_INDEX_SEP;
-    return Object.keys(cache).some(function(k) {
-      if (k.indexOf(prefix) !== 0) return false;
-      var entries = cache[k];
-      return !!(entries && entries.length);
-    });
-  }
-  function refreshHelperExportsForEnv(client, envId) {
-    var cache = readExportsCache();
-    var fileIndex = readFileIndex();
-    var pathIndex = readPathIndex();
-    var monacoMap = buildMonacoPathMap();
-    var bases = /* @__PURE__ */ new Set();
-    var prefix = client + FILE_INDEX_SEP + envId + FILE_INDEX_SEP;
-    var pathDirty = false;
-    var fileDirty = false;
-    Object.keys(fileIndex).forEach(function(k) {
-      if (k.indexOf(prefix) !== 0) return;
-      var parts = k.split(FILE_INDEX_SEP);
-      if (parts.length !== 3) return;
-      var base = parts[2];
-      if (!isHelperBaseName(base)) return;
-      bases.add(base);
-    });
-    Object.keys(pathIndex).forEach(function(k) {
-      if (k.indexOf(prefix) !== 0) return;
-      var parts = k.split(FILE_INDEX_SEP);
-      if (parts.length !== 3) return;
-      var base = parts[2];
-      if (!isHelperBaseName(base)) return;
-      bases.add(base);
-    });
-    monacoMap.forEach(function(fullPath, base) {
-      if (!isHelperBaseName(base)) return;
-      bases.add(base);
-      var key = fileIndexKey(client, envId, base);
-      if (pathIndex[key] !== fullPath) {
-        pathIndex[key] = fullPath;
-        pathDirty = true;
-      }
-      if (fileIndex[key] !== fullPath) {
-        fileIndex[key] = fullPath;
-        fileDirty = true;
-      }
-    });
-    bases.forEach(function(base) {
-      var key = fileIndexKey(client, envId, base);
-      var content = getMonacoModelContent(base);
-      if (!content) return;
-      var exports = parseExports(content);
-      if (!exports.length) return;
-      cache[key] = exports;
-      saveExportsCache(key, exports);
-    });
-    if (pathDirty) {
-      try {
-        localStorage.setItem("_qawFilePathIndex", JSON.stringify(pathIndex));
-      } catch (_e) {
-      }
-    }
-    if (fileDirty) {
-      try {
-        localStorage.setItem("_qawFileIndex", JSON.stringify(fileIndex));
-      } catch (_e1) {
-      }
-    }
-    return cache;
-  }
-  function lookupHelperByCalledName(client, envId, calledName, cache) {
-    var name = String(calledName || "").trim();
-    if (!name) return [];
-    var exportsCache = cache || refreshHelperExportsForEnv(client, envId);
-    var prefix = client + FILE_INDEX_SEP + envId + FILE_INDEX_SEP;
-    var results = [];
-    Object.keys(exportsCache).forEach(function(k) {
-      if (k.indexOf(prefix) !== 0) return;
-      var base = k.split(FILE_INDEX_SEP)[2] || "";
-      if (!isHelperBaseName(base)) return;
-      var stem = base.replace(/\.(js|ts)$/, "");
-      var exps = exportsCache[k] || [];
-      for (var i = 0; i < exps.length; i++) {
-        if (String(exps[i].name || "") !== name) continue;
-        results.push({ stem, fn: name });
-        break;
-      }
-    });
-    results.sort(function(a, b) {
-      if (a.stem !== b.stem) return a.stem.localeCompare(b.stem);
-      return a.fn.localeCompare(b.fn);
-    });
-    return results;
-  }
-  function isHelperExportResolved(client, envId, stem, fn) {
-    var stemClean = String(stem || "").trim();
-    var fnClean = String(fn || "").trim();
-    if (!stemClean || !fnClean) return true;
-    var cache = readExportsCache();
-    if (!envHasIndexedHelpers(cache, client, envId)) return true;
-    var entries = exportsForStem(cache, client, envId, stemClean);
-    if (!entries.length) return false;
-    return entries.some(function(e) {
-      return String(e.name || "") === fnClean;
-    });
-  }
-  function listHelperStemsForEnv(client, envId, cache) {
-    var exportsCache = cache || refreshHelperExportsForEnv(client, envId);
-    var prefix = client + FILE_INDEX_SEP + envId + FILE_INDEX_SEP;
-    var stems = /* @__PURE__ */ new Set();
-    Object.keys(exportsCache).forEach(function(k) {
-      if (k.indexOf(prefix) !== 0) return;
-      var base = k.split(FILE_INDEX_SEP)[2] || "";
-      if (!isHelperBaseName(base)) return;
-      stems.add(base.replace(/\.(js|ts)$/, ""));
-    });
-    return Array.from(stems).sort();
-  }
-  var init_helper_index = __esm({
-    "src/notes/47-helper-index.ts"() {
-      "use strict";
-      init_map_tab();
-    }
-  });
-
   // src/notes/05-cards.ts
+  function placeDropdownNearAnchor(anchor, drop, opts) {
+    var gap = opts && opts.gap != null ? opts.gap : 4;
+    var minLeft = opts && opts.minLeft != null ? opts.minLeft : 8;
+    var rect = anchor.getBoundingClientRect();
+    var width = drop.offsetWidth || 0;
+    var height = drop.offsetHeight || 0;
+    var left = Math.max(minLeft, Math.min(rect.left, window.innerWidth - width - minLeft));
+    var top = rect.bottom + gap;
+    if (height && top + height > window.innerHeight - 8) {
+      top = Math.max(8, rect.top - height - gap);
+    }
+    drop.style.left = left + "px";
+    drop.style.top = top + "px";
+  }
   function clearPendingRunLogCopyUi() {
     state.pendingRunLogCopy = null;
     document.body.classList.remove("qaw-run-log-drop-ready");
@@ -9903,9 +10269,7 @@
     searchInput.addEventListener("input", rebuildList);
     rebuildList();
     document.body.appendChild(drop);
-    var rect = anchor.getBoundingClientRect();
-    drop.style.left = Math.min(rect.left, window.innerWidth - 330) + "px";
-    drop.style.top = rect.bottom + 4 + "px";
+    placeDropdownNearAnchor(anchor, drop);
     setTimeout(function() {
       document.addEventListener("mousedown", onOutside, true);
       document.addEventListener("keydown", onKey, true);
@@ -10050,9 +10414,7 @@
     searchInput.addEventListener("input", rebuildList);
     rebuildList();
     document.body.appendChild(drop);
-    var rect = anchor.getBoundingClientRect();
-    drop.style.left = Math.min(rect.left, window.innerWidth - 330) + "px";
-    drop.style.top = rect.bottom + 4 + "px";
+    placeDropdownNearAnchor(anchor, drop);
     setTimeout(function() {
       document.addEventListener("mousedown", onOutside, true);
       document.addEventListener("keydown", onKey, true);
@@ -10121,9 +10483,7 @@
       });
     });
     document.body.appendChild(drop);
-    var rect = anchor.getBoundingClientRect();
-    drop.style.left = Math.min(rect.left, window.innerWidth - drop.offsetWidth - 8) + "px";
-    drop.style.top = rect.bottom + 4 + "px";
+    placeDropdownNearAnchor(anchor, drop);
     setTimeout(function() {
       document.addEventListener("mousedown", onOutside, true);
     }, 0);
@@ -10294,9 +10654,7 @@
     });
     searchInput.addEventListener("input", rebuildList);
     document.body.appendChild(drop);
-    var rect = anchor.getBoundingClientRect();
-    drop.style.left = Math.min(rect.left, window.innerWidth - 330) + "px";
-    drop.style.top = rect.bottom + 4 + "px";
+    placeDropdownNearAnchor(anchor, drop);
     rebuildList();
     setTimeout(function() {
       document.addEventListener("mousedown", onOutside, true);
@@ -10362,9 +10720,7 @@
       redraw({});
     });
     document.body.appendChild(drop);
-    var rect = anchor.getBoundingClientRect();
-    drop.style.left = Math.min(rect.left, window.innerWidth - drop.offsetWidth - 8) + "px";
-    drop.style.top = rect.bottom + 4 + "px";
+    placeDropdownNearAnchor(anchor, drop);
     setTimeout(function() {
       document.addEventListener("mousedown", onOutside, true);
       document.addEventListener("keydown", onKey, true);
@@ -10422,9 +10778,7 @@
       openClientNoteRefDropdown(anchor, bullet, editKey, persist, redraw);
     }, !hasClientNotes);
     document.body.appendChild(drop);
-    var rect = anchor.getBoundingClientRect();
-    drop.style.left = Math.min(rect.left, window.innerWidth - drop.offsetWidth - 8) + "px";
-    drop.style.top = rect.bottom + 4 + "px";
+    placeDropdownNearAnchor(anchor, drop);
     setTimeout(function() {
       document.addEventListener("mousedown", onOutside, true);
       document.addEventListener("keydown", onKey, true);
@@ -10545,9 +10899,7 @@
     }
     searchInput.addEventListener("input", rebuildList);
     document.body.appendChild(drop);
-    var rect = anchor.getBoundingClientRect();
-    drop.style.left = Math.min(rect.left, window.innerWidth - 330) + "px";
-    drop.style.top = rect.bottom + 4 + "px";
+    placeDropdownNearAnchor(anchor, drop);
     rebuildList();
     setTimeout(function() {
       document.addEventListener("mousedown", onOutside, true);
@@ -10924,9 +11276,7 @@
       });
     }
     document.body.appendChild(drop);
-    var rect = anchor.getBoundingClientRect();
-    drop.style.left = Math.min(rect.left, window.innerWidth - drop.offsetWidth - 8) + "px";
-    drop.style.top = rect.bottom + 4 + "px";
+    placeDropdownNearAnchor(anchor, drop);
     setTimeout(function() {
       document.addEventListener("mousedown", onOutside, true);
     }, 0);
@@ -11012,15 +11362,43 @@
       if (ta) ta.value = bulletsToRawText(n.bullets);
       if (state.refreshPanelBugSummaryFn) state.refreshPanelBugSummaryFn();
     }
-    var enterCardEdit = function(idx) {
-      openDayForBulletIndex(idx);
-      redraw({});
-      var card = viewerEl.querySelector('[data-bullet-index="' + idx + '"]');
-      if (!card) return;
-      var cardEl = card;
+    function getActiveCardEditor() {
+      return viewerEl._qawActiveCardEdit || null;
+    }
+    function setActiveCardEditor(active) {
+      viewerEl._qawActiveCardEdit = active;
+    }
+    function clearActiveBlurTimer(active) {
+      if (active.blurTimer) {
+        clearTimeout(active.blurTimer);
+        active.blurTimer = null;
+      }
+    }
+    function shouldCommitEditOnBlur(cardIdx, cardEl, editEl) {
+      var active = getActiveCardEditor();
+      if (!active || active.bulletIdx !== cardIdx) return false;
+      if (active.suppressBlur) return false;
+      if (viewerEl._qawCardEditHandoff) return false;
+      var ae = document.activeElement;
+      if (ae && cardEl.contains(ae)) return false;
+      var otherEdit = viewerEl.querySelector("[data-qaw-single-note-edit]");
+      if (otherEdit && otherEdit !== editEl && ae === otherEdit) return false;
+      return true;
+    }
+    function scheduleEditBlurCommit(cardIdx, cardEl, editEl, commit) {
+      var timer = setTimeout(function() {
+        var active = getActiveCardEditor();
+        if (active && active.bulletIdx === cardIdx) active.blurTimer = null;
+        if (!shouldCommitEditOnBlur(cardIdx, cardEl, editEl)) return;
+        commit();
+      }, 120);
+      var activeNow = getActiveCardEditor();
+      if (activeNow && activeNow.bulletIdx === cardIdx) activeNow.blurTimer = timer;
+    }
+    var mountCardEditorForCard = function(idx, cardEl) {
       var b = n.bullets[idx];
       if (!b) return;
-      var bodyWrap = card.querySelector('[data-e2e="investigation-notes-viewer-text"]');
+      var bodyWrap = cardEl.querySelector('[data-e2e="investigation-notes-viewer-text"]');
       if (!bodyWrap) return;
       var err = document.createElement("div");
       err.style.cssText = "font-size:10px;color:#f87171;margin-top:4px;min-height:0;margin-left:8px;";
@@ -11145,11 +11523,7 @@
           }
         });
         inp.addEventListener("blur", function() {
-          setTimeout(function() {
-            var ae = document.activeElement;
-            if (ae && cardEl.contains(ae)) return;
-            finish();
-          }, 120);
+          scheduleEditBlurCommit(idx, cardEl, editDiv, finish);
         });
         inp.addEventListener("paste", function(e) {
           e.stopPropagation();
@@ -11344,11 +11718,7 @@
         }
       });
       editDiv.addEventListener("blur", function() {
-        setTimeout(function() {
-          var ae = document.activeElement;
-          if (ae && cardEl.contains(ae)) return;
-          finish();
-        }, 120);
+        scheduleEditBlurCommit(idx, cardEl, editDiv, finish);
       });
       editDiv.addEventListener("paste", function(pasteEv) {
         if (!pasteEv.clipboardData) return;
@@ -11377,9 +11747,14 @@
         }
       });
       var finishCalled = false;
-      function finish() {
+      function finish(opts) {
         if (finishCalled) return;
         finishCalled = true;
+        var active = getActiveCardEditor();
+        if (active && active.bulletIdx === idx) {
+          clearActiveBlurTimer(active);
+          if (!opts || !opts.handoff) setActiveCardEditor(null);
+        }
         teardownFacetAutocomplete();
         var rawText = serializeEditDiv();
         if (Array.isArray(b.comparisons) && b.comparisons.length) {
@@ -11439,9 +11814,15 @@
             }
           }
         }
-        redraw({});
+        if (!opts || !opts.skipRedraw) redraw({});
       }
-      var expandBtn2 = card.querySelector("[data-qaw-expand-btn]");
+      setActiveCardEditor({
+        bulletIdx: idx,
+        suppressBlur: false,
+        blurTimer: null,
+        finish
+      });
+      var expandBtn2 = cardEl.querySelector("[data-qaw-expand-btn]");
       if (expandBtn2) expandBtn2.style.display = "none";
       editDiv.focus();
       var selEnd = window.getSelection();
@@ -11453,6 +11834,35 @@
         selEnd.addRange(rangeEnd);
       }
       editDiv.scrollIntoView({ block: "nearest" });
+    };
+    var enterCardEdit = function(idx) {
+      var prevActive = getActiveCardEditor();
+      if (prevActive && prevActive.bulletIdx === idx) {
+        var existingEdit = viewerEl.querySelector("[data-qaw-single-note-edit]");
+        if (existingEdit) {
+          existingEdit.focus();
+          return;
+        }
+      }
+      var hadHandoff = false;
+      if (prevActive && prevActive.bulletIdx !== idx) {
+        hadHandoff = true;
+        viewerEl._qawCardEditHandoff = true;
+        prevActive.suppressBlur = true;
+        clearActiveBlurTimer(prevActive);
+        prevActive.finish({ handoff: true, skipRedraw: true });
+        setActiveCardEditor(null);
+      }
+      openDayForBulletIndex(idx);
+      var card = viewerEl.querySelector('[data-bullet-index="' + idx + '"]');
+      if (!card || hadHandoff) redraw({});
+      card = viewerEl.querySelector('[data-bullet-index="' + idx + '"]');
+      if (!card) {
+        viewerEl._qawCardEditHandoff = false;
+        return;
+      }
+      mountCardEditorForCard(idx, card);
+      viewerEl._qawCardEditHandoff = false;
     };
     function openNotePopout(b, idx) {
       var bulletId = String(b.id || "idx-" + idx);
@@ -11684,33 +12094,47 @@
           lineChip.setAttribute("role", "button");
           lineChip.tabIndex = 0;
           lineChip.setAttribute("data-e2e", "investigation-notes-viewer-line");
-          lineChip.title = "Line " + lineNo + " \u2014 click to jump, hover for context";
+          lineChip.title = "Line " + lineNo + " \u2014 click for actions, double-click to jump";
           lineChip.style.cssText = "display:inline-block;font-size:10px;font-weight:600;font-family:monospace;letter-spacing:0.04em;background:#0f172a;color:#cbd5e1;padding:3px 10px;border-radius:999px;border:1px solid #475569;cursor:pointer;";
           lineChip.textContent = "Line " + String(lineNo);
+          var lineClickTimer = null;
           lineChip.addEventListener("click", function(e) {
             e.preventDefault();
             e.stopPropagation();
+            if (lineClickTimer) clearTimeout(lineClickTimer);
+            lineClickTimer = setTimeout(function() {
+              lineClickTimer = null;
+              openLineChipDropdown(lineChip, lineNo, b, editKey, persist);
+            }, 180);
+          });
+          lineChip.addEventListener("dblclick", function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            if (lineClickTimer) {
+              clearTimeout(lineClickTimer);
+              lineClickTimer = null;
+            }
+            closeLineContextPopover();
+            document.querySelectorAll("[data-qaw-line-dropdown]").forEach(function(el) {
+              el.remove();
+            });
             if (!noteMatchesActiveEditorFile(editKey)) {
               flashNotesHint("Open this file in the active tab first", true);
               return;
             }
             goToMonacoLine(lineNo);
           });
-          lineChip.addEventListener("mouseenter", function() {
-            clearLineContextCloseTimer();
-            showLineContextPopover(lineChip, b, lineNo, editKey, persist);
-          });
-          lineChip.addEventListener("mouseleave", function() {
-            scheduleLineContextClose();
-          });
           lineChip.addEventListener("keydown", function(e) {
-            if (e.key === "Enter" || e.key === " ") {
+            if (e.key === "Enter") {
               e.preventDefault();
               if (!noteMatchesActiveEditorFile(editKey)) {
                 flashNotesHint("Open this file in the active tab first", true);
                 return;
               }
               goToMonacoLine(lineNo);
+            } else if (e.key === " ") {
+              e.preventDefault();
+              openLineChipDropdown(lineChip, lineNo, b, editKey, persist);
             }
           });
           chipsRow2.appendChild(lineChip);
@@ -11850,7 +12274,7 @@
       refChip.addEventListener("click", function(e) {
         e.preventDefault();
         e.stopPropagation();
-        openNoteReferenceDropdown(refChip, b, editKey, persist, redraw);
+        openNoteReferenceDropdown(e.currentTarget, b, editKey, persist, redraw);
       });
       chipsRow2.appendChild(refChip);
       var timeChip = document.createElement("button");
@@ -11891,7 +12315,7 @@
           var d = when.getFullYear() + "-" + String(when.getMonth() + 1).padStart(2, "0") + "-" + String(when.getDate()).padStart(2, "0");
           var t = String(when.getHours()).padStart(2, "0") + ":" + String(when.getMinutes()).padStart(2, "0");
           var fileLabel2 = displayNoteFileLabel(editKey) || "file note";
-          var fileUrl2 = ideFileUrlForNoteKey(editKey);
+          var fileUrl22 = ideFileUrlForNoteKey(editKey);
           var pendingNow = isScheduledReminderPending(remNow);
           openSlackReminderDialog({
             title: pendingNow ? "Update Slack DM" : "Past Slack reminder",
@@ -11909,14 +12333,14 @@
               if (pendingNow && remNow.scheduledMessageId && remNow.channelId) {
                 await slackDeleteScheduledDm(token, String(remNow.channelId), String(remNow.scheduledMessageId));
               }
-              var full = buildScheduledDmText(editKey, fileLabel2, String(b.text || ""), fileUrl2);
+              var full = buildScheduledDmText(editKey, fileLabel2, String(b.text || ""), fileUrl22);
               var json = await slackScheduleSelfDm(token, full, atEpoch, userId);
               var meta = extractScheduledDmMeta(json, String(remNow.channelId || ""), atEpoch);
               b.slackScheduledDm = {
                 scheduledMessageId: meta.scheduledMessageId,
                 channelId: meta.channelId,
                 postAt: normalizeReminderPostAtSeconds(meta.postAt || atEpoch),
-                fileUrl: fileUrl2,
+                fileUrl: fileUrl22,
                 fileLabel: fileLabel2,
                 updatedAt: (/* @__PURE__ */ new Date()).toISOString()
               };
@@ -12180,19 +12604,19 @@
           }
           kebabMenu.classList.remove("open");
           var fileLabel = displayNoteFileLabel(editKey) || "file note";
-          var fileUrl2 = ideFileUrlForNoteKey(editKey);
+          var fileUrl3 = ideFileUrlForNoteKey(editKey);
           var userId = String(settings.slackMemberUserId || "").trim();
           openSlackReminderDialog({
             title: "Schedule Slack DM",
             onSubmit: async function(atEpoch) {
-              var full = buildScheduledDmText(editKey, fileLabel, String(b.text || ""), fileUrl2);
+              var full = buildScheduledDmText(editKey, fileLabel, String(b.text || ""), fileUrl3);
               var json = await slackScheduleSelfDm(token, full, atEpoch, userId);
               var meta = extractScheduledDmMeta(json, "", atEpoch);
               b.slackScheduledDm = {
                 scheduledMessageId: meta.scheduledMessageId,
                 channelId: meta.channelId,
                 postAt: normalizeReminderPostAtSeconds(meta.postAt || atEpoch),
-                fileUrl: fileUrl2,
+                fileUrl: fileUrl3,
                 fileLabel,
                 updatedAt: (/* @__PURE__ */ new Date()).toISOString()
               };
@@ -12420,11 +12844,13 @@
       var bodyWrap = document.createElement("div");
       bodyWrap.setAttribute("data-e2e", "investigation-notes-viewer-text");
       bodyWrap.className = "qaw-note-body";
+      bodyWrap.title = "Click to edit";
       if (b.tag === "helper") {
         var hFile = b.helperFile || "";
         var hFn = b.helperFn || "";
         var pathRow = document.createElement("div");
         pathRow.setAttribute("data-qaw-helper-path-row", "1");
+        pathRow.setAttribute("data-qaw-no-edit", "1");
         pathRow.style.cssText = "display:flex;align-items:center;margin-bottom:" + (ldb.body ? "6px" : "2px") + ";";
         pathRow.addEventListener("click", function(e) {
           e.stopPropagation();
@@ -12590,13 +13016,13 @@
         if (hFile && hFn) {
           var chipWrap = document.createElement("div");
           chipWrap.style.cssText = "display:inline-flex;align-items:center;gap:3px;";
-          var refChip = document.createElement("button");
-          refChip.type = "button";
-          refChip.setAttribute("data-e2e", "investigation-notes-viewer-helper-ref");
-          refChip.style.cssText = "display:inline-flex;align-items:center;gap:4px;font-size:11px;font-weight:600;font-family:monospace;background:#1e1b4b;color:#c4b5fd;padding:3px 10px;border-radius:6px;border:1px solid #6366f1;cursor:pointer;";
-          refChip.title = "Open " + hFile + "." + hFn;
-          refChip.innerHTML = '<span style="opacity:0.7;font-size:10px;">\u2192</span> ' + hFn;
-          refChip.addEventListener("click", function(e) {
+          var helperRefChip = document.createElement("button");
+          helperRefChip.type = "button";
+          helperRefChip.setAttribute("data-e2e", "investigation-notes-viewer-helper-ref");
+          helperRefChip.style.cssText = "display:inline-flex;align-items:center;gap:4px;font-size:11px;font-weight:600;font-family:monospace;background:#1e1b4b;color:#c4b5fd;padding:3px 10px;border-radius:6px;border:1px solid #6366f1;cursor:pointer;";
+          helperRefChip.title = "Open " + hFile + "." + hFn;
+          helperRefChip.innerHTML = '<span style="opacity:0.7;font-size:10px;">\u2192</span> ' + hFn;
+          helperRefChip.addEventListener("click", function(e) {
             e.preventDefault();
             e.stopPropagation();
             navigateToHelperFile(
@@ -12630,7 +13056,7 @@
             e.stopPropagation();
             startPathEdit();
           });
-          chipWrap.appendChild(refChip);
+          chipWrap.appendChild(helperRefChip);
           chipWrap.appendChild(editBtn);
           pathRow.appendChild(chipWrap);
         } else {
@@ -12910,6 +13336,8 @@
       return card;
     };
     var redraw = function(opts) {
+      setActiveCardEditor(null);
+      viewerEl._qawCardEditHandoff = false;
       viewerEl.innerHTML = "";
       viewerEl._qawRedrawCards = function() {
         redraw({});
@@ -13135,7 +13563,7 @@
     if (s.length > 1400) s = s.slice(0, 1399) + "\n\u2026";
     return s;
   }
-  function buildScheduledDmText(editKey, fileLabel, noteBodyRaw, fileUrl2) {
+  function buildScheduledDmText(editKey, fileLabel, noteBodyRaw, fileUrl3) {
     var m = parseNoteKey(editKey);
     var clientLabel = m ? getClientDisplayName(m.client) : "Client";
     var envLabel = m ? getEnvDisplayName(m.envId) : "";
@@ -13148,7 +13576,7 @@
     if (safeEnv && safeEnv.toLowerCase() !== "production") {
       headerParts.push("`" + safeEnv + "`");
     }
-    headerParts.push("<" + fileUrl2 + "|" + safeFile + ">");
+    headerParts.push("<" + fileUrl3 + "|" + safeFile + ">");
     var parts = [headerParts.join(" ")];
     parts.push("");
     var lines = noteBody.split("\n");
@@ -13488,6 +13916,66 @@
     }
     bt(aLines.length, bLines.length);
     return ops;
+  }
+  function openLineChipDropdown(triggerEl, lineNo, b, editKey, persist) {
+    document.querySelectorAll("[data-qaw-line-dropdown]").forEach(function(el) {
+      el.remove();
+    });
+    var menu = document.createElement("div");
+    menu.setAttribute("data-qaw-line-dropdown", "1");
+    menu.style.cssText = "position:fixed;z-index:2147483020;background:#0f172a;border:1px solid #475569;border-radius:6px;padding:3px;min-width:140px;box-shadow:0 4px 14px rgba(0,0,0,0.6);";
+    function menuItem(label, icon, disabled, onClick) {
+      var btn = document.createElement("button");
+      btn.type = "button";
+      btn.style.cssText = "display:flex;align-items:center;gap:7px;width:100%;text-align:left;padding:5px 9px;border:none;border-radius:3px;cursor:" + (disabled ? "default" : "pointer") + ";font-size:11px;font-family:monospace;background:transparent;color:" + (disabled ? "#475569" : "#cbd5e1") + ";";
+      btn.innerHTML = '<span style="font-size:12px;line-height:1">' + icon + "</span><span>" + label + "</span>";
+      if (!disabled) {
+        btn.addEventListener("mouseenter", function() {
+          btn.style.background = "#1e293b";
+        });
+        btn.addEventListener("mouseleave", function() {
+          btn.style.background = "transparent";
+        });
+        btn.addEventListener("click", function(e) {
+          e.stopPropagation();
+          menu.remove();
+          document.removeEventListener("mousedown", closeOnOutside, true);
+          onClick();
+        });
+      }
+      return btn;
+    }
+    var hasContext = !!(b.lineContext && b.lineContext.code);
+    menu.appendChild(menuItem("Go to line", "\u2197", false, function() {
+      var ek = editKey;
+      if (!noteMatchesActiveEditorFile(ek)) {
+        flashNotesHint("Open this file in the active tab first", true);
+        return;
+      }
+      goToMonacoLine(lineNo);
+    }));
+    menu.appendChild(menuItem(
+      hasContext ? "Show context" : "Show context (none yet)",
+      "{ }",
+      !hasContext,
+      function() {
+        showLineContextPopover(triggerEl, b, lineNo, editKey, persist);
+      }
+    ));
+    var r = triggerEl.getBoundingClientRect();
+    var left = r.left;
+    var menuW = 160;
+    if (left + menuW > window.innerWidth - 8) left = window.innerWidth - menuW - 8;
+    menu.style.top = r.bottom + 4 + "px";
+    menu.style.left = left + "px";
+    function closeOnOutside(e) {
+      if (!menu.contains(e.target) && e.target !== triggerEl) {
+        menu.remove();
+        document.removeEventListener("mousedown", closeOnOutside, true);
+      }
+    }
+    document.addEventListener("mousedown", closeOnOutside, true);
+    document.body.appendChild(menu);
   }
   function showLineContextPopover(triggerEl, b, lineNo, editKey, persist) {
     clearLineContextCloseTimer();
@@ -15312,10 +15800,7 @@
 
   // src/notes/15-settings.ts
   function llmSettingsTestModel(provider) {
-    if (provider === "gemini") return "gemini-2.0-flash";
-    if (provider === "claude") return "claude-haiku-4-5";
-    if (provider === "openai") return "gpt-4o-mini";
-    return "";
+    return defaultLlmModel(provider, "simple");
   }
   function showHelpPopover(anchor, html, onShow) {
     var existing = document.querySelector("[data-qaw-help-popover]");
@@ -15484,6 +15969,7 @@
     container.innerHTML = "";
     container.style.cssText = "flex:1;display:flex;flex-direction:column;min-height:0;overflow:hidden;font-family:monospace;";
     var s = loadSettings();
+    var llmModelCache = Object.assign({}, s.llmModelCache || {});
     var mainRow = document.createElement("div");
     mainRow.style.cssText = "display:flex;flex-direction:row;flex:1;min-height:0;overflow:hidden;";
     var sidebar = document.createElement("nav");
@@ -15534,6 +16020,57 @@
       s.llmProvider ? { href: LLM_KEY_LINK[s.llmProvider], text: "Get key \u2197" } : void 0
     );
     llmFields.appendChild(keyRow);
+    function modelSelect(current) {
+      return selectEl([{ value: current, label: current || "\u2014 load models \u2014" }], current);
+    }
+    var cachedModels = s.llmProvider ? llmModelCache[s.llmProvider] : null;
+    var initialSimple = s.llmSimpleModel || defaultLlmModel(s.llmProvider, "simple");
+    var initialComplex = s.llmComplexModel || defaultLlmModel(s.llmProvider, "complex");
+    var simpleModelInp = modelSelect(initialSimple);
+    llmFields.appendChild(row("Simple model", simpleModelInp));
+    var complexModelInp = modelSelect(initialComplex);
+    llmFields.appendChild(row("Complex model (image-capable)", complexModelInp));
+    var modelRow = document.createElement("div");
+    modelRow.style.cssText = "display:flex;align-items:center;gap:8px;margin-top:-2px;";
+    var loadModelsBtn = document.createElement("button");
+    loadModelsBtn.type = "button";
+    loadModelsBtn.textContent = "Load available models";
+    loadModelsBtn.style.cssText = [
+      "font-size:11px;font-family:monospace;padding:4px 12px;cursor:pointer;border-radius:5px",
+      "background:#1e293b;color:#94a3b8;border:1px solid #334155"
+    ].join(";");
+    var modelStatus = document.createElement("span");
+    modelStatus.style.cssText = "font-size:11px;font-family:monospace;color:#64748b;";
+    modelRow.appendChild(loadModelsBtn);
+    modelRow.appendChild(modelStatus);
+    llmFields.appendChild(modelRow);
+    function refreshModelDefaults(provider) {
+      if (!simpleModelInp.value.trim()) simpleModelInp.value = defaultLlmModel(provider, "simple");
+      if (!complexModelInp.value.trim()) complexModelInp.value = defaultLlmModel(provider, "complex");
+    }
+    function pickAvailableModel(models, preferred, fallback) {
+      if (preferred && models.indexOf(preferred) !== -1) return preferred;
+      if (fallback && models.indexOf(fallback) !== -1) return fallback;
+      return models[0] || fallback || "";
+    }
+    function populateModelSelect(sel, models, current) {
+      var keep = current || "";
+      sel.innerHTML = "";
+      if (!models.length && keep) models = [keep];
+      models.forEach(function(model) {
+        var opt = document.createElement("option");
+        opt.value = model;
+        opt.textContent = model;
+        if (model === keep) opt.selected = true;
+        sel.appendChild(opt);
+      });
+      sel.value = keep;
+    }
+    if (cachedModels) {
+      populateModelSelect(simpleModelInp, cachedModels.simple || [], pickAvailableModel(cachedModels.simple || [], initialSimple, defaultLlmModel(s.llmProvider, "simple")));
+      populateModelSelect(complexModelInp, cachedModels.complex || [], pickAvailableModel(cachedModels.complex || [], initialComplex, defaultLlmModel(s.llmProvider, "complex")));
+      modelStatus.textContent = "Cached " + (cachedModels.simple || []).length + " simple / " + (cachedModels.complex || []).length + " image-capable";
+    }
     providerSel.addEventListener("change", function() {
       var p = providerSel.value;
       keyInp.placeholder = LLM_KEY_PLACEHOLDER[p] || "API key";
@@ -15555,6 +16092,52 @@
         });
         lbl.appendChild(a2);
       }
+      simpleModelInp.value = defaultLlmModel(p, "simple");
+      complexModelInp.value = defaultLlmModel(p, "complex");
+      var cached = p ? llmModelCache[p] : null;
+      if (cached) {
+        populateModelSelect(simpleModelInp, cached.simple || [], pickAvailableModel(cached.simple || [], simpleModelInp.value, defaultLlmModel(p, "simple")));
+        populateModelSelect(complexModelInp, cached.complex || [], pickAvailableModel(cached.complex || [], complexModelInp.value, defaultLlmModel(p, "complex")));
+        modelStatus.textContent = "Cached " + (cached.simple || []).length + " simple / " + (cached.complex || []).length + " image-capable";
+      } else {
+        populateModelSelect(simpleModelInp, [simpleModelInp.value].filter(Boolean), simpleModelInp.value);
+        populateModelSelect(complexModelInp, [complexModelInp.value].filter(Boolean), complexModelInp.value);
+        modelStatus.textContent = "";
+      }
+    });
+    loadModelsBtn.addEventListener("click", function() {
+      var provider = providerSel.value;
+      var apiKey = keyInp.value.trim();
+      loadModelsBtn.disabled = true;
+      modelStatus.textContent = "Loading\u2026";
+      modelStatus.style.color = "#64748b";
+      listAvailableLlmModels(provider, apiKey).then(function(models) {
+        var listedCount = models.simple.length;
+        modelStatus.textContent = "Validating 0/" + listedCount + "\u2026";
+        return validateAvailableLlmModels(provider, apiKey, models, function(done, total) {
+          modelStatus.textContent = "Validating " + done + "/" + total + "\u2026";
+        });
+      }).then(function(models) {
+        var simplePick = pickAvailableModel(models.simple, simpleModelInp.value, defaultLlmModel(provider, "simple"));
+        var complexPick = pickAvailableModel(models.complex, complexModelInp.value, defaultLlmModel(provider, "complex"));
+        populateModelSelect(simpleModelInp, models.simple, simplePick);
+        populateModelSelect(complexModelInp, models.complex, complexPick);
+        if (provider) {
+          llmModelCache[provider] = {
+            simple: models.simple.slice(),
+            complex: models.complex.slice(),
+            loadedAt: (/* @__PURE__ */ new Date()).toISOString()
+          };
+        }
+        modelStatus.textContent = "Loaded " + models.simple.length + " simple / " + models.complex.length + " image-capable";
+        modelStatus.style.color = models.simple.length ? "#4ade80" : "#f59e0b";
+        doSave();
+      }).catch(function(err) {
+        modelStatus.textContent = "\u2717 " + (err && err.message ? String(err.message).slice(0, 120) : String(err).slice(0, 120));
+        modelStatus.style.color = "#f87171";
+      }).finally(function() {
+        loadModelsBtn.disabled = false;
+      });
     });
     var testRow = document.createElement("div");
     testRow.style.cssText = "display:flex;align-items:center;gap:8px;margin-top:2px;";
@@ -15573,7 +16156,7 @@
     testBtn.addEventListener("click", function() {
       var provider = providerSel.value;
       var apiKey = keyInp.value.trim();
-      var model = llmSettingsTestModel(provider);
+      var model = simpleModelInp.value.trim() || llmSettingsTestModel(provider);
       if (!provider || !apiKey) {
         testStatus.textContent = "\u26A0 Choose a provider and enter a key first";
         testStatus.style.color = "#f59e0b";
@@ -15594,7 +16177,7 @@
       var body;
       var testPrompt = 'Reply with exactly one word: "ok"';
       if (provider === "gemini") {
-        url = "https://generativelanguage.googleapis.com/v1beta/models/" + (model || "gemini-2.0-flash") + ":generateContent?key=" + apiKey;
+        url = "https://generativelanguage.googleapis.com/v1beta/models/" + (model || "gemini-2.5-flash") + ":generateContent?key=" + apiKey;
         headers = { "Content-Type": "application/json" };
         body = JSON.stringify({ contents: [{ parts: [{ text: testPrompt }] }], generationConfig: { maxOutputTokens: 8 } });
       } else if (provider === "claude") {
@@ -15873,6 +16456,9 @@
       var newSettings = {
         llmProvider: providerSel.value,
         llmApiKey: keyInp.value.trim(),
+        llmSimpleModel: simpleModelInp.value.trim(),
+        llmComplexModel: complexModelInp.value.trim(),
+        llmModelCache,
         slackToken: tokenInp.value.trim(),
         slackUserToken: userTokenInp.value.trim(),
         slackBotDefaultChannelId: botChanInp.value.trim(),
@@ -15890,10 +16476,10 @@
       saveSettings(newSettings);
       flashSaved();
     }
-    [keyInp, tokenInp, userTokenInp, botChanInp, memberInp, githubTokenInp, heightInp].forEach(function(inp) {
+    [keyInp, simpleModelInp, complexModelInp, tokenInp, userTokenInp, botChanInp, memberInp, githubTokenInp, heightInp].forEach(function(inp) {
       inp.addEventListener("blur", doSave);
     });
-    [providerSel, nudgeSel, tagSel].forEach(function(sel) {
+    [providerSel, simpleModelInp, complexModelInp, nudgeSel, tagSel].forEach(function(sel) {
       sel.addEventListener("change", doSave);
     });
     rightCol.appendChild(scrollHost);
@@ -15908,6 +16494,7 @@
       init_store();
       init_constants();
       init_github_feedback();
+      init_llm_models();
       LLM_KEY_PLACEHOLDER = {
         gemini: "AIza...",
         claude: "sk-ant-...",
@@ -18234,6 +18821,37 @@ This won't delete the actual file.`)) return;
     var base = String(fileName || "").split(/[\\/]/).pop() || String(fileName || "");
     return base.replace(/\.(js|ts)$/i, "");
   }
+  function normalizeHelperFileStem(fileName) {
+    return helperStem(fileName).toLowerCase();
+  }
+  function resolveFlowHelperMatch(b, meta, targetStem, exportsCache) {
+    if (!b || b.tag !== "helper" || !targetStem) return "";
+    var target = normalizeHelperFileStem(targetStem);
+    var fileStem = normalizeHelperFileStem(String(b.helperFile || ""));
+    var fn = String(b.helperFn || "").trim();
+    if (fileStem === target && fn) return fn;
+    var scratch = {
+      tag: "helper",
+      text: String(b.text || ""),
+      lineNo: b.lineNo,
+      helperName: b.helperName
+    };
+    if (b.occurrences != null) scratch.occurrences = b.occurrences;
+    finalizeHelperBullet(scratch);
+    fileStem = normalizeHelperFileStem(String(scratch.helperFile || ""));
+    fn = String(scratch.helperFn || "").trim();
+    if (fileStem === target && fn) return fn;
+    var helperName = String(b.helperName || "").trim();
+    if (!helperName) return "";
+    var matches = lookupHelperByCalledName(meta.client, meta.envId, helperName, exportsCache);
+    var forTarget = [];
+    for (var i = 0; i < matches.length; i++) {
+      if (normalizeHelperFileStem(matches[i].stem) !== target) continue;
+      forTarget.push(matches[i].fn);
+    }
+    if (forTarget.length === 1) return forTarget[0];
+    return "";
+  }
   function esc(s) {
     return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   }
@@ -18378,11 +18996,12 @@ This won't delete the actual file.`)) return;
       return a.name.localeCompare(b.name);
     });
   }
-  function collectFlowRefs(meta, stem, scopeFn) {
+  function collectFlowRefs(meta, stem, scopeFn, exportsCache) {
     var refs = [];
-    var targetStem = stem.toLowerCase();
+    var targetStem = normalizeHelperFileStem(stem);
     var scope = String(scopeFn || "").trim().toLowerCase();
     if (!targetStem || !state.store || !state.store.notes) return refs;
+    var cache = exportsCache || readExportsCache();
     Object.keys(state.store.notes).forEach(function(editKey) {
       var m = parseNoteKey(editKey);
       var note = state.store.notes[editKey];
@@ -18391,9 +19010,7 @@ This won't delete the actual file.`)) return;
       if (!/\.flow\.(js|ts)$/i.test(m.fileName)) return;
       for (var i = 0; i < note.bullets.length; i++) {
         var b = note.bullets[i];
-        if (!b || b.tag !== "helper") continue;
-        if (String(b.helperFile || "").trim().toLowerCase() !== targetStem) continue;
-        var fn = String(b.helperFn || "").trim();
+        var fn = resolveFlowHelperMatch(b, meta, targetStem, cache);
         if (!fn) continue;
         if (scope && fn.toLowerCase() !== scope) continue;
         refs.push({
@@ -18511,6 +19128,7 @@ This won't delete the actual file.`)) return;
     if (favFilterBtn) favFilterBtn.style.display = "none";
     var stem = helperStem(meta.fileName);
     var entries = readHelperExports(meta.client, meta.envId, meta.fileName);
+    var flowExportsCache = readExportsCache();
     var byName = {};
     entries.forEach(function(e) {
       byName[e.name] = e;
@@ -18526,7 +19144,7 @@ This won't delete the actual file.`)) return;
     var allState = state.helperFilePanelState;
     var hs = allState[editKey] || (allState[editKey] = {
       scopeFn: "",
-      mapOpen: true,
+      mapOpen: false,
       query: "",
       typeFilters: persistedFilters.typeFilters || defaultTypeFilters(),
       statusFilters: persistedFilters.statusFilters || defaultStatusFilters()
@@ -18795,7 +19413,7 @@ This won't delete the actual file.`)) return;
       listBody.className = "qaw-helper-list-body";
       list.appendChild(listBody);
       shown.forEach(function(fn) {
-        var refs = collectFlowRefs(meta, stem, fn);
+        var refs = collectFlowRefs(meta, stem, fn, flowExportsCache);
         var owned = countFunctionNotesForFn(n, fn, entries);
         var entry = byName[fn] || { line: 0, name: fn };
         var row2 = document.createElement("div");
@@ -18859,7 +19477,7 @@ This won't delete the actual file.`)) return;
     function renderDetail(root) {
       var scopeFn = String(hs.scopeFn || "").trim();
       var entry = scopeFn ? byName[scopeFn] || { name: scopeFn, line: 0 } : null;
-      var refs = collectFlowRefs(meta, stem, scopeFn);
+      var refs = collectFlowRefs(meta, stem, scopeFn, flowExportsCache);
       var detail = document.createElement("div");
       detail.className = "qaw-helper-detail";
       root.appendChild(detail);
@@ -19008,6 +19626,7 @@ This won't delete the actual file.`)) return;
       init_state();
       init_constants();
       init_context();
+      init_shift();
       init_head();
       init_cards();
       init_helper_bullet_classify();
@@ -19023,6 +19642,54 @@ This won't delete the actual file.`)) return;
   // src/notes/36-discover.ts
   function esc2(s) {
     return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+  function discoverFilterClientKey(client) {
+    return String(client || "__unknown__").trim() || "__unknown__";
+  }
+  function validDayRange(v) {
+    return v === "today" || v === "yesterday" || v === "7d" || v === "all" ? v : "7d";
+  }
+  function validDiscoverStatuses(list) {
+    if (!Array.isArray(list)) return ["open"];
+    var out = [];
+    list.forEach(function(s) {
+      var status = String(s || "").trim();
+      if (DISCOVER_STATUS_FILTERS.indexOf(status) === -1) return;
+      if (out.indexOf(status) !== -1) return;
+      out.push(status);
+    });
+    return out;
+  }
+  function readDiscoverFilterPrefs(client) {
+    var fallback = { dayRange: "7d", selectedStatuses: ["open"], query: "" };
+    try {
+      var raw = localStorage.getItem(DISCOVER_FILTERS_STORAGE_KEY);
+      if (!raw) return fallback;
+      var all = JSON.parse(raw);
+      var row2 = all && all[discoverFilterClientKey(client)];
+      if (!row2 || typeof row2 !== "object") return fallback;
+      return {
+        dayRange: validDayRange(row2.dayRange),
+        selectedStatuses: validDiscoverStatuses(row2.selectedStatuses),
+        query: String(row2.query || "")
+      };
+    } catch (_e) {
+      return fallback;
+    }
+  }
+  function writeDiscoverFilterPrefs(client, prefs) {
+    try {
+      var raw = localStorage.getItem(DISCOVER_FILTERS_STORAGE_KEY);
+      var all = raw ? JSON.parse(raw) : {};
+      if (!all || typeof all !== "object") all = {};
+      all[discoverFilterClientKey(client)] = {
+        dayRange: validDayRange(prefs.dayRange),
+        selectedStatuses: validDiscoverStatuses(prefs.selectedStatuses),
+        query: String(prefs.query || "")
+      };
+      localStorage.setItem(DISCOVER_FILTERS_STORAGE_KEY, JSON.stringify(all));
+    } catch (_e) {
+    }
   }
   function facetsOnBullet(b) {
     var out = normalizeFacetList(b.facets);
@@ -19517,9 +20184,15 @@ This won't delete the actual file.`)) return;
     } catch (e) {
     }
   }
+  function discoverIdeFileUrlForNoteKey(editKey) {
+    var meta = parseNoteKey(editKey);
+    if (!meta) return window.location.href;
+    var fullPath = resolveIndexedFilePath(meta.client, meta.envId, meta.fileName) || meta.fileName;
+    return getFlowIdeUrl(meta.client, meta.envId, fullPath);
+  }
   function openBulletInNewTab(hit) {
     queuePendingDiscoverOpen(hit);
-    var url = ideFileUrlForNoteKey(hit.editKey);
+    var url = discoverIdeFileUrlForNoteKey(hit.editKey);
     window.open(url, "_blank", "noopener");
   }
   function jumpToBulletInNote(editKey, bulletId, bulletIdx, bullet) {
@@ -19613,11 +20286,12 @@ This won't delete the actual file.`)) return;
   function openDiscoverModal() {
     hideInvTooltip();
     if (restoreFloatingPanel("discover")) return;
-    var dayRange = "7d";
-    var selectedStatuses = ["open"];
-    var query = "";
     var ctx = parseContext();
     var currentClient = ctx ? ctx.client : null;
+    var persistedFilters = readDiscoverFilterPrefs(currentClient);
+    var dayRange = persistedFilters.dayRange;
+    var selectedStatuses = persistedFilters.selectedStatuses.slice();
+    var query = persistedFilters.query;
     var collapsedClients = {};
     var shell = createFloatingPanel({
       id: "discover",
@@ -19637,6 +20311,14 @@ This won't delete the actual file.`)) return;
     var dayRow = modal.querySelector("[data-qaw-discover-day-row]");
     var statusRow = modal.querySelector("[data-qaw-discover-status-row]");
     var list = modal.querySelector("[data-qaw-discover-list]");
+    if (inp) inp.value = query;
+    function persistFilters2() {
+      writeDiscoverFilterPrefs(currentClient, {
+        dayRange,
+        selectedStatuses: selectedStatuses.slice(),
+        query
+      });
+    }
     function isClientExpanded(client, isCurrent) {
       if (collapsedClients[client] !== void 0) return !collapsedClients[client];
       return isCurrent;
@@ -19658,6 +20340,7 @@ This won't delete the actual file.`)) return;
         paintChip(btn, dayRange === d.id, "#38bdf8");
         btn.addEventListener("click", function() {
           dayRange = d.id;
+          persistFilters2();
           paintDayChips();
           rebuildList();
         });
@@ -19677,6 +20360,7 @@ This won't delete the actual file.`)) return;
           var ix = selectedStatuses.indexOf(status);
           if (ix === -1) selectedStatuses.push(status);
           else selectedStatuses.splice(ix, 1);
+          persistFilters2();
           paintStatusChips();
           rebuildList();
         });
@@ -19746,6 +20430,7 @@ This won't delete the actual file.`)) return;
     if (inp) {
       inp.addEventListener("input", function() {
         query = inp.value.trim();
+        persistFilters2();
         rebuildList();
       });
     }
@@ -19780,9 +20465,9 @@ This won't delete the actual file.`)) return;
     var meta = parseNoteKey(pending.editKey);
     var ctx = parseContext();
     if (!meta || !ctx || meta.client !== ctx.client || meta.envId !== ctx.envId) return;
-    var fileUrl2 = ideFileUrlForNoteKey(pending.editKey);
-    if (!isOnTargetFileUrl(fileUrl2)) {
-      window.location.href = fileUrl2;
+    var fileUrl3 = discoverIdeFileUrlForNoteKey(pending.editKey);
+    if (!isOnTargetFileUrl(fileUrl3)) {
+      window.location.href = fileUrl3;
       return;
     }
     try {
@@ -19805,7 +20490,7 @@ This won't delete the actual file.`)) return;
       jumpToBulletInNote(pending.editKey, pending.bulletId, pending.bulletIdx, bullet);
     }, 350);
   }
-  var HASHTAG_TOKEN_RE2, DISCOVER_PENDING_OPEN_KEY, MAX_BULLETS_SCAN, STATUS_SORT_ORDER, DISCOVER_STATUS_FILTERS, TAG_SORT_ORDER, activeNotePreview, notePreviewHideTimer;
+  var HASHTAG_TOKEN_RE2, DISCOVER_PENDING_OPEN_KEY, DISCOVER_FILTERS_STORAGE_KEY, MAX_BULLETS_SCAN, STATUS_SORT_ORDER, DISCOVER_STATUS_FILTERS, TAG_SORT_ORDER, activeNotePreview, notePreviewHideTimer;
   var init_discover = __esm({
     "src/notes/36-discover.ts"() {
       "use strict";
@@ -19816,12 +20501,14 @@ This won't delete the actual file.`)) return;
       init_head();
       init_context();
       init_panel_shell();
+      init_map_tab();
       init_facet_hashtag();
       init_cards();
       init_floating_panel();
       init_client_note_refs();
       HASHTAG_TOKEN_RE2 = /(^|[\s(])#([a-z][a-z0-9-]*)\b/gi;
       DISCOVER_PENDING_OPEN_KEY = "_qawDiscoverPendingOpen_v1";
+      DISCOVER_FILTERS_STORAGE_KEY = "_qawDiscoverFiltersByClient_v1";
       MAX_BULLETS_SCAN = 5e3;
       STATUS_SORT_ORDER = {
         open: 0,
@@ -22222,7 +22909,7 @@ This won't delete the actual file.`)) return;
       } catch (e) {
       }
       try {
-        if ("1.535") return "1.535";
+        if ("1.549") return "1.549";
       } catch (e2) {
       }
       return "unknown";
@@ -22462,6 +23149,10 @@ This won't delete the actual file.`)) return;
   function runTimesMatch(a, b) {
     return Number.isFinite(a) && Number.isFinite(b) && Math.abs(a - b) <= 5e3;
   }
+  function finiteNumber(v) {
+    var n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
   function tabMatchesNote(t, client, envId, fileName) {
     if (!t) return false;
     if (String(t.client || "") !== String(client)) return false;
@@ -22479,12 +23170,14 @@ This won't delete the actual file.`)) return;
       if (t.isRunning) return null;
       if (t.lastRunPassed === true) return null;
       var slot = readRunMetricsSlot(fileName);
-      var completedStart = Number(slot && slot.completedRunStartedAt);
-      var completedEnd = Number(slot && slot.completedRunEndedAt);
-      var lineRunStart = Number(t.currentLineRunStartedAt);
-      var lineSeenAt = Number(t.currentLineSeenAt);
-      if (!runTimesMatch(lineRunStart, completedStart)) return null;
-      if (Number.isFinite(completedEnd) && Number.isFinite(lineSeenAt) && lineSeenAt > completedEnd + 5e3) return null;
+      var completedStart = finiteNumber(slot && slot.completedRunStartedAt);
+      if (completedStart == null) completedStart = finiteNumber(t.lastCompletedRunStartedAt);
+      var completedEnd = finiteNumber(slot && slot.completedRunEndedAt);
+      var lineRunStart = finiteNumber(t.currentLineRunStartedAt);
+      if (lineRunStart == null) lineRunStart = finiteNumber(t.lastCompletedRunStartedAt);
+      var lineSeenAt = finiteNumber(t.currentLineSeenAt);
+      if (completedStart != null && lineRunStart != null && !runTimesMatch(lineRunStart, completedStart)) return null;
+      if (completedEnd != null && lineSeenAt != null && lineSeenAt > completedEnd + 5e3) return null;
       var ln = Number(t.currentLine);
       if (Number.isFinite(ln) && ln > 0) return Math.floor(ln);
     } catch (_e) {
@@ -22496,7 +23189,7 @@ This won't delete the actual file.`)) return;
     if (!meta) return null;
     if (!noteMatchesActiveEditorFile(editKey)) return null;
     var panelOutcome = detectTerminalOutcomeFromPanel();
-    if (panelOutcome !== "failed") return null;
+    if (panelOutcome === "passed" || panelOutcome === "stopped") return null;
     return getCompletedFailedRunLineFromOpenTabs(meta.client, meta.envId, meta.fileName);
   }
   function getMonacoEditorsFromWindow() {
@@ -22741,7 +23434,16 @@ This won't delete the actual file.`)) return;
     state.panelEl.setAttribute("data-qaw-occ-nav", "1");
     state.panelEl.addEventListener("click", onNotesPanelOccChipCapture, true);
   }
-  function navigateToHelperFile(stem, fn, scope) {
+  function isVirtualHelperStem(stem) {
+    var s = String(stem || "").trim();
+    if (!s) return false;
+    return isMonacoVirtualBasename(s + ".ts") || isMonacoVirtualBasename(s + ".js");
+  }
+  function stemFromRepoPath(path) {
+    var base = String(path || "").split("/").pop() || "";
+    return base.replace(/\.(js|ts)$/i, "");
+  }
+  function navigateToHelperFile(stem, fn, scope, pathHint) {
     var client = scope && scope.client ? scope.client : "";
     var envId = scope && scope.envId ? scope.envId : "";
     if (!client || !envId) {
@@ -22750,6 +23452,34 @@ This won't delete the actual file.`)) return;
         client = ctx.client;
         envId = ctx.envId;
       }
+    }
+    var normHint = pathHint ? normaliseRepoPath(pathHint) : "";
+    if (normHint) {
+      var hintStem = stemFromRepoPath(normHint);
+      if (hintStem && !isVirtualHelperStem(hintStem)) stem = hintStem;
+    }
+    if (isVirtualHelperStem(stem) && fn && client && envId) {
+      var alts = lookupHelperByCalledName(client, envId, fn);
+      if (alts.length) stem = alts[0].stem;
+    }
+    if (isVirtualHelperStem(stem)) {
+      flashNotesHint(
+        "Cannot open Monaco scratch buffer \u201C" + stem + "\u201D \u2014 use a real helper path (e.g. utilities/microsoft.ts).",
+        true
+      );
+      return;
+    }
+    if (normHint && client && envId) {
+      if (fn) {
+        state.pendingHelperPanelFn = fn;
+        try {
+          sessionStorage.setItem(PENDING_HELPER_FN_KEY, fn);
+        } catch (_e) {
+        }
+      }
+      flashNotesHint("Opening " + stem + "\u2026", false);
+      openHelperViaFileTree(stem, fn, normHint);
+      return;
     }
     var tabs = document.querySelectorAll('[class*="styles_tab__"]');
     for (var i = 0; i < tabs.length; i++) {
@@ -22779,7 +23509,7 @@ This won't delete the actual file.`)) return;
           }
         }
         flashNotesHint("Opening " + stem + "\u2026", false);
-        window.location.href = fileUrl(client, envId, fullPath);
+        openHelperViaFileTree(stem, fn, fullPath);
         return;
       }
     }
@@ -23424,6 +24154,7 @@ This won't delete the actual file.`)) return;
       init_state();
       init_constants();
       init_map_tab();
+      init_helper_index();
       init_store();
       init_shift();
       init_shift();
@@ -24131,16 +24862,11 @@ This won't delete the actual file.`)) return;
   init_store();
   init_state();
   init_github_feedback();
+  init_llm_models();
   var CCX_LOG = "[QAW CommitCtx]";
   var CCX_GEN_BTN_ATTR = "data-qaw-commit-gen-btn";
   var CCX_THUMB_BTN_ATTR = "data-qaw-commit-thumb-btn";
   var ccxLastContext = { prompt: "", message: "" };
-  function ccxFastModel(provider) {
-    if (provider === "gemini") return "gemini-2.0-flash";
-    if (provider === "claude") return "claude-haiku-4-5";
-    if (provider === "openai") return "gpt-4o-mini";
-    return "";
-  }
   async function ccxPostFeedback(prompt2, message) {
     if (!hasGithubFeedbackSettings()) return Promise.reject(new Error("No GitHub token configured"));
     var reporter = await fetchReporterIdentity();
@@ -24397,7 +25123,7 @@ This won't delete the actual file.`)) return;
     var s = loadSettings();
     var provider = s.llmProvider;
     var apiKey = s.llmApiKey;
-    var model = ccxFastModel(provider);
+    var model = resolveLlmModel(s, "simple");
     if (!provider || !apiKey) {
       return Promise.reject(new Error("No LLM provider / API key configured in Settings"));
     }
@@ -24410,7 +25136,7 @@ This won't delete the actual file.`)) return;
       var headers;
       var body;
       if (provider === "gemini") {
-        var geminiModel = model || "gemini-2.0-flash";
+        var geminiModel = model || "gemini-2.5-flash";
         url = "https://generativelanguage.googleapis.com/v1beta/models/" + geminiModel + ":generateContent?key=" + apiKey;
         headers = { "Content-Type": "application/json" };
         body = JSON.stringify({
@@ -25127,7 +25853,7 @@ This won't delete the actual file.`)) return;
     } catch (_) {
     }
     try {
-      if ("1.535") return "1.535";
+      if ("1.549") return "1.549";
     } catch (_) {
     }
     return "unknown";
