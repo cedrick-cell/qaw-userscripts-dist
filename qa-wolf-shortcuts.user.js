@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         QA Wolf Shortcuts
 // @namespace    http://tampermonkey.net/
-// @version      4.168
+// @version      4.176
 // @description  Keyboard shortcut hints for app.qawolf.com. Header nav shortcuts live in JSON key __global__ (editable). File tabs: Shift+right-click = Close other tabs. Violet badges = Meta chord. task-wolf.com: Select All button for Bug Revalidation Tasks.
 // @author       You
 // @match        https://app.qawolf.com/*
@@ -20,9 +20,17 @@
   var STORAGE_KEY_OPEN_TABS = "_qawOpenTabs";
   var STORAGE_KEY_FILE_INDEX = "_qawFileIndex";
   var STORAGE_KEY_SAFE_MODE = "_qawUserscriptsSafeMode";
+  var STORAGE_KEY_SAFE_MODE_EVENT = "qaw-userscripts-safe-mode";
   var GLOBAL_PAGE_KEY = "__global__";
   var ANCHOR_THRESHOLD = 120;
   var POLL_INTERVAL = 600;
+  function isReportScrapeWindow() {
+    try {
+      return /^_qaw_(bug|maint)_scrape_/i.test(String(window.name || ""));
+    } catch (e) {
+      return false;
+    }
+  }
   function getNavActionRow() {
     var link = document.querySelector('#app-header-navigation a[href*="maintenance"]');
     return link ? link.parentElement : null;
@@ -632,18 +640,21 @@
     }
     if (!safeModeChip.isConnected) document.body.appendChild(safeModeChip);
   }
-  function enableSafeMode() {
-    localStorage.setItem(STORAGE_KEY_SAFE_MODE, "1");
-    active = false;
-    localStorage.setItem(STORAGE_KEY_ACTIVE, "0");
-    window.__qawShortcutsActive = false;
-    window.__qawEditMode = false;
-    removeShortcutUi();
-    renderSafeModeChip();
-    console.info('QAW userscripts safe mode enabled. To disable from DevTools: localStorage.removeItem("' + STORAGE_KEY_SAFE_MODE + '"); location.reload();');
+  function broadcastSafeMode(enabled) {
+    try {
+      window.dispatchEvent(new CustomEvent(STORAGE_KEY_SAFE_MODE_EVENT, { detail: { enabled: !!enabled } }));
+    } catch (e) {
+    }
   }
-  function disableSafeMode() {
-    localStorage.removeItem(STORAGE_KEY_SAFE_MODE);
+  function applySafeModeUi(enabled, showResumeToast) {
+    if (enabled) {
+      active = false;
+      window.__qawShortcutsActive = false;
+      window.__qawEditMode = false;
+      removeShortcutUi();
+      renderSafeModeChip();
+      return;
+    }
     if (safeModeStyle) {
       safeModeStyle.remove();
       safeModeStyle = null;
@@ -653,7 +664,20 @@
       safeModeChip = null;
     }
     injectToggleBtn();
-    showToast("QAW scripts resumed");
+    if (showResumeToast) showToast("QAW scripts resumed");
+  }
+  function enableSafeMode() {
+    if (!isSafeModeEnabled()) localStorage.setItem(STORAGE_KEY_SAFE_MODE, "1");
+    broadcastSafeMode(true);
+    active = false;
+    localStorage.setItem(STORAGE_KEY_ACTIVE, "0");
+    applySafeModeUi(true, false);
+    console.info('QAW userscripts safe mode enabled. To disable from DevTools: localStorage.removeItem("' + STORAGE_KEY_SAFE_MODE + '"); location.reload();');
+  }
+  function disableSafeMode() {
+    if (isSafeModeEnabled()) localStorage.removeItem(STORAGE_KEY_SAFE_MODE);
+    broadcastSafeMode(false);
+    applySafeModeUi(false, true);
   }
   function getTabEl(el) {
     var cur = el;
@@ -2659,18 +2683,22 @@
       if (should !== active) setActive(should);
     }
     if (e.key === STORAGE_KEY_SAFE_MODE) {
-      if (e.newValue === "1") enableSafeMode();
-      else disableSafeMode();
+      applySafeModeUi(e.newValue === "1", false);
     }
   });
   var shortcutsInitialized = false;
   function initShortcutsIfReady() {
+    if (isReportScrapeWindow()) {
+      shortcutsInitialized = true;
+      initObserver.disconnect();
+      removeShortcutUi();
+      return true;
+    }
     if (isSafeModeEnabled()) {
       if (!document.body) return false;
       shortcutsInitialized = true;
       initObserver.disconnect();
-      removeShortcutUi();
-      renderSafeModeChip();
+      applySafeModeUi(true, false);
       return true;
     }
     if (!getToggleHost()) return false;

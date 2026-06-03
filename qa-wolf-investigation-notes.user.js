@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         QA Wolf Investigation Notes
 // @namespace    http://tampermonkey.net/
-// @version      1.563
+// @version      1.576
 // @description  Per-file investigation notes: quick links (new-tab opens, PoC textarea, client-wide notes), client/env chips, instant tooltips, run timing, shift sync, work mode, export, search. data-e2e investigation-* hooks.
 // @author       You
 // @match        https://app.qawolf.com/*
@@ -118,7 +118,7 @@
   });
 
   // src/notes/01-constants.ts
-  var STORAGE_KEY, NOTE_LS_KEY_PREFIX, META_STORAGE_KEY, DEBOUNCE_MS, POLL_MS, SHIFT_BRIDGE_GM_KEY, TASK_WOLF_SHIFT_DOM_BRIDGE_DISABLED, SETTINGS_GM_KEY, TASK_WOLF_HQ_URL, RUN_CHIME_METRICS_KEY, OPEN_TABS_KEY, SHIFT_END_CTA_SENT_KEY, DAILY_CLIENT_WORK_KEY, CLIENT_SCOPE_ENV, CLIENT_NOTES_FILE, PENDING_HELPER_FN_KEY, NOTES_SYNTAX_TOOLTIP, RUN_METRICS_TOOLTIP, RAW_LINE, RAW_CHAR_TO_TAG, RAW_TAG_TO_CHAR, FACET_OPTIONS, FACET_DEFINITIONS, TEAM_DEFAULT_SLACK_IMAGE_CHANNEL, TEAM_DEFAULT_CLOUDINARY_CLOUD_NAME, TEAM_DEFAULT_CLOUDINARY_UPLOAD_PRESET, Z_INV_DRAWER, Z_INV_MODAL, STATUS_OPTIONS, STATUS_CHIP_STYLE, WORK_MODE_OPTIONS;
+  var STORAGE_KEY, NOTE_LS_KEY_PREFIX, META_STORAGE_KEY, DEBOUNCE_MS, POLL_MS, GLOBAL_SAFE_MODE_KEY, GLOBAL_SAFE_MODE_EVENT, SHIFT_BRIDGE_GM_KEY, TASK_WOLF_SHIFT_DOM_BRIDGE_DISABLED, SETTINGS_GM_KEY, TASK_WOLF_HQ_URL, RUN_CHIME_METRICS_KEY, OPEN_TABS_KEY, SHIFT_END_CTA_SENT_KEY, DAILY_CLIENT_WORK_KEY, CLIENT_SCOPE_ENV, CLIENT_NOTES_FILE, PENDING_HELPER_FN_KEY, NOTES_SYNTAX_TOOLTIP, RUN_METRICS_TOOLTIP, RAW_LINE, RAW_CHAR_TO_TAG, RAW_TAG_TO_CHAR, FACET_OPTIONS, FACET_DEFINITIONS, TEAM_DEFAULT_SLACK_IMAGE_CHANNEL, TEAM_DEFAULT_CLOUDINARY_CLOUD_NAME, TEAM_DEFAULT_CLOUDINARY_UPLOAD_PRESET, Z_INV_DRAWER, Z_INV_MODAL, STATUS_OPTIONS, STATUS_CHIP_STYLE, WORK_MODE_OPTIONS;
   var init_constants = __esm({
     "src/notes/01-constants.ts"() {
       "use strict";
@@ -127,6 +127,8 @@
       META_STORAGE_KEY = "_qawInvNotesMeta";
       DEBOUNCE_MS = 400;
       POLL_MS = 500;
+      GLOBAL_SAFE_MODE_KEY = "_qawUserscriptsSafeMode";
+      GLOBAL_SAFE_MODE_EVENT = "qaw-userscripts-safe-mode";
       SHIFT_BRIDGE_GM_KEY = "_qawInvNotesShiftBridge_v1";
       TASK_WOLF_SHIFT_DOM_BRIDGE_DISABLED = true;
       SETTINGS_GM_KEY = "_qawInvNotesSettings_v1";
@@ -516,35 +518,35 @@
   function ensureClientNoteBucketForMigration(p, clientSlug) {
     var key = clientSlug + NOTE_KEY_SEP + CLIENT_SCOPE_ENV + NOTE_KEY_SEP + CLIENT_NOTES_FILE;
     var now = (/* @__PURE__ */ new Date()).toISOString();
-    var note = p.notes[key];
-    if (!note || typeof note !== "object") {
-      note = {
+    var note2 = p.notes[key];
+    if (!note2 || typeof note2 !== "object") {
+      note2 = {
         bullets: [],
         status: "empty",
         updatedAt: now,
         clientPlain: "",
         clientNotes: []
       };
-      p.notes[key] = note;
+      p.notes[key] = note2;
     }
-    if (!Array.isArray(note.clientNotes)) {
-      var legacy = String(note.clientPlain || "").trim();
-      if (!legacy && note.bullets && note.bullets[0]) legacy = String(note.bullets[0].text || "").trim();
-      note.clientNotes = [];
+    if (!Array.isArray(note2.clientNotes)) {
+      var legacy = String(note2.clientPlain || "").trim();
+      if (!legacy && note2.bullets && note2.bullets[0]) legacy = String(note2.bullets[0].text || "").trim();
+      note2.clientNotes = [];
       if (legacy) {
-        note.clientNotes.push({
+        note2.clientNotes.push({
           id: uid(),
           slug: "migrated-client-note",
           title: "Migrated client note",
           body: legacy,
-          createdAt: String(note.updatedAt || now),
-          updatedAt: String(note.updatedAt || now)
+          createdAt: String(note2.updatedAt || now),
+          updatedAt: String(note2.updatedAt || now)
         });
       }
-      note.clientPlain = "";
-      note.bullets = [];
+      note2.clientPlain = "";
+      note2.bullets = [];
     }
-    return note;
+    return note2;
   }
   function migratePocQuickLinksToClientNotes(p) {
     if (p.pocToClientNotesV1Done) return;
@@ -556,13 +558,13 @@
         row2.poc = "";
         return;
       }
-      var note = ensureClientNoteBucketForMigration(p, clientSlug);
-      var exists = (note.clientNotes || []).some(function(item) {
+      var note2 = ensureClientNoteBucketForMigration(p, clientSlug);
+      var exists = (note2.clientNotes || []).some(function(item) {
         return String(item && item.slug || "") === "migrated-poc-notes";
       });
       if (!exists) {
         var now = (/* @__PURE__ */ new Date()).toISOString();
-        note.clientNotes.push({
+        note2.clientNotes.push({
           id: uid(),
           slug: slugifyClientNoteTitleLocal("Migrated PoC notes") || "migrated-poc-notes",
           title: "Migrated PoC notes",
@@ -570,9 +572,9 @@
           createdAt: now,
           updatedAt: now
         });
-        note.updatedAt = now;
-        note.clientPlain = "";
-        note.bullets = [];
+        note2.updatedAt = now;
+        note2.clientPlain = "";
+        note2.bullets = [];
       }
       row2.poc = "";
     });
@@ -844,6 +846,38 @@
       };
       GM_setValue(SHIFT_BRIDGE_GM_KEY, JSON.stringify(payload));
       state.lastAppliedBridgeShiftJson = fingerprintInvestigationShiftBridge(state.store);
+    } catch (e) {
+    }
+  }
+  function readShiftBridgeState() {
+    var out = { investigationShift: null, investigationShiftHistory: [] };
+    if (!hasGmShiftBridge()) return out;
+    var raw;
+    try {
+      raw = GM_getValue(SHIFT_BRIDGE_GM_KEY, null);
+    } catch (e) {
+      return out;
+    }
+    if (!raw) return out;
+    try {
+      var b = JSON.parse(raw);
+      if (!b || b.v !== 1) return out;
+      out.investigationShift = normalizeShiftActive(b.investigationShift);
+      out.investigationShiftHistory = Array.isArray(b.investigationShiftHistory) ? b.investigationShiftHistory.map(normalizeShiftHistoryEntry) : [];
+    } catch (e2) {
+    }
+    return out;
+  }
+  function writeShiftBridgeState(investigationShift, investigationShiftHistory) {
+    if (!hasGmShiftBridge()) return;
+    var payload = {
+      v: 1,
+      investigationShift: normalizeShiftActive(investigationShift),
+      investigationShiftHistory: Array.isArray(investigationShiftHistory) ? investigationShiftHistory.map(normalizeShiftHistoryEntry) : []
+    };
+    try {
+      GM_setValue(SHIFT_BRIDGE_GM_KEY, JSON.stringify(payload));
+      state.lastAppliedBridgeShiftJson = fingerprintInvestigationShiftBridge(payload);
     } catch (e) {
     }
   }
@@ -1247,9 +1281,9 @@
       return kindLabel + " shift";
     }
   }
-  function shouldTagNewBulletsWithShift(note) {
-    if (!note || !state.store.investigationShift || !state.store.investigationShift.id) return false;
-    var wm = note.workMode;
+  function shouldTagNewBulletsWithShift(note2) {
+    if (!note2 || !state.store.investigationShift || !state.store.investigationShift.id) return false;
+    var wm = note2.workMode;
     if (wm === "creation" || wm === "bugreval") return false;
     return true;
   }
@@ -1687,7 +1721,7 @@
       bar.appendChild(invBtn);
     }
   }
-  function appendNewBullet(note) {
+  function appendNewBullet(note2) {
     var defTag = loadSettings().defaultNewNoteTag;
     var b = {
       id: uid(),
@@ -1696,15 +1730,15 @@
       occurrences: 1,
       loggedAt: (/* @__PURE__ */ new Date()).toISOString()
     };
-    var activeSid = shouldTagNewBulletsWithShift(note) && state.store.investigationShift && state.store.investigationShift.id;
+    var activeSid = shouldTagNewBulletsWithShift(note2) && state.store.investigationShift && state.store.investigationShift.id;
     if (activeSid) b.investigationShiftId = activeSid;
-    else if (note.workMode === "investigation") b.contextKind = "investigation";
-    else if (note.workMode === "bugreval") b.contextKind = "bugreval";
-    else if (note.workMode === "creation") b.contextKind = "creation";
-    else if (note.workMode === "follow") {
+    else if (note2.workMode === "investigation") b.contextKind = "investigation";
+    else if (note2.workMode === "bugreval") b.contextKind = "bugreval";
+    else if (note2.workMode === "creation") b.contextKind = "creation";
+    else if (note2.workMode === "follow") {
       b.contextKind = state.store.investigationShift && state.store.investigationShift.id ? "investigation" : "creation";
     }
-    note.bullets.push(b);
+    note2.bullets.push(b);
     return b;
   }
   function wireShiftModalStorageSync() {
@@ -3289,12 +3323,12 @@
     if (raw.favorite) out.favorite = true;
     return out;
   }
-  function normalizeClientNoteItems(note) {
-    if (!note || typeof note !== "object") return [];
+  function normalizeClientNoteItems(note2) {
+    if (!note2 || typeof note2 !== "object") return [];
     var out = [];
     var seen = {};
-    var hasStructuredClientNotes = Array.isArray(note.clientNotes);
-    var list = hasStructuredClientNotes ? note.clientNotes : [];
+    var hasStructuredClientNotes = Array.isArray(note2.clientNotes);
+    var list = hasStructuredClientNotes ? note2.clientNotes : [];
     list.forEach(function(raw) {
       var item = normalizeClientNoteItem(raw);
       if (!item) return;
@@ -3308,21 +3342,21 @@
       out.push(item);
     });
     if (!hasStructuredClientNotes && !out.length) {
-      var legacy = String(note.clientPlain || "").trim();
-      if (!legacy && note.bullets && note.bullets[0]) legacy = String(note.bullets[0].text || "").trim();
+      var legacy = String(note2.clientPlain || "").trim();
+      if (!legacy && note2.bullets && note2.bullets[0]) legacy = String(note2.bullets[0].text || "").trim();
       if (legacy) {
         var migrated = normalizeClientNoteItem({
           title: "Migrated client note",
           slug: "migrated-client-note",
           body: legacy,
-          createdAt: note.updatedAt || (/* @__PURE__ */ new Date()).toISOString(),
-          updatedAt: note.updatedAt || (/* @__PURE__ */ new Date()).toISOString()
+          createdAt: note2.updatedAt || (/* @__PURE__ */ new Date()).toISOString(),
+          updatedAt: note2.updatedAt || (/* @__PURE__ */ new Date()).toISOString()
         });
         if (migrated) out.push(migrated);
       }
     }
-    note.clientNotes = out;
-    note.clientPlain = "";
+    note2.clientNotes = out;
+    note2.clientPlain = "";
     return out;
   }
   function serializeClientNotesMarkdown(items) {
@@ -3334,21 +3368,21 @@
     });
     return out.join("\n");
   }
-  function syncClientNotePlain(note) {
-    if (!note) return;
-    normalizeClientNoteItems(note);
-    note.clientPlain = "";
-    note.bullets = [];
+  function syncClientNotePlain(note2) {
+    if (!note2) return;
+    normalizeClientNoteItems(note2);
+    note2.clientPlain = "";
+    note2.bullets = [];
   }
-  function clientNotePlainForNote(note) {
-    if (!note || typeof note !== "object") return "";
-    return serializeClientNotesMarkdown(normalizeClientNoteItems(note));
+  function clientNotePlainForNote(note2) {
+    if (!note2 || typeof note2 !== "object") return "";
+    return serializeClientNotesMarkdown(normalizeClientNoteItems(note2));
   }
   function clientNoteItemsForClient(clientSlug) {
     var key = clientScopedNotesKey(clientSlug);
-    var note = state.store && state.store.notes ? state.store.notes[key] : null;
-    if (!note) return [];
-    return normalizeClientNoteItems(note);
+    var note2 = state.store && state.store.notes ? state.store.notes[key] : null;
+    if (!note2) return [];
+    return normalizeClientNoteItems(note2);
   }
   function clientNoteMapForClient(clientSlug) {
     var map = {};
@@ -3424,9 +3458,9 @@
     }
     return "background:#0f172a;color:#94a3b8;border:1px solid #334155;border-radius:6px;padding:4px 9px;cursor:pointer;font:10px monospace;";
   }
-  function persistClientNotes(editKey, note) {
-    if (state.store && state.store.notes) state.store.notes[editKey] = note;
-    syncClientNotePlain(note);
+  function persistClientNotes(editKey, note2) {
+    if (state.store && state.store.notes) state.store.notes[editKey] = note2;
+    syncClientNotePlain(note2);
     touchNote(editKey);
     saveStoreImmediate();
   }
@@ -3466,14 +3500,14 @@
   function storeNoteForEditKey(editKey) {
     return state.store && state.store.notes ? state.store.notes[editKey] : null;
   }
-  function mountClientNotesView(container, editKey, note) {
+  function mountClientNotesView(container, editKey, note2) {
     ensureClientNotesCss();
     flushPendingClientNoteEdits(editKey);
-    var needsLegacyPersist = !Array.isArray(note.clientNotes) && (!!String(note.clientPlain || "").trim() || !!(note.bullets && note.bullets[0] && String(note.bullets[0].text || "").trim()));
+    var needsLegacyPersist = !Array.isArray(note2.clientNotes) && (!!String(note2.clientPlain || "").trim() || !!(note2.bullets && note2.bullets[0] && String(note2.bullets[0].text || "").trim()));
     container.innerHTML = "";
     container.style.cssText = "display:flex;flex-direction:column;gap:10px;";
-    var items = normalizeClientNoteItems(note);
-    if (needsLegacyPersist) persistClientNotes(editKey, note);
+    var items = normalizeClientNoteItems(note2);
+    if (needsLegacyPersist) persistClientNotes(editKey, note2);
     var header = document.createElement("div");
     header.style.cssText = "display:flex;align-items:center;gap:8px;flex-wrap:wrap;";
     var title = document.createElement("div");
@@ -3493,7 +3527,7 @@
     var saveTimers = {};
     function saveAndRender() {
       flushPendingClientNoteEdits(editKey);
-      var latest = storeNoteForEditKey(editKey) || note;
+      var latest = storeNoteForEditKey(editKey) || note2;
       mountClientNotesView(container, editKey, latest);
     }
     function renderItem(item) {
@@ -3589,7 +3623,7 @@
           return;
         }
         if (confirmTimer) clearTimeout(confirmTimer);
-        note.clientNotes = (note.clientNotes || []).filter(function(x) {
+        note2.clientNotes = (note2.clientNotes || []).filter(function(x) {
           return x.id !== item.id;
         });
         kebabMenu.classList.remove("open");
@@ -3646,7 +3680,7 @@
       body.style.cssText = "width:100%;box-sizing:border-box;background:#020617;color:#cbd5e1;border:1px solid #334155;border-radius:8px;padding:8px;font:11px/1.5 monospace;resize:vertical;min-height:96px;";
       card.appendChild(body);
       function saveItem() {
-        var storeNote = storeNoteForEditKey(editKey) || note;
+        var storeNote = storeNoteForEditKey(editKey) || note2;
         var list2 = storeNote.clientNotes || [];
         var target = null;
         for (var i = 0; i < list2.length; i++) {
@@ -3705,8 +3739,8 @@
     }
     addBtn.addEventListener("click", function() {
       var now = (/* @__PURE__ */ new Date()).toISOString();
-      if (!Array.isArray(note.clientNotes)) note.clientNotes = [];
-      note.clientNotes.unshift({
+      if (!Array.isArray(note2.clientNotes)) note2.clientNotes = [];
+      note2.clientNotes.unshift({
         id: uid(),
         title: "New client note",
         slug: "new-client-note",
@@ -3865,8 +3899,8 @@
     container.innerHTML = "";
     var data = _hLoad();
     var events = (data[editKey] || []).slice().reverse();
-    var note = state.store && state.store.notes ? state.store.notes[editKey] : null;
-    var bullets = note && Array.isArray(note.bullets) ? note.bullets : [];
+    var note2 = state.store && state.store.notes ? state.store.notes[editKey] : null;
+    var bullets = note2 && Array.isArray(note2.bullets) ? note2.bullets : [];
     var bulletMeta = {};
     bullets.forEach(function(b) {
       if (!b || !b.id) return;
@@ -4340,7 +4374,7 @@
     function detectTerminalOutcomeFromPanel2() {
       try {
         var panel = document.getElementById("gitwolf-file-editor-panel") || document.body;
-        var txt = String(panel && (panel.innerText || panel.textContent) || "").toLowerCase();
+        var txt = String(panel && panel.textContent || "").toLowerCase();
         if (txt.indexOf("flow passed") !== -1) return "passed";
         if (txt.indexOf("flow stopped") !== -1) return "stopped";
         if (txt.indexOf("flow failed") !== -1) return "failed";
@@ -5062,9 +5096,9 @@
       return ldb.lineNo != null || (ldb.body || "").trim() !== "";
     });
   }
-  function maybePromoteStatusOpen(note) {
-    if (note.status === "empty" && bulletsHaveContent(note.bullets)) {
-      note.status = "open";
+  function maybePromoteStatusOpen(note2) {
+    if (note2.status === "empty" && bulletsHaveContent(note2.bullets)) {
+      note2.status = "open";
       var chip = state.panelEl ? state.panelEl.querySelector("[data-qaw-status-chip]") : null;
       if (chip) applyStatusChipVisual(chip, "open");
     }
@@ -6189,22 +6223,22 @@
     panel.style.top = Math.round(top) + "px";
   }
   function makeButton(label, title) {
-    var btn = document.createElement("button");
-    btn.type = "button";
-    btn.textContent = label;
-    btn.title = title;
-    btn.style.cssText = "font-size:11px;background:none;color:#94a3b8;border:1px solid #334155;border-radius:5px;padding:3px 8px;cursor:pointer;font-family:monospace;line-height:1.3;";
-    btn.addEventListener("mouseenter", function() {
-      btn.style.color = "#e2e8f0";
-      btn.style.borderColor = "#64748b";
-      btn.style.background = "#1e293b";
+    var btn2 = document.createElement("button");
+    btn2.type = "button";
+    btn2.textContent = label;
+    btn2.title = title;
+    btn2.style.cssText = "font-size:11px;background:none;color:#94a3b8;border:1px solid #334155;border-radius:5px;padding:3px 8px;cursor:pointer;font-family:monospace;line-height:1.3;";
+    btn2.addEventListener("mouseenter", function() {
+      btn2.style.color = "#e2e8f0";
+      btn2.style.borderColor = "#64748b";
+      btn2.style.background = "#1e293b";
     });
-    btn.addEventListener("mouseleave", function() {
-      btn.style.color = "#94a3b8";
-      btn.style.borderColor = "#334155";
-      btn.style.background = "none";
+    btn2.addEventListener("mouseleave", function() {
+      btn2.style.color = "#94a3b8";
+      btn2.style.borderColor = "#334155";
+      btn2.style.background = "none";
     });
-    return btn;
+    return btn2;
   }
   function restoreFloatingPanel(id) {
     var panel = activePanels[id];
@@ -6910,22 +6944,64 @@
     }
   });
 
+  // src/notes/51-status-resolver.ts
+  function reportLineNo(b) {
+    var n = b && b.lineNo != null && b.lineNo !== "" ? Math.floor(Number(b.lineNo)) : 0;
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  }
+  function hasOpenReport(report) {
+    return !!(report && report.url && !report.closed);
+  }
+  function deriveReportStatus(note2) {
+    if (!note2 || typeof note2 !== "object") return null;
+    var candidates = [];
+    if (hasOpenReport(note2.bugReport)) {
+      candidates.push({ status: "bugged", lineNo: 0 });
+    }
+    var bullets = Array.isArray(note2.bullets) ? note2.bullets : [];
+    bullets.forEach(function(b) {
+      if (!b || typeof b !== "object") return;
+      var lineNo = reportLineNo(b);
+      if (hasOpenReport(b.bugReport)) candidates.push({ status: "bugged", lineNo });
+      if (hasOpenReport(b.maintenanceReport)) candidates.push({ status: "maintenance", lineNo });
+    });
+    if (!candidates.length) return null;
+    candidates.sort(function(a, b) {
+      if (a.lineNo !== b.lineNo) return a.lineNo - b.lineNo;
+      if (a.status === b.status) return 0;
+      return a.status === "bugged" ? -1 : 1;
+    });
+    return candidates[0].status;
+  }
+  function resolveNoteStatusFromReports(note2) {
+    var reportStatus = deriveReportStatus(note2);
+    if (reportStatus) return reportStatus;
+    var current = String(note2 && note2.status || "").trim();
+    if (!current || current === "empty" || current === "bugged" || current === "maintenance") return "open";
+    return current;
+  }
+  function recomputeNoteStatusFromReports(note2) {
+    var next = resolveNoteStatusFromReports(note2);
+    if (note2 && typeof note2 === "object") note2.status = next;
+    return next;
+  }
+  var init_status_resolver = __esm({
+    "src/notes/51-status-resolver.ts"() {
+      "use strict";
+    }
+  });
+
   // src/notes/21-bug-logic.ts
   function autoSetStatusBugged(n, statusChip) {
-    if (n.status === "bugged") return;
-    n.status = "bugged";
-    if (statusChip) applyStatusChipVisual(statusChip, "bugged");
+    var prev = n.status;
+    var next = recomputeNoteStatusFromReports(n);
+    if (statusChip && next !== prev) applyStatusChipVisual(statusChip, next);
   }
   function maybeRevertStatusOpen(n) {
-    if (n.status !== "bugged") return;
-    var bullets = Array.isArray(n.bullets) ? n.bullets : [];
-    var hasOpenBug = bullets.some(function(b) {
-      return b.bugReport && b.bugReport.url && !b.bugReport.closed;
-    });
-    if (hasOpenBug) return;
-    n.status = "open";
+    var prev = n.status;
+    var next = recomputeNoteStatusFromReports(n);
     var chip = state.panelEl ? state.panelEl.querySelector("[data-qaw-status-chip]") : null;
-    if (chip) applyStatusChipVisual(chip, "open");
+    if (chip && next !== prev) applyStatusChipVisual(chip, next);
   }
   function scrapeBugReport(url, scrapeId) {
     var sw = Math.min(960, window.screen.width - 40);
@@ -7035,6 +7111,7 @@
       init_context();
       init_history();
       init_head();
+      init_status_resolver();
       BUG_SCRAPE_LS_KEY = "_qawBugScrapeResult";
     }
   });
@@ -7045,20 +7122,15 @@
     return m ? m[1] : String(url || "");
   }
   function autoSetStatusMaintenance(n, statusChip) {
-    if (n.status === "maintenance") return;
-    n.status = "maintenance";
-    if (statusChip) applyStatusChipVisual(statusChip, "maintenance");
+    var prev = n.status;
+    var next = recomputeNoteStatusFromReports(n);
+    if (statusChip && next !== prev) applyStatusChipVisual(statusChip, next);
   }
   function maybeRevertMaintenanceStatusOpen(n) {
-    if (n.status !== "maintenance") return;
-    var bullets = Array.isArray(n.bullets) ? n.bullets : [];
-    var hasOpenMaint = bullets.some(function(b) {
-      return b.tag === "maintenance" && b.maintenanceReport && b.maintenanceReport.url && !b.maintenanceReport.closed;
-    });
-    if (hasOpenMaint) return;
-    n.status = "open";
+    var prev = n.status;
+    var next = recomputeNoteStatusFromReports(n);
     var chip = state.panelEl ? state.panelEl.querySelector("[data-qaw-status-chip]") : null;
-    if (chip) applyStatusChipVisual(chip, "open");
+    if (chip && next !== prev) applyStatusChipVisual(chip, next);
   }
   function scrapeMaintenanceReport(url, scrapeId) {
     var sw = Math.min(960, window.screen.width - 40);
@@ -7157,6 +7229,7 @@
       init_context();
       init_history();
       init_head();
+      init_status_resolver();
       MAINTENANCE_SCRAPE_LS_KEY = "_qawMaintenanceScrapeResult";
     }
   });
@@ -8228,9 +8301,9 @@
             clearStatusBtn.textContent = "Clear bug status";
             clearStatusBtn.style.cssText = "background:#1e293b;color:#cbd5e1;border:1px solid #334155;border-radius:5px;padding:2px 7px;cursor:pointer;font-size:10px;font-family:monospace;";
             clearStatusBtn.addEventListener("click", function() {
-              var note = state.store && state.store.notes ? state.store.notes[ek] : null;
-              if (!note) return;
-              note.status = "open";
+              var note2 = state.store && state.store.notes ? state.store.notes[ek] : null;
+              if (!note2) return;
+              note2.status = "open";
               saveStoreImmediate();
               renderList();
             });
@@ -9937,21 +10010,21 @@
     hint.textContent = "Facets";
     drop.appendChild(hint);
     matches.forEach(function(facet, idx) {
-      var btn = document.createElement("button");
-      btn.type = "button";
-      btn.setAttribute("data-qaw-facet-ac-item", facet);
-      btn.style.cssText = "display:block;width:100%;text-align:left;padding:5px 9px;border:none;border-radius:3px;cursor:pointer;font-size:11px;font-family:monospace;background:transparent;color:#cbd5e1;";
-      btn.textContent = "#" + facet;
-      btn.addEventListener("mousedown", function(e) {
+      var btn2 = document.createElement("button");
+      btn2.type = "button";
+      btn2.setAttribute("data-qaw-facet-ac-item", facet);
+      btn2.style.cssText = "display:block;width:100%;text-align:left;padding:5px 9px;border:none;border-radius:3px;cursor:pointer;font-size:11px;font-family:monospace;background:transparent;color:#cbd5e1;";
+      btn2.textContent = "#" + facet;
+      btn2.addEventListener("mousedown", function(e) {
         e.preventDefault();
         e.stopPropagation();
         pickFacetAutocomplete(facet);
       });
-      btn.addEventListener("mouseenter", function() {
+      btn2.addEventListener("mouseenter", function() {
         activePickIndex = idx;
         paintFacetAutocompleteItems();
       });
-      drop.appendChild(btn);
+      drop.appendChild(btn2);
     });
     document.body.appendChild(drop);
     var top = anchorRect.bottom + 4;
@@ -10220,11 +10293,11 @@
     var currentId = String(currentBullet && currentBullet.id || "");
     var results = [];
     Object.keys(store.notes).forEach(function(editKey) {
-      var note = store.notes[editKey];
+      var note2 = store.notes[editKey];
       var meta = parseNoteKey(editKey);
-      if (!note || !meta || !Array.isArray(note.bullets)) return;
-      for (var i = 0; i < note.bullets.length; i++) {
-        var b = note.bullets[i];
+      if (!note2 || !meta || !Array.isArray(note2.bullets)) return;
+      for (var i = 0; i < note2.bullets.length; i++) {
+        var b = note2.bullets[i];
         if (!b || b.tag !== "helper") continue;
         if (editKey === currentEditKey && currentId && String(b.id || "") === currentId) continue;
         if (helperRelationKey(b) !== targetKey) continue;
@@ -10343,15 +10416,15 @@
     dup.copiedAt = now;
     return dup;
   }
-  function applyCurrentContextToCarriedBullet(note, bullet) {
+  function applyCurrentContextToCarriedBullet(note2, bullet) {
     delete bullet.contextKind;
     delete bullet.investigationShiftId;
-    var activeSid = shouldTagNewBulletsWithShift(note) && state.store.investigationShift && state.store.investigationShift.id;
+    var activeSid = shouldTagNewBulletsWithShift(note2) && state.store.investigationShift && state.store.investigationShift.id;
     if (activeSid) bullet.investigationShiftId = activeSid;
-    else if (note.workMode === "investigation") bullet.contextKind = "investigation";
-    else if (note.workMode === "bugreval") bullet.contextKind = "bugreval";
-    else if (note.workMode === "creation") bullet.contextKind = "creation";
-    else if (note.workMode === "follow") {
+    else if (note2.workMode === "investigation") bullet.contextKind = "investigation";
+    else if (note2.workMode === "bugreval") bullet.contextKind = "bugreval";
+    else if (note2.workMode === "creation") bullet.contextKind = "creation";
+    else if (note2.workMode === "follow") {
       bullet.contextKind = state.store.investigationShift && state.store.investigationShift.id ? "investigation" : "creation";
     }
   }
@@ -10549,6 +10622,8 @@
         row2.addEventListener("click", function() {
           closeDropdown();
           b.bugReport = { url: String(entry.reportUrl || ""), number: String(entry.number || ""), title: String(entry.title || "") };
+          var bugNote = state.store && state.store.notes ? state.store.notes[editKey] : null;
+          if (bugNote) recomputeNoteStatusFromReports(bugNote);
           persist();
           recordHistoryEvent(editKey, {
             type: "bug_add",
@@ -10731,23 +10806,23 @@
     }
     var btnStyle2 = "display:block;width:100%;text-align:left;padding:6px 10px;border:none;background:transparent;color:#e2e8f0;cursor:pointer;font-size:11px;font-family:monospace;border-radius:3px;";
     function addButton(label, onClick) {
-      var btn = document.createElement("button");
-      btn.type = "button";
-      btn.style.cssText = btnStyle2;
-      btn.textContent = label;
-      btn.addEventListener("mouseenter", function() {
-        btn.style.background = "#1e293b";
+      var btn2 = document.createElement("button");
+      btn2.type = "button";
+      btn2.style.cssText = btnStyle2;
+      btn2.textContent = label;
+      btn2.addEventListener("mouseenter", function() {
+        btn2.style.background = "#1e293b";
       });
-      btn.addEventListener("mouseleave", function() {
-        btn.style.background = "transparent";
+      btn2.addEventListener("mouseleave", function() {
+        btn2.style.background = "transparent";
       });
-      btn.addEventListener("click", function(e) {
+      btn2.addEventListener("click", function(e) {
         e.stopPropagation();
         onClick();
         drop.remove();
         document.removeEventListener("mousedown", onOutside, true);
       });
-      drop.appendChild(btn);
+      drop.appendChild(btn2);
     }
     addButton("Revalidate now", function() {
       b.lastRevalidatedAt = (/* @__PURE__ */ new Date()).toISOString();
@@ -10765,10 +10840,8 @@
       if (!b.bugReport) b.bugReport = {};
       b.bugReport.closed = !isClosed;
       b.favorite = isClosed ? true : false;
-      if (!isClosed) {
-        var n = state.store && state.store.notes ? state.store.notes[editKey] : null;
-        if (n) maybeRevertStatusOpen(n);
-      }
+      var n = state.store && state.store.notes ? state.store.notes[editKey] : null;
+      if (n) maybeRevertStatusOpen(n);
       persist();
       redraw({});
       recordHistoryEvent(editKey, {
@@ -10793,8 +10866,8 @@
     var activeClient = noteMeta ? noteMeta.client : "";
     var bulletId = String(bullet && bullet.id || "");
     function resolveBullet() {
-      var note = state.store && state.store.notes ? state.store.notes[editKey] : null;
-      var bullets = note && Array.isArray(note.bullets) ? note.bullets : [];
+      var note2 = state.store && state.store.notes ? state.store.notes[editKey] : null;
+      var bullets = note2 && Array.isArray(note2.bullets) ? note2.bullets : [];
       for (var i = 0; i < bullets.length; i++) {
         if (String(bullets[i] && bullets[i].id || "") === bulletId) return bullets[i];
       }
@@ -10979,22 +11052,22 @@
     }
     var btnBase = "display:block;width:100%;text-align:left;padding:6px 10px;border:none;background:transparent;cursor:pointer;font-size:11px;font-family:monospace;border-radius:3px;";
     function addItem(label, color, onClick) {
-      var btn = document.createElement("button");
-      btn.type = "button";
-      btn.style.cssText = btnBase + "color:" + color + ";";
-      btn.textContent = label;
-      btn.addEventListener("mouseenter", function() {
-        btn.style.background = "#1e293b";
+      var btn2 = document.createElement("button");
+      btn2.type = "button";
+      btn2.style.cssText = btnBase + "color:" + color + ";";
+      btn2.textContent = label;
+      btn2.addEventListener("mouseenter", function() {
+        btn2.style.background = "#1e293b";
       });
-      btn.addEventListener("mouseleave", function() {
-        btn.style.background = "transparent";
+      btn2.addEventListener("mouseleave", function() {
+        btn2.style.background = "transparent";
       });
-      btn.addEventListener("click", function(e) {
+      btn2.addEventListener("click", function(e) {
         e.stopPropagation();
         closeDropdown();
         onClick();
       });
-      drop.appendChild(btn);
+      drop.appendChild(btn2);
     }
     addItem("Open Case \u2192", "#93c5fd", function() {
       if (caseObj) openCaseDetailModal(caseObj, editKey);
@@ -11047,24 +11120,24 @@
       if (e.key === "Escape") closeDropdown();
     }
     function addItem(label, color, onClick, disabled) {
-      var btn = document.createElement("button");
-      btn.type = "button";
-      btn.disabled = !!disabled;
-      btn.style.cssText = "display:block;width:100%;text-align:left;background:transparent;border:none;border-radius:5px;padding:7px 9px;cursor:" + (disabled ? "default" : "pointer") + ";color:" + color + ";font:11px monospace;opacity:" + (disabled ? "0.55" : "1") + ";";
-      btn.textContent = label;
-      btn.addEventListener("mouseenter", function() {
-        if (!disabled) btn.style.background = "#1e293b";
+      var btn2 = document.createElement("button");
+      btn2.type = "button";
+      btn2.disabled = !!disabled;
+      btn2.style.cssText = "display:block;width:100%;text-align:left;background:transparent;border:none;border-radius:5px;padding:7px 9px;cursor:" + (disabled ? "default" : "pointer") + ";color:" + color + ";font:11px monospace;opacity:" + (disabled ? "0.55" : "1") + ";";
+      btn2.textContent = label;
+      btn2.addEventListener("mouseenter", function() {
+        if (!disabled) btn2.style.background = "#1e293b";
       });
-      btn.addEventListener("mouseleave", function() {
-        btn.style.background = "transparent";
+      btn2.addEventListener("mouseleave", function() {
+        btn2.style.background = "transparent";
       });
-      btn.addEventListener("click", function(e) {
+      btn2.addEventListener("click", function(e) {
         e.stopPropagation();
         if (disabled) return;
         closeDropdown();
         onClick();
       });
-      drop.appendChild(btn);
+      drop.appendChild(btn2);
     }
     addItem(caseObj ? "Case: manage \u2192" : "Case: link \u2192", "#93c5fd", function() {
       if (caseObj) openCaseLinkedDropdown(anchor, bullet, editKey, persist, redraw);
@@ -11354,11 +11427,11 @@
     header.appendChild(titleInput);
     CASE_STATUS_OPTIONS.forEach(function(s) {
       var isActive = String(caseObj.status || "open") === s;
-      var btn = document.createElement("button");
-      btn.type = "button";
-      btn.textContent = s;
-      btn.style.cssText = "padding:3px 10px;font-size:10px;font-family:monospace;border-radius:999px;cursor:pointer;transition:none;" + (isActive ? s === "open" ? "background:#052e16;color:#4ade80;border:1px solid #166534;" : "background:#1e293b;color:#94a3b8;border:1px solid #475569;" : "background:transparent;color:#475569;border:1px solid transparent;");
-      btn.addEventListener("click", function() {
+      var btn2 = document.createElement("button");
+      btn2.type = "button";
+      btn2.textContent = s;
+      btn2.style.cssText = "padding:3px 10px;font-size:10px;font-family:monospace;border-radius:999px;cursor:pointer;transition:none;" + (isActive ? s === "open" ? "background:#052e16;color:#4ade80;border:1px solid #166534;" : "background:#1e293b;color:#94a3b8;border:1px solid #475569;" : "background:transparent;color:#475569;border:1px solid transparent;");
+      btn2.addEventListener("click", function() {
         if (caseObj.status === s) return;
         var prev = String(caseObj.status || "open");
         caseObj.status = s;
@@ -11368,7 +11441,7 @@
         closeModal();
         openCaseDetailModal(caseObj, editKey);
       });
-      header.appendChild(btn);
+      header.appendChild(btn2);
     });
     var scopeBadge = document.createElement("span");
     scopeBadge.style.cssText = "font-size:10px;color:#94a3b8;flex-shrink:0;";
@@ -12695,6 +12768,8 @@
             e.stopPropagation();
             var prevBug = b.bugReport;
             delete b.bugReport;
+            var bugNote2 = state.store && state.store.notes ? state.store.notes[editKey] : null;
+            if (bugNote2) recomputeNoteStatusFromReports(bugNote2);
             persist();
             redraw({});
             if (prevBug && prevBug.url) {
@@ -12759,10 +12834,8 @@
               if (!b.maintenanceReport) b.maintenanceReport = {};
               b.maintenanceReport.closed = !maintIsClosed;
               b.favorite = maintIsClosed;
-              if (!maintIsClosed) {
-                var maintNote = state.store && state.store.notes ? state.store.notes[editKey] : null;
-                if (maintNote) maybeRevertMaintenanceStatusOpen(maintNote);
-              }
+              var maintNote = state.store && state.store.notes ? state.store.notes[editKey] : null;
+              if (maintNote) maybeRevertMaintenanceStatusOpen(maintNote);
               dropMenu.remove();
               document.removeEventListener("mousedown", closeMaintDrop, true);
               persist();
@@ -14126,9 +14199,9 @@
       saveBtn.focus();
     }, 0);
   }
-  function ensureImageUploadMap(note) {
-    if (!note.imageUploads || typeof note.imageUploads !== "object") note.imageUploads = {};
-    return note.imageUploads;
+  function ensureImageUploadMap(note2) {
+    if (!note2.imageUploads || typeof note2.imageUploads !== "object") note2.imageUploads = {};
+    return note2.imageUploads;
   }
   async function uploadToCloudinary(cloudName, uploadPreset, dataUrl, title) {
     var res = await gmRequest({
@@ -14221,25 +14294,25 @@
     menu.setAttribute("data-qaw-line-dropdown", "1");
     menu.style.cssText = "position:fixed;z-index:2147483020;background:#0f172a;border:1px solid #475569;border-radius:6px;padding:3px;min-width:140px;box-shadow:0 4px 14px rgba(0,0,0,0.6);";
     function menuItem(label, icon, disabled, onClick) {
-      var btn = document.createElement("button");
-      btn.type = "button";
-      btn.style.cssText = "display:flex;align-items:center;gap:7px;width:100%;text-align:left;padding:5px 9px;border:none;border-radius:3px;cursor:" + (disabled ? "default" : "pointer") + ";font-size:11px;font-family:monospace;background:transparent;color:" + (disabled ? "#475569" : "#cbd5e1") + ";";
-      btn.innerHTML = '<span style="font-size:12px;line-height:1">' + icon + "</span><span>" + label + "</span>";
+      var btn2 = document.createElement("button");
+      btn2.type = "button";
+      btn2.style.cssText = "display:flex;align-items:center;gap:7px;width:100%;text-align:left;padding:5px 9px;border:none;border-radius:3px;cursor:" + (disabled ? "default" : "pointer") + ";font-size:11px;font-family:monospace;background:transparent;color:" + (disabled ? "#475569" : "#cbd5e1") + ";";
+      btn2.innerHTML = '<span style="font-size:12px;line-height:1">' + icon + "</span><span>" + label + "</span>";
       if (!disabled) {
-        btn.addEventListener("mouseenter", function() {
-          btn.style.background = "#1e293b";
+        btn2.addEventListener("mouseenter", function() {
+          btn2.style.background = "#1e293b";
         });
-        btn.addEventListener("mouseleave", function() {
-          btn.style.background = "transparent";
+        btn2.addEventListener("mouseleave", function() {
+          btn2.style.background = "transparent";
         });
-        btn.addEventListener("click", function(e) {
+        btn2.addEventListener("click", function(e) {
           e.stopPropagation();
           menu.remove();
           document.removeEventListener("mousedown", closeOnOutside, true);
           onClick();
         });
       }
-      return btn;
+      return btn2;
     }
     var hasContext = !!(b.lineContext && b.lineContext.code);
     menu.appendChild(menuItem("Go to line", "\u2197", false, function() {
@@ -15162,6 +15235,57 @@
     swatch.title = rgbText;
     return swatch;
   }
+  function formatLocatorPopoverText(raw) {
+    var s = String(raw || "").replace(/\s+/g, " ").trim();
+    if (!s) return "";
+    var parts = [];
+    var start = 0;
+    var quote = "";
+    var escaping = false;
+    function isIdentStart(ch2) {
+      return /[A-Za-z_$]/.test(ch2);
+    }
+    function isIdentPart(ch2) {
+      return /[A-Za-z0-9_$]/.test(ch2);
+    }
+    function isChainDotAt(idx) {
+      if (s.charAt(idx) !== ".") return false;
+      var j = idx + 1;
+      if (!isIdentStart(s.charAt(j))) return false;
+      j++;
+      while (j < s.length && isIdentPart(s.charAt(j))) j++;
+      while (j < s.length && /\s/.test(s.charAt(j))) j++;
+      return s.charAt(j) === "(";
+    }
+    for (var i = 0; i < s.length; i++) {
+      var ch = s.charAt(i);
+      if (quote) {
+        if (escaping) {
+          escaping = false;
+        } else if (ch === "\\") {
+          escaping = true;
+        } else if (ch === quote) {
+          quote = "";
+        }
+        continue;
+      }
+      if (ch === '"' || ch === "'" || ch === "`") {
+        quote = ch;
+        continue;
+      }
+      if (isChainDotAt(i)) {
+        var part = s.slice(start, i).trim();
+        if (part) parts.push(part);
+        start = i;
+      }
+    }
+    var tail = s.slice(start).trim();
+    if (tail) parts.push(tail);
+    if (parts.length <= 1) return s;
+    return parts.map(function(part2, idx) {
+      return idx === 0 ? part2 : "  " + part2;
+    }).join("\n");
+  }
   function copyLocatorText(full) {
     if (!full) return;
     if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -15210,7 +15334,7 @@
     ].join(";");
     var textBtn = document.createElement("button");
     textBtn.type = "button";
-    textBtn.style.cssText = "display:flex;align-items:center;gap:7px;min-width:0;text-align:left;background:#020617;color:#c7d2fe;border:1px solid #334155;border-radius:6px;padding:7px 8px;font:11px/1.4 monospace;cursor:pointer;";
+    textBtn.style.cssText = "display:flex;align-items:flex-start;gap:7px;min-width:0;text-align:left;background:#020617;color:#c7d2fe;border:1px solid #334155;border-radius:6px;padding:7px 8px;font:11px/1.4 monospace;cursor:pointer;";
     var copyIcon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
     copyIcon.setAttribute("width", "13");
     copyIcon.setAttribute("height", "13");
@@ -15220,11 +15344,11 @@
     copyIcon.setAttribute("stroke-width", "2");
     copyIcon.setAttribute("stroke-linecap", "round");
     copyIcon.setAttribute("stroke-linejoin", "round");
-    copyIcon.style.cssText = "flex:0 0 auto;color:#93c5fd;";
+    copyIcon.style.cssText = "flex:0 0 auto;color:#93c5fd;margin-top:1px;";
     copyIcon.innerHTML = '<rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>';
     var locatorText = document.createElement("span");
-    locatorText.textContent = full;
-    locatorText.style.cssText = "white-space:nowrap;overflow:auto;min-width:0;flex:1 1 auto;";
+    locatorText.textContent = formatLocatorPopoverText(full);
+    locatorText.style.cssText = "white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;min-width:0;flex:1 1 auto;";
     textBtn.appendChild(copyIcon);
     textBtn.appendChild(locatorText);
     textBtn.addEventListener("click", function(e) {
@@ -15596,6 +15720,7 @@
       init_maintenance_logic();
       init_bugs_tab();
       init_note_llm_chat();
+      init_status_resolver();
       init_reminder_utils();
       init_shift();
       init_store();
@@ -15798,11 +15923,11 @@
     return playgroundRows;
   }
   function makeButton2(label, kind) {
-    var btn = document.createElement("button");
-    btn.type = "button";
-    btn.textContent = label;
-    btn.style.cssText = kind === "primary" ? "padding:6px 12px;border-radius:8px;border:1px solid #38bdf8;background:#0ea5e9;color:#0f172a;font-weight:700;cursor:pointer;font-size:11px;font-family:monospace;" : "padding:6px 12px;border-radius:8px;border:1px solid #475569;background:#1e293b;color:#e2e8f0;cursor:pointer;font-size:11px;font-family:monospace;";
-    return btn;
+    var btn2 = document.createElement("button");
+    btn2.type = "button";
+    btn2.textContent = label;
+    btn2.style.cssText = kind === "primary" ? "padding:6px 12px;border-radius:8px;border:1px solid #38bdf8;background:#0ea5e9;color:#0f172a;font-weight:700;cursor:pointer;font-size:11px;font-family:monospace;" : "padding:6px 12px;border-radius:8px;border:1px solid #475569;background:#1e293b;color:#e2e8f0;cursor:pointer;font-size:11px;font-family:monospace;";
+    return btn2;
   }
   function loadLeftColumnWidth() {
     var raw = 0;
@@ -15926,8 +16051,8 @@
     });
     return handle;
   }
-  function renderExplanationCell(container, note) {
-    var b = note.bullets && note.bullets[0] ? note.bullets[0] : {};
+  function renderExplanationCell(container, note2) {
+    var b = note2.bullets && note2.bullets[0] ? note2.bullets[0] : {};
     var meta = b.parserGallery || {};
     container.style.cssText = "min-width:0;border-right:1px solid #1e293b;background:#020617;color:#94a3b8;font:10px/1.45 monospace;padding:10px;box-sizing:border-box;overflow:auto;";
     container.innerHTML = '<div style="font-size:12px;font-weight:700;color:#f8fafc;margin-bottom:6px;">' + escHtml3(meta.label || "Example") + '</div><pre style="white-space:pre-wrap;word-break:break-word;margin:0;color:#64748b;font:10px/1.4 monospace;">' + escHtml3(meta.raw || "") + "</pre>";
@@ -16628,9 +16753,9 @@
       text: "About image export \u2197",
       modal: `<b>Image export (Cloudinary)</b><br><br>When you export a note image it's uploaded here and a shareable link is copied to your clipboard.<br><br>Pre-filled with the <b>shared team account</b> \u2014 no action needed.<br><br>If you'd prefer your own account, create a free one at <a href="https://cloudinary.com" target="_blank" style="color:#818cf8">cloudinary.com \u2197</a>, then <a href="#" data-qaw-enable-cloudinary style="color:#818cf8">click here to enter your own values</a>.`,
       onShow: function(pop) {
-        var btn = pop.querySelector("[data-qaw-enable-cloudinary]");
-        if (!btn) return;
-        btn.addEventListener("click", function(e) {
+        var btn2 = pop.querySelector("[data-qaw-enable-cloudinary]");
+        if (!btn2) return;
+        btn2.addEventListener("click", function(e) {
           e.preventDefault();
           cloudNameInp.disabled = false;
           cloudNameInp.style.opacity = "";
@@ -16997,8 +17122,8 @@
     }
     var hasThrow = /throw new Error\s*\(\s*['"`]debug/.test(lineContent);
     var ek = getActiveNoteKey();
-    var note = ek && state.store.notes[ek];
-    var watchLines = note && note.watchLines || [];
+    var note2 = ek && state.store.notes[ek];
+    var watchLines = note2 && note2.watchLines || [];
     var isTracked = watchLines.indexOf(lineNo) !== -1;
     var menu = document.createElement("div");
     gutterMenuEl = menu;
@@ -17023,7 +17148,7 @@
     var divider = document.createElement("div");
     divider.style.cssText = "height:1px;background:#334155;margin:0;";
     menu.appendChild(divider);
-    var allBullets = note && note.bullets || [];
+    var allBullets = note2 && note2.bullets || [];
     var noteBullets = allBullets.filter(function(b) {
       return Number(b.lineNo) === lineNo;
     });
@@ -17117,9 +17242,9 @@
     if (!ek) return;
     var parts = ek.split("");
     if (parts.length < 3) return;
-    var note = getOrCreateNote(parts[0], parts[1], parts[2]);
-    if (!note) return;
-    var b = appendNewBullet(note);
+    var note2 = getOrCreateNote(parts[0], parts[1], parts[2]);
+    if (!note2) return;
+    var b = appendNewBullet(note2);
     b.lineNo = lineNo;
     if (tag) b.tag = tag;
     var _ctx = captureLineContext(lineNo);
@@ -17132,7 +17257,7 @@
       bulletText: "",
       timestampId: b.id || ""
     });
-    var bulletIdx = note.bullets.indexOf(b);
+    var bulletIdx = note2.bullets.indexOf(b);
     state.pendingEditEntry = { editKey: ek, bulletIdx };
     if (!state.panelEl || !document.body.contains(state.panelEl)) {
       if (typeof state.openPanelFn === "function") state.openPanelFn();
@@ -17353,9 +17478,9 @@
     if (!ek) return;
     var ctx = ek.split("");
     if (ctx.length < 3) return;
-    var note = getOrCreateNote(ctx[0], ctx[1], ctx[2]);
-    if (!note) return;
-    var lines = note.watchLines ? note.watchLines.slice() : [];
+    var note2 = getOrCreateNote(ctx[0], ctx[1], ctx[2]);
+    if (!note2) return;
+    var lines = note2.watchLines ? note2.watchLines.slice() : [];
     var idx = lines.indexOf(lineNo);
     if (idx !== -1) {
       lines.splice(idx, 1);
@@ -17368,7 +17493,7 @@
         Notification.requestPermission();
       }
     }
-    note.watchLines = lines;
+    note2.watchLines = lines;
     saveStoreImmediate();
     stampWatchedLineNumbers();
   }
@@ -17463,21 +17588,21 @@
   }
   function stampWatchedLineNumbers() {
     var ek = getActiveNoteKey();
-    var note = ek && state.store && state.store.notes[ek];
-    var watchLines = note && note.watchLines || [];
+    var note2 = ek && state.store && state.store.notes[ek];
+    var watchLines = note2 && note2.watchLines || [];
     var noteRefColors = {};
     var noteRefHasBug = {};
     var noteRefBugActive = {};
-    if (note && note.bullets) {
-      for (var j = 0; j < note.bullets.length; j++) {
-        var b = note.bullets[j];
+    if (note2 && note2.bullets) {
+      for (var j = 0; j < note2.bullets.length; j++) {
+        var b = note2.bullets[j];
         var ln = Number(b.lineNo);
         if (ln > 0 && !noteRefColors[ln]) {
           noteRefColors[ln] = TAG_PILL_BG[b.tag] || "#a78bfa";
         }
       }
-      for (var j2 = 0; j2 < note.bullets.length; j2++) {
-        var bb = note.bullets[j2];
+      for (var j2 = 0; j2 < note2.bullets.length; j2++) {
+        var bb = note2.bullets[j2];
         if (bb.tag !== "bug") continue;
         var ln2 = Number(bb.lineNo);
         if (ln2 <= 0) continue;
@@ -17552,22 +17677,22 @@
     refreshWatchLineCountInPanel(watchLines);
   }
   function clearWatchLines(editKey) {
-    var note = state.store && state.store.notes[editKey];
-    if (!note) return;
-    note.watchLines = [];
+    var note2 = state.store && state.store.notes[editKey];
+    if (!note2) return;
+    note2.watchLines = [];
     saveStoreImmediate();
     stampWatchedLineNumbers();
   }
   function refreshWatchLineCountInPanel(watchLines) {
     if (!state.panelEl) return;
-    var btn = state.panelEl.querySelector("[data-qaw-watch-count-btn]");
-    if (!btn) return;
+    var btn2 = state.panelEl.querySelector("[data-qaw-watch-count-btn]");
+    if (!btn2) return;
     var count = watchLines.length;
     if (count === 0) {
-      btn.style.display = "none";
+      btn2.style.display = "none";
     } else {
-      btn.style.display = "";
-      btn.textContent = "\u26A1 " + count + " tracked";
+      btn2.style.display = "";
+      btn2.textContent = "\u26A1 " + count + " tracked";
     }
   }
   function ensureWatchLineIndicators() {
@@ -17686,8 +17811,8 @@
     if (!overlayEl) return;
     state.softBreakpointObserver = new MutationObserver(function(mutations) {
       var ek = getActiveNoteKey();
-      var note = ek && state.store && state.store.notes[ek];
-      var watchLines = note && note.watchLines || [];
+      var note2 = ek && state.store && state.store.notes[ek];
+      var watchLines = note2 && note2.watchLines || [];
       var meta = ek ? parseNoteKey(ek) : null;
       var fn = meta && meta.fileName || "";
       var eds2 = getMonacoEditorsFromWindow();
@@ -17883,8 +18008,8 @@
     }
     return "";
   }
-  function noteStatus(note) {
-    var s = String(note && note.status || "empty").toLowerCase();
+  function noteStatus(note2) {
+    var s = String(note2 && note2.status || "empty").toLowerCase();
     return STATUS_OPTIONS.indexOf(s) !== -1 ? s : "empty";
   }
   function dayKeysForRange(range) {
@@ -17910,7 +18035,7 @@
     if (!allowed) return true;
     return allowed.has(getDayKey(getBulletLoggedAt(b)));
   }
-  function bulletSearchHaystack(editKey, note, b) {
+  function bulletSearchHaystack(editKey, note2, b) {
     var m = parseNoteKey(editKey);
     var parts = [];
     if (m) {
@@ -17935,7 +18060,7 @@
       var c = state.store.casesById[b.caseId];
       if (c) parts.push(String(c.title || ""));
     }
-    if (note && note.clientNotes) parts.push(clientNotePlainForNote(note));
+    if (note2 && note2.clientNotes) parts.push(clientNotePlainForNote(note2));
     return parts.join(" ").toLowerCase();
   }
   function collectDiscoverHits(query, dayRange) {
@@ -17943,19 +18068,19 @@
     var hits = [];
     var scanned = 0;
     Object.keys(state.store.notes || {}).forEach(function(editKey) {
-      var note = state.store.notes[editKey];
-      if (!note || !Array.isArray(note.bullets)) return;
-      note.bullets.forEach(function(b, idx) {
+      var note2 = state.store.notes[editKey];
+      if (!note2 || !Array.isArray(note2.bullets)) return;
+      note2.bullets.forEach(function(b, idx) {
         if (!b || scanned >= MAX_BULLETS_SCAN) return;
         scanned++;
         if (!bulletMatchesDay(b, dayRange)) return;
-        if (q && bulletSearchHaystack(editKey, note, b).indexOf(q) === -1) return;
+        if (q && bulletSearchHaystack(editKey, note2, b).indexOf(q) === -1) return;
         hits.push({
           editKey,
           bulletId: String(b.id || ""),
           bulletIdx: idx,
           bullet: b,
-          note,
+          note: note2,
           loggedAt: getBulletLoggedAt(b) || ""
         });
       });
@@ -18012,8 +18137,8 @@
     Object.keys(state.store.notes || {}).forEach(function(editKey) {
       var m = parseNoteKey(editKey);
       if (!m || m.client !== currentClient) return;
-      var note = state.store.notes[editKey];
-      var bulletCount = note && Array.isArray(note.bullets) ? note.bullets.length : 0;
+      var note2 = state.store.notes[editKey];
+      var bulletCount = note2 && Array.isArray(note2.bullets) ? note2.bullets.length : 0;
       if (!bulletCount) return;
       if (!map[m.envId]) {
         map[m.envId] = {
@@ -18555,8 +18680,8 @@
       if (collapsedClients[client] !== void 0) return !collapsedClients[client];
       return isCurrent;
     }
-    function paintChip(btn, on, accent) {
-      btn.style.cssText = "font-family:monospace;font-size:10px;font-weight:600;padding:2px 8px;border-radius:999px;cursor:pointer;border:1px solid " + (on ? accent : "#475569") + ";background:" + (on ? "#0c4a6e" : "#0f172a") + ";color:" + (on ? "#e0f2fe" : "#94a3b8") + ";";
+    function paintChip(btn2, on, accent) {
+      btn2.style.cssText = "font-family:monospace;font-size:10px;font-weight:600;padding:2px 8px;border-radius:999px;cursor:pointer;border:1px solid " + (on ? accent : "#475569") + ";background:" + (on ? "#0c4a6e" : "#0f172a") + ";color:" + (on ? "#e0f2fe" : "#94a3b8") + ";";
     }
     function paintDayChips() {
       dayRow.innerHTML = "";
@@ -18566,29 +18691,29 @@
         { id: "7d", label: "7 days" },
         { id: "all", label: "All" }
       ].forEach(function(d) {
-        var btn = document.createElement("button");
-        btn.type = "button";
-        btn.textContent = d.label;
-        paintChip(btn, dayRange === d.id, "#38bdf8");
-        btn.addEventListener("click", function() {
+        var btn2 = document.createElement("button");
+        btn2.type = "button";
+        btn2.textContent = d.label;
+        paintChip(btn2, dayRange === d.id, "#38bdf8");
+        btn2.addEventListener("click", function() {
           dayRange = d.id;
           persistFilters2();
           paintDayChips();
           rebuildList();
         });
-        dayRow.appendChild(btn);
+        dayRow.appendChild(btn2);
       });
     }
     function paintStatusChips() {
       statusRow.innerHTML = "";
       DISCOVER_STATUS_FILTERS.forEach(function(status) {
-        var btn = document.createElement("button");
-        btn.type = "button";
+        var btn2 = document.createElement("button");
+        btn2.type = "button";
         var st = STATUS_CHIP_STYLE[status] || STATUS_CHIP_STYLE.empty;
         var on = selectedStatuses.indexOf(status) !== -1;
-        btn.textContent = status.charAt(0).toUpperCase() + status.slice(1);
-        btn.style.cssText = "font-family:monospace;font-size:10px;font-weight:600;padding:2px 8px;border-radius:999px;cursor:pointer;border:1px solid " + (on ? st.border : "#475569") + ";background:" + (on ? st.bg : "#0f172a") + ";color:" + (on ? st.fg : "#94a3b8") + ";";
-        btn.addEventListener("click", function() {
+        btn2.textContent = status.charAt(0).toUpperCase() + status.slice(1);
+        btn2.style.cssText = "font-family:monospace;font-size:10px;font-weight:600;padding:2px 8px;border-radius:999px;cursor:pointer;border:1px solid " + (on ? st.border : "#475569") + ";background:" + (on ? st.bg : "#0f172a") + ";color:" + (on ? st.fg : "#94a3b8") + ";";
+        btn2.addEventListener("click", function() {
           var ix = selectedStatuses.indexOf(status);
           if (ix === -1) selectedStatuses.push(status);
           else selectedStatuses.splice(ix, 1);
@@ -18596,7 +18721,7 @@
           paintStatusChips();
           rebuildList();
         });
-        statusRow.appendChild(btn);
+        statusRow.appendChild(btn2);
       });
     }
     function envDropdownButtonLabel(options) {
@@ -18627,18 +18752,18 @@
       var wrap = document.createElement("div");
       wrap.style.cssText = "position:relative;display:inline-block;";
       envRow.appendChild(wrap);
-      var btn = document.createElement("button");
-      btn.type = "button";
-      btn.textContent = envDropdownButtonLabel(options) + " \u25BE";
-      paintChip(btn, true, selectedEnvIds.length ? "#a78bfa" : "#22c55e");
-      btn.title = "Filter Discover to one or more environments for this client";
-      btn.setAttribute("data-qaw-discover-env-button", "1");
-      btn.addEventListener("click", function(e) {
+      var btn2 = document.createElement("button");
+      btn2.type = "button";
+      btn2.textContent = envDropdownButtonLabel(options) + " \u25BE";
+      paintChip(btn2, true, selectedEnvIds.length ? "#a78bfa" : "#22c55e");
+      btn2.title = "Filter Discover to one or more environments for this client";
+      btn2.setAttribute("data-qaw-discover-env-button", "1");
+      btn2.addEventListener("click", function(e) {
         e.stopPropagation();
         envDropdownOpen = !envDropdownOpen;
         paintEnvSelector(options);
       });
-      wrap.appendChild(btn);
+      wrap.appendChild(btn2);
       var hint = document.createElement("span");
       hint.style.cssText = "font-size:10px;color:#64748b;";
       hint.textContent = selectedEnvIds.length ? "current client only" : "showing all client envs";
@@ -18817,12 +18942,12 @@
       localStorage.removeItem(DISCOVER_PENDING_OPEN_KEY);
     } catch (e4) {
     }
-    var note = state.store.notes[pending.editKey];
-    var bullet = note && Array.isArray(note.bullets) ? note.bullets[pending.bulletIdx] : null;
-    if (pending.bulletId && note && Array.isArray(note.bullets)) {
-      for (var i = 0; i < note.bullets.length; i++) {
-        if (note.bullets[i] && note.bullets[i].id === pending.bulletId) {
-          bullet = note.bullets[i];
+    var note2 = state.store.notes[pending.editKey];
+    var bullet = note2 && Array.isArray(note2.bullets) ? note2.bullets[pending.bulletIdx] : null;
+    if (pending.bulletId && note2 && Array.isArray(note2.bullets)) {
+      for (var i = 0; i < note2.bullets.length; i++) {
+        if (note2.bullets[i] && note2.bullets[i].id === pending.bulletId) {
+          bullet = note2.bullets[i];
           pending.bulletIdx = i;
           break;
         }
@@ -19039,10 +19164,10 @@
     return out;
   }
   function clearBugStatus(editKey) {
-    var note = state.store && state.store.notes ? state.store.notes[editKey] : null;
-    if (!note) return;
-    note.status = "open";
-    note.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+    var note2 = state.store && state.store.notes ? state.store.notes[editKey] : null;
+    if (!note2) return;
+    note2.status = "open";
+    note2.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
     saveStoreImmediate();
   }
   function collectOrphanedMaintenanceNotes(client, envId) {
@@ -19068,10 +19193,10 @@
     return out;
   }
   function clearMaintenanceStatus(editKey) {
-    var note = state.store && state.store.notes ? state.store.notes[editKey] : null;
-    if (!note) return;
-    note.status = "open";
-    note.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+    var note2 = state.store && state.store.notes ? state.store.notes[editKey] : null;
+    if (!note2) return;
+    note2.status = "open";
+    note2.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
     saveStoreImmediate();
   }
   function formatLastSeen(ts) {
@@ -19591,10 +19716,10 @@ This won't delete the actual file.`)) return;
       type: "context",
       elements: [{ type: "mrkdwn", text: metaParts.join("  \xB7  ") }]
     });
-    var note = String(c.note || "").trim();
-    if (note) {
+    var note2 = String(c.note || "").trim();
+    if (note2) {
       blocks.push({ type: "divider" });
-      var noteCapped = note.length > 2990 ? note.slice(0, 2990) + "\u2026" : note;
+      var noteCapped = note2.length > 2990 ? note2.slice(0, 2990) + "\u2026" : note2;
       blocks.push({
         type: "section",
         text: { type: "mrkdwn", text: "_Notes_\n" + noteCapped }
@@ -20616,12 +20741,12 @@ This won't delete the actual file.`)) return;
     var cache = exportsCache || readExportsCache();
     Object.keys(state.store.notes).forEach(function(editKey) {
       var m = parseNoteKey(editKey);
-      var note = state.store.notes[editKey];
-      if (!m || !note || !Array.isArray(note.bullets)) return;
+      var note2 = state.store.notes[editKey];
+      if (!m || !note2 || !Array.isArray(note2.bullets)) return;
       if (m.client !== meta.client || m.envId !== meta.envId) return;
       if (!/\.flow\.(js|ts)$/i.test(m.fileName)) return;
-      for (var i = 0; i < note.bullets.length; i++) {
-        var b = note.bullets[i];
+      for (var i = 0; i < note2.bullets.length; i++) {
+        var b = note2.bullets[i];
         var fn = resolveFlowHelperMatch(b, meta, targetStem, cache);
         if (!fn) continue;
         if (scope && fn.toLowerCase() !== scope) continue;
@@ -20631,7 +20756,7 @@ This won't delete the actual file.`)) return;
           bullet: b,
           fileName: m.fileName,
           helperFn: fn,
-          status: String(note.status || "empty"),
+          status: String(note2.status || "empty"),
           loggedAt: String(b.loggedAt || Array.isArray(b.timestamps) && b.timestamps[0] && b.timestamps[0].ts || ""),
           lineNo: b.lineNo != null && b.lineNo !== "" && Number.isFinite(Number(b.lineNo)) ? Number(b.lineNo) : null
         });
@@ -21255,6 +21380,16 @@ This won't delete the actual file.`)) return;
   function shouldDeferPanelRenderForActiveEditor(targetEditKey, hasActiveEditor) {
     return !!(targetEditKey && hasActiveEditor);
   }
+  function panelHasNotesViewerFocus() {
+    if (!state.panelEl) return false;
+    var ae = document.activeElement;
+    if (!ae) return false;
+    var viewer = state.panelEl.querySelector(
+      '[data-e2e="investigation-notes-viewer"], [data-qaw-notes-viewer]'
+    );
+    if (!viewer) return false;
+    return viewer === ae || viewer.contains(ae);
+  }
   function panelHasActiveEditor() {
     if (!state.panelEl) return false;
     if (state.panelEl.querySelector("[data-qaw-single-note-edit]")) return true;
@@ -21271,7 +21406,26 @@ This won't delete the actual file.`)) return;
     return false;
   }
   function shouldDeferPanelRender(editKey) {
-    return shouldDeferPanelRenderForActiveEditor(editKey, panelHasActiveEditor());
+    return shouldDeferPanelRenderForActiveEditor(
+      editKey,
+      panelHasActiveEditor() || panelHasNotesViewerFocus()
+    );
+  }
+  function stripNoteRunMetricsFields(n) {
+    if (!n || typeof n !== "object") return n;
+    var c = JSON.parse(JSON.stringify(n));
+    delete c.lastRunDurationMs;
+    delete c.lastRunEndedAt;
+    return c;
+  }
+  function isNoteRunMetricsOnlyChange(before, after) {
+    if (!before || !after) return false;
+    return JSON.stringify(stripNoteRunMetricsFields(before)) === JSON.stringify(stripNoteRunMetricsFields(after));
+  }
+  function applyNoteRunMetricsFromIncoming(target, incoming) {
+    if (!target || !incoming) return;
+    if (incoming.lastRunDurationMs != null) target.lastRunDurationMs = incoming.lastRunDurationMs;
+    if (incoming.lastRunEndedAt != null) target.lastRunEndedAt = incoming.lastRunEndedAt;
   }
   function queueProtectedPanelRender(editKey, reason) {
     if (!editKey) return;
@@ -22240,28 +22394,57 @@ This won't delete the actual file.`)) return;
     }
   }
   function hasActiveCardEdit() {
-    return panelHasActiveEditor();
+    return panelHasActiveEditor() || panelHasNotesViewerFocus();
   }
   function wireFlowPassedObserver() {
     if (state.flowPassedObserver) return;
-    state.flowPassedObserver = new MutationObserver(function() {
+    function nodeLooksLikeFlowPassed(node) {
+      try {
+        if (node.nodeType === Node.TEXT_NODE) {
+          return String(node.textContent || "").trim().toLowerCase() === "flow passed";
+        }
+        if (node.nodeType !== Node.ELEMENT_NODE) return false;
+        var el = node;
+        if (String(el.textContent || "").trim().toLowerCase() === "flow passed") return true;
+        if (el.childElementCount > 12) return false;
+        var kids = el.querySelectorAll("div,span,p");
+        for (var i = 0; i < kids.length && i < 24; i++) {
+          if (String(kids[i].textContent || "").trim().toLowerCase() === "flow passed") return true;
+        }
+      } catch (_e) {
+      }
+      return false;
+    }
+    state.flowPassedObserver = new MutationObserver(function(mutations) {
       var panel = document.getElementById("gitwolf-file-editor-panel");
       if (!panel) return;
-      var all = panel.querySelectorAll("div");
       var found = false;
-      for (var i = 0; i < all.length; i++) {
-        if ((all[i].textContent || "").trim().toLowerCase() === "flow passed") {
-          found = true;
-          break;
-        }
-      }
-      if (!found) return;
       var ek = state.panelEl && state.panelEl.getAttribute("data-qaw-edit-key");
       if (!ek) return;
       var n = state.store.notes[ek];
       if (!n) return;
+      for (var i = 0; i < mutations.length && !found; i++) {
+        var m = mutations[i];
+        if (nodeLooksLikeFlowPassed(m.target)) {
+          found = true;
+          break;
+        }
+        for (var j = 0; j < m.addedNodes.length; j++) {
+          if (nodeLooksLikeFlowPassed(m.addedNodes[j])) {
+            found = true;
+            break;
+          }
+        }
+      }
+      if (!found) return;
       if (n.status === "passing") return;
-      if (n.status === "bugged" || n.status === "blocked" || n.status === "dni") return;
+      if (deriveReportStatus(n)) {
+        var reportStatus = recomputeNoteStatusFromReports(n);
+        var reportChip = state.panelEl && state.panelEl.querySelector("[data-qaw-status-chip]");
+        if (reportChip) applyStatusChipVisual(reportChip, reportStatus);
+        return;
+      }
+      if (n.status === "blocked" || n.status === "dni") return;
       n.status = "passing";
       touchNote(ek);
       saveStoreImmediate();
@@ -22275,16 +22458,29 @@ This won't delete the actual file.`)) return;
     var isMetaKey = e.key === META_STORAGE_KEY;
     var isNoteKey = !!e.key && e.key.startsWith(NOTE_LS_KEY_PREFIX);
     if (!isMetaKey && !isNoteKey) return;
+    var panelEk = state.panelEl.getAttribute("data-qaw-edit-key");
+    if (isNoteKey && e.key && e.newValue && panelEk) {
+      var storageNoteKey = e.key.slice(NOTE_LS_KEY_PREFIX.length);
+      if (storageNoteKey === panelEk) {
+        try {
+          var incomingNote = JSON.parse(e.newValue);
+          var currentNote = state.store.notes[panelEk];
+          if (currentNote && isNoteRunMetricsOnlyChange(currentNote, incomingNote)) {
+            applyNoteRunMetricsFromIncoming(currentNote, incomingNote);
+            refreshDrawerFooter();
+            return;
+          }
+        } catch (_metricsOnly) {
+        }
+      }
+    }
     if (hasActiveCardEdit()) {
-      var activeEk = state.panelEl.getAttribute("data-qaw-edit-key");
-      if (activeEk) queueProtectedPanelRender(activeEk, "storage");
+      if (panelEk) queueProtectedPanelRender(panelEk, "storage");
       return;
     }
-    var ekFlush = state.panelEl.getAttribute("data-qaw-edit-key");
-    if (ekFlush) flushPendingClientNoteEdits(ekFlush);
+    if (panelEk) flushPendingClientNoteEdits(panelEk);
     applyStoreFromDiskMergedNotes();
-    var ek = state.panelEl.getAttribute("data-qaw-edit-key");
-    if (ek && state.store.notes[ek]) renderPanelForKey(ek);
+    if (panelEk && state.store.notes[panelEk]) renderPanelForKey(panelEk);
   }
   function tick() {
     resumeBugsCollectJobIfNeeded();
@@ -22310,6 +22506,7 @@ This won't delete the actual file.`)) return;
               } else {
                 bsNote.bugReport = brObj;
               }
+              recomputeNoteStatusFromReports(bsNote);
               touchNote(state.pendingBugScrape.editKey);
               saveStoreImmediate();
               if (state.panelEl && state.panelEl.getAttribute("data-qaw-edit-key") === state.pendingBugScrape.editKey) {
@@ -22341,6 +22538,7 @@ This won't delete the actual file.`)) return;
                   mb.favorite = true;
                 }
               }
+              recomputeNoteStatusFromReports(msNote);
               touchNote(state.pendingMaintenanceScrape.editKey);
               saveStoreImmediate();
               if (state.panelEl && state.panelEl.getAttribute("data-qaw-edit-key") === state.pendingMaintenanceScrape.editKey) {
@@ -22358,7 +22556,7 @@ This won't delete the actual file.`)) return;
     tryUpgradePanelFromBootstrap();
     flushProtectedPanelRenderIfReady(function(pendingKey) {
       applyStoreFromDiskMergedNotes();
-      renderPanelForKey(pendingKey, { force: true, reason: "protected-flush" });
+      renderPanelForKey(pendingKey, { reason: "protected-flush" });
     });
     if (syncShiftBridgeIntoStore()) {
       refreshInvestigationShiftBar();
@@ -22419,6 +22617,7 @@ This won't delete the actual file.`)) return;
       init_gutter_menu();
       init_store();
       init_bugs_tab();
+      init_status_resolver();
       ALL_TAGS = ["bug", "maintenance", "flake", "locator", "helper", "note", "unknown", ""];
       TAG_LABELS2 = { bug: "Bug", maintenance: "Maintenance", flake: "Flake", locator: "Locator", helper: "Helper", note: "Note", unknown: "Unknown", "": "Untagged" };
       CONTEXT_KINDS = ["investigation", "creation", "bugreval", ""];
@@ -22472,6 +22671,24 @@ This won't delete the actual file.`)) return;
       el.style.bottom = (p.bottom != null ? p.bottom : 24) + "px";
     }
   }
+  function panelBodyFingerprint(editKey, n, isClientNote, isHelperFileNote) {
+    function cloneStable(v) {
+      if (Array.isArray(v)) return v.map(cloneStable);
+      if (!v || typeof v !== "object") return v;
+      var out = {};
+      Object.keys(v).sort().forEach(function(k) {
+        if (k === "updatedAt" || k === "lastRunDurationMs" || k === "lastRunEndedAt") return;
+        out[k] = cloneStable(v[k]);
+      });
+      return out;
+    }
+    return JSON.stringify({
+      editKey,
+      isClientNote,
+      isHelperFileNote,
+      note: cloneStable(n)
+    });
+  }
   function renderPanelForKey(editKey, opts) {
     if (!state.panelEl) return;
     if (!(opts && opts.force) && shouldDeferPanelRender(editKey)) {
@@ -22517,6 +22734,16 @@ This won't delete the actual file.`)) return;
       }
     }
     if (mustFlushNewNote) saveStoreImmediate();
+    var nextBodyFp = panelBodyFingerprint(editKey, n, isClientNote, isHelperFileNote);
+    var prevBodyFp = state.panelEl.getAttribute("data-qaw-body-fingerprint") || "";
+    var prevPanelKey = state.panelEl.getAttribute("data-qaw-edit-key") || "";
+    var existingNotesSection = body.querySelector("[data-qaw-notes-section]");
+    if (!(opts && opts.force) && prevPanelKey === editKey && prevBodyFp === nextBodyFp && existingNotesSection) {
+      refreshInvestigationShiftBar();
+      refreshDrawerFooter();
+      syncFollowTabState();
+      return;
+    }
     var statusMenuInner = STATUS_OPTIONS.map(function(s) {
       return '<button type="button" data-qaw-status-opt="' + s + '" data-e2e="investigation-status-option-' + s + '" style="display:block;width:100%;text-align:left;padding:8px 12px;border:none;background:transparent;color:#e2e8f0;cursor:pointer;font-family:monospace;font-size:12px;border-radius:4px;">' + s.charAt(0).toUpperCase() + s.slice(1) + "</button>";
     }).join("");
@@ -22682,11 +22909,11 @@ This won't delete the actual file.`)) return;
     function tabBtnHtml(tab, label, e2e, active) {
       return '<button type="button" data-qaw-tab-btn="' + tab + '"' + (e2e ? ' data-e2e="' + e2e + '"' : "") + ' title="' + escAttr(label) + '" aria-label="' + escAttr(label) + '" aria-selected="' + (active ? "true" : "false") + '" style="' + (active ? TAB_ACTIVE_STYLE : TAB_INACTIVE_STYLE) + '">' + (TAB_ICONS[tab] || "") + '<span data-qaw-tab-label style="display:' + (active ? "inline" : "none") + ';">' + esc4(label) + "</span></button>";
     }
-    function setTabButtonVisual(btn, active) {
-      if (!btn) return;
-      btn.style.cssText = active ? TAB_ACTIVE_STYLE : TAB_INACTIVE_STYLE;
-      btn.setAttribute("aria-selected", active ? "true" : "false");
-      var label = btn.querySelector("[data-qaw-tab-label]");
+    function setTabButtonVisual(btn2, active) {
+      if (!btn2) return;
+      btn2.style.cssText = active ? TAB_ACTIVE_STYLE : TAB_INACTIVE_STYLE;
+      btn2.setAttribute("aria-selected", active ? "true" : "false");
+      var label = btn2.querySelector("[data-qaw-tab-label]");
       if (label) label.style.display = active ? "inline" : "none";
     }
     var notesSectionHtml = '<div data-qaw-notes-section style="margin-top:14px;border-top:1px solid #334155;padding-top:12px;display:flex;flex-direction:column;gap:6px;flex:1;min-height:0;"><div style="border-bottom:1px solid #1e293b;margin-bottom:2px;flex-shrink:0;overflow-x:auto;scrollbar-width:none;-ms-overflow-style:none;"><div style="display:flex;align-items:center;gap:0;width:max-content;min-width:365px;">' + tabBtnHtml("notes", "Notes", "investigation-panel-tab-notes", true) + tabBtnHtml("history", "History", "investigation-panel-tab-history", false) + tabBtnHtml("bugs", "Bugs", null, false) + tabBtnHtml("maintenance", "Maint", null, false) + tabBtnHtml("ai", "AI", null, false) + tabBtnHtml("cases", "Cases", null, false) + tabBtnHtml("work", "Work", null, false) + tabBtnHtml("map", "Helpers", null, false) + tabBtnHtml("cleaning", "Clean", null, false) + tabBtnHtml("settings", "Settings", "investigation-panel-tab-settings", false) + '</div></div><div data-qaw-tab-content="notes" style="flex:1;min-height:0;display:flex;flex-direction:column;gap:6px;"><div style="display:flex;align-items:center;gap:6px;"><span data-qaw-notes-syntax-info-wrap></span><button type="button" data-qaw-filter-favs data-e2e="investigation-filter-favs" style="' + FAV_BTN_STYLE + '">\u2606 Pinned</button><button type="button" data-qaw-watch-count-btn style="' + WATCH_BTN_STYLE + '">\u26A1 0 tracked</button></div><div data-qaw-notes-view-wrap data-e2e="investigation-notes-region" style="position:relative;flex:1;min-height:0;display:flex;flex-direction:column;"><div data-qaw-notes-viewer data-e2e="investigation-notes-viewer" tabindex="0" style="display:flex;flex-direction:column;flex:1;min-height:180px;overflow-y:auto;box-sizing:border-box;background:#0f172a;border:1px solid #475569;border-radius:8px;padding:10px 8px;cursor:text;outline:none;"></div><textarea data-qaw-raw data-e2e="investigation-notes-editor" wrap="soft" spellcheck="false" style="display:none;width:100%;flex:1;min-height:180px;resize:vertical;box-sizing:border-box;background:#0f172a;color:#e2e8f0;border:1px solid #475569;border-radius:8px;padding:8px;font-family:monospace;font-size:11px;line-height:1.45;white-space:pre-wrap;word-break:break-word;overflow-x:hidden;"></textarea></div><div data-qaw-raw-status data-e2e="investigation-notes-parse-status" style="font-size:10px;min-height:14px;line-height:1.3;flex-shrink:0;"></div></div><div data-qaw-tab-content="history" style="flex:1;min-height:0;overflow-y:auto;display:none;"><div data-qaw-history-toolbar style="padding:8px 8px 4px;display:flex;justify-content:flex-end;"></div><div data-qaw-history-list></div></div><div data-qaw-tab-content="settings" data-qaw-settings-view style="display:none;flex:1;min-height:0;"></div><div data-qaw-tab-content="cases" style="display:none;flex:1;min-height:0;overflow-y:auto;"></div><div data-qaw-tab-content="bugs" style="display:none;flex:1;min-height:0;overflow-y:auto;"></div><div data-qaw-tab-content="maintenance" style="display:none;flex:1;min-height:0;overflow-y:auto;"></div><div data-qaw-tab-content="work" style="display:none;flex:1;min-height:0;overflow-y:auto;"></div><div data-qaw-tab-content="map" style="display:none;flex:1;min-height:0;overflow-y:auto;flex-direction:column;padding:4px 0;"></div><div data-qaw-tab-content="ai" style="display:none;flex:1;min-height:0;overflow-y:auto;padding:12px 8px;"></div><div data-qaw-tab-content="cleaning" style="display:none;flex:1;min-height:0;overflow-y:auto;padding:4px 0;"></div></div>';
@@ -22893,8 +23120,8 @@ This won't delete the actual file.`)) return;
         statusMenu.addEventListener("click", function(e) {
           e.stopPropagation();
         });
-        statusMenu.querySelectorAll("[data-qaw-status-opt]").forEach(function(btn) {
-          var btnEl = btn;
+        statusMenu.querySelectorAll("[data-qaw-status-opt]").forEach(function(btn2) {
+          var btnEl = btn2;
           btnEl.addEventListener("mouseenter", function() {
             btnEl.style.background = "#1e293b";
           });
@@ -22905,6 +23132,7 @@ This won't delete the actual file.`)) return;
             var prevStatus = n.status || "empty";
             var s = btnEl.getAttribute("data-qaw-status-opt") || "";
             n.status = s;
+            if (deriveReportStatus(n)) s = recomputeNoteStatusFromReports(n);
             applyStatusChipVisual(statusChip, s);
             touchNote(editKey);
             closeStatusMenu2();
@@ -22973,6 +23201,7 @@ This won't delete the actual file.`)) return;
     }
     state.panelEl.removeAttribute("data-qaw-panel-bootstrap");
     state.panelEl.setAttribute("data-qaw-edit-key", editKey);
+    state.panelEl.setAttribute("data-qaw-body-fingerprint", nextBodyFp);
     syncFollowTabState();
     refreshInvestigationShiftBar();
     refreshDrawerFooter();
@@ -23026,6 +23255,7 @@ This won't delete the actual file.`)) return;
       init_discover();
       init_editor_protection();
       init_daily_work();
+      init_status_resolver();
       init_discover();
       state.renderPanelForKeyFn = renderPanelForKey;
     }
@@ -23342,8 +23572,8 @@ This won't delete the actual file.`)) return;
       host.appendChild(row2);
     })();
     addLinkRow("Client notes", null, function(row2) {
-      var note = kClient ? state.store.notes[kClient] : null;
-      var count = clientSlug && note && Array.isArray(note.clientNotes) ? note.clientNotes.length : clientSlug && note && clientNotePlainForNote(note).trim() ? 1 : 0;
+      var note2 = kClient ? state.store.notes[kClient] : null;
+      var count = clientSlug && note2 && Array.isArray(note2.clientNotes) ? note2.clientNotes.length : clientSlug && note2 && clientNotePlainForNote(note2).trim() ? 1 : 0;
       var cn = miniBtn(onClientNotes ? "Back to file" : "Open", !!clientSlug);
       cn.setAttribute("data-e2e", "investigation-quicklink-client-notes");
       if (count > 0) {
@@ -23403,6 +23633,33 @@ This won't delete the actual file.`)) return;
   }
   function refreshDrawerFooter() {
     if (!state.panelEl) return;
+    var foot = state.panelEl.querySelector("[data-qaw-drawer-footer]");
+    if (!foot) return;
+    var ek = state.panelEl.getAttribute("data-qaw-edit-key");
+    var ekMeta = ek ? parseNoteKey(ek) : null;
+    var isFlowFile2 = !!(ekMeta && /flow\.(js|ts)$/i.test(ekMeta.fileName));
+    var m0 = readRunChimeMetrics();
+    var fileSlot = m0.byFile && ekMeta && m0.byFile[ekMeta.fileName] || {};
+    var noteData = ek && state.store.notes[ek] || {};
+    var isThisFileRunning = !!(fileSlot.currentRunStartedAt != null && Number.isFinite(fileSlot.currentRunStartedAt));
+    var footerSig = [
+      ek || "",
+      isFlowFile2 ? "flow" : "static",
+      isThisFileRunning ? String(fileSlot.currentRunStartedAt) : "",
+      noteData.lastRunDurationMs != null && Number.isFinite(noteData.lastRunDurationMs) ? String(noteData.lastRunDurationMs) : "",
+      noteData.lastRunEndedAt != null && Number.isFinite(noteData.lastRunEndedAt) ? String(noteData.lastRunEndedAt) : ""
+    ].join("|");
+    if (foot.getAttribute("data-qaw-footer-sig") === footerSig) {
+      var endedValue = foot.querySelector("[data-qaw-run-ended-relative-value]");
+      if (endedValue && noteData.lastRunEndedAt != null && Number.isFinite(noteData.lastRunEndedAt)) {
+        endedValue.textContent = formatRelativeEndedAgo(noteData.lastRunEndedAt);
+      }
+      var liveValue = foot.querySelector("[data-qaw-run-live-value]");
+      if (liveValue && isThisFileRunning) {
+        liveValue.textContent = formatDurationMs(Date.now() - Number(fileSlot.currentRunStartedAt));
+      }
+      return;
+    }
     if (state.runFooterTicker) {
       clearInterval(state.runFooterTicker);
       state.runFooterTicker = null;
@@ -23415,12 +23672,8 @@ This won't delete the actual file.`)) return;
       clearInterval(state.throwTrackerInterval);
       state.throwTrackerInterval = null;
     }
-    var foot = state.panelEl.querySelector("[data-qaw-drawer-footer]");
-    if (!foot) return;
+    foot.setAttribute("data-qaw-footer-sig", footerSig);
     foot.innerHTML = "";
-    var ek = state.panelEl.getAttribute("data-qaw-edit-key");
-    var ekMeta = ek ? parseNoteKey(ek) : null;
-    var isFlowFile2 = !!(ekMeta && /flow\.(js|ts)$/i.test(ekMeta.fileName));
     if (!isFlowFile2) {
       foot.style.minHeight = ek ? "" : "28px";
       var notRun = document.createElement("span");
@@ -23443,10 +23696,6 @@ This won't delete the actual file.`)) return;
     var col = document.createElement("div");
     col.style.cssText = "display:flex;flex-direction:column;gap:4px;font-size:10px;color:#cbd5e1;line-height:1.45;";
     col.setAttribute("data-e2e", "investigation-run-metrics-text");
-    var m0 = readRunChimeMetrics();
-    var fileSlot = m0.byFile && ekMeta && m0.byFile[ekMeta.fileName] || {};
-    var noteData = ek && state.store.notes[ek] || {};
-    var isThisFileRunning = !!(fileSlot.currentRunStartedAt != null && Number.isFinite(fileSlot.currentRunStartedAt));
     var hasAny = isThisFileRunning || noteData.lastRunDurationMs != null && Number.isFinite(noteData.lastRunDurationMs) || noteData.lastRunEndedAt != null && Number.isFinite(noteData.lastRunEndedAt);
     if (!hasAny) {
       var empty2 = document.createElement("span");
@@ -23468,12 +23717,18 @@ This won't delete the actual file.`)) return;
             return;
           }
           var ms = Date.now() - slot.currentRunStartedAt;
-          liveRow.innerHTML = 'Running: <strong style="color:#86efac;">' + escHtml4(formatDurationMs(ms)) + "</strong>";
+          var liveStrong2 = liveRow.querySelector("[data-qaw-run-live-value]");
+          if (liveStrong2) liveStrong2.textContent = formatDurationMs(ms);
         };
         var updateLiveRow = updateLiveRow2;
         liveRow = document.createElement("div");
         liveRow.setAttribute("data-qaw-run-live-row", "1");
         var capturedFileName = ekMeta.fileName;
+        liveRow.appendChild(document.createTextNode("Running: "));
+        var liveStrong = document.createElement("strong");
+        liveStrong.setAttribute("data-qaw-run-live-value", "1");
+        liveStrong.style.cssText = "color:#86efac;display:inline-block;min-width:4.5em;";
+        liveRow.appendChild(liveStrong);
         updateLiveRow2();
         state.runFooterTicker = setInterval(updateLiveRow2, 1e3);
         col.appendChild(liveRow);
@@ -23499,7 +23754,8 @@ This won't delete the actual file.`)) return;
         var endedRel = document.createElement("div");
         endedRel.setAttribute("data-e2e", "investigation-run-ended-relative");
         var endedStrong = document.createElement("strong");
-        endedStrong.style.color = "#94a3b8";
+        endedStrong.setAttribute("data-qaw-run-ended-relative-value", "1");
+        endedStrong.style.cssText = "color:#94a3b8;display:inline-block;min-width:5.5em;";
         tickEndedRel2();
         endedRel.appendChild(document.createTextNode("Ended "));
         endedRel.appendChild(endedStrong);
@@ -23624,7 +23880,7 @@ This won't delete the actual file.`)) return;
       } catch (e) {
       }
       try {
-        if ("1.563") return "1.563";
+        if ("1.576") return "1.576";
       } catch (e2) {
       }
       return "unknown";
@@ -23734,8 +23990,8 @@ This won't delete the actual file.`)) return;
   }
   function clientLabelFromWorkspaceButton() {
     try {
-      var btn = document.querySelector('button[aria-label^="Workspace:"]');
-      var aria = btn ? btn.getAttribute("aria-label") || "" : "";
+      var btn2 = document.querySelector('button[aria-label^="Workspace:"]');
+      var aria = btn2 ? btn2.getAttribute("aria-label") || "" : "";
       var m = aria.match(/^Workspace:\s*(.+)$/);
       var label = m ? m[1] : "";
       return label.trim().replace(/\s+/g, " ");
@@ -24175,9 +24431,9 @@ This won't delete the actual file.`)) return;
     var idx = parseInt(chip.getAttribute("data-bullet-index") || "", 10);
     var ek = state.panelEl && state.panelEl.getAttribute("data-qaw-edit-key");
     if (!Number.isFinite(idx) || idx < 0 || !ek) return;
-    var note = state.store.notes[ek];
-    if (!note || !note.bullets || !note.bullets[idx]) return;
-    var bullet = note.bullets[idx];
+    var note2 = state.store.notes[ek];
+    if (!note2 || !note2.bullets || !note2.bullets[idx]) return;
+    var bullet = note2.bullets[idx];
     var current = normalOccurrences(bullet);
     var me = e;
     bullet.occurrences = me.metaKey || me.ctrlKey ? Math.max(1, current - 1) : current + 1;
@@ -25160,15 +25416,15 @@ This won't delete the actual file.`)) return;
       var lbl = (el.getAttribute("aria-label") || el.textContent || "").trim();
       if (!lbl) continue;
       var key = noteKey(ctx.client, ctx.envId, lbl);
-      var note = state.store.notes[key];
+      var note2 = state.store.notes[key];
       var badge = el.querySelector("[data-qaw-tree-badge]");
-      var hasBullets = note && note.bullets && note.bullets.length > 0;
-      var hasStatus = note && note.status && note.status !== "empty";
-      if (!note || !hasBullets && !hasStatus) {
+      var hasBullets = note2 && note2.bullets && note2.bullets.length > 0;
+      var hasStatus = note2 && note2.status && note2.status !== "empty";
+      if (!note2 || !hasBullets && !hasStatus) {
         if (badge) badge.remove();
         continue;
       }
-      var status = note.status || "empty";
+      var status = note2.status || "empty";
       var color = STATUS_CHIP_STYLE[status] ? STATUS_CHIP_STYLE[status].border : "#64748b";
       if (!badge) {
         badge = document.createElement("span");
@@ -25284,15 +25540,15 @@ This won't delete the actual file.`)) return;
   }
   function describePublishDom() {
     var ta = document.querySelector(TEXTAREA_SEL);
-    var btn = document.querySelector(PUBLISH_BTN_SEL);
+    var btn2 = document.querySelector(PUBLISH_BTN_SEL);
     return {
       pathname: location.pathname,
       textareaFound: !!ta,
       textareaDataE2e: ta ? ta.getAttribute("data-e2e") : null,
       textareaValueLen: ta ? ta.value.trim().length : 0,
-      publishBtnFound: !!btn,
-      publishBtnDataE2e: btn ? btn.getAttribute("data-e2e") : null,
-      publishBtnEnabled: btn ? isPublishControlEnabled(btn) : null,
+      publishBtnFound: !!btn2,
+      publishBtnDataE2e: btn2 ? btn2.getAttribute("data-e2e") : null,
+      publishBtnEnabled: btn2 ? isPublishControlEnabled(btn2) : null,
       fileRowCount: document.querySelectorAll(FILE_ROW_SEL).length,
       checkedPathCount: getCheckedPaths().length,
       fileQueryParam: pathsFromUrlFileParam()
@@ -25341,14 +25597,14 @@ This won't delete the actual file.`)) return;
     lastPublishRecordedAt = Date.now();
     lp("handled: wrote", basenames.length, "commit event(s) to _qawFlowHistory", { trigger });
   }
-  function wirePublishBtn(btn) {
-    if (btn.getAttribute("data-qaw-publish-wired")) return;
-    btn.setAttribute("data-qaw-publish-wired", "1");
+  function wirePublishBtn(btn2) {
+    if (btn2.getAttribute("data-qaw-publish-wired")) return;
+    btn2.setAttribute("data-qaw-publish-wired", "1");
     lp("wired publish button", {
-      dataE2e: btn.getAttribute("data-e2e"),
+      dataE2e: btn2.getAttribute("data-e2e"),
       dom: describePublishDom()
     });
-    btn.addEventListener("click", function() {
+    btn2.addEventListener("click", function() {
       tryRecordPublishIntent("button-click");
     });
   }
@@ -25387,8 +25643,8 @@ This won't delete the actual file.`)) return;
     var existing = document.querySelector(PUBLISH_BTN_SEL);
     if (existing) wirePublishBtn(existing);
     var mo = new MutationObserver(function() {
-      var btn = document.querySelector(PUBLISH_BTN_SEL);
-      if (btn && !btn.getAttribute("data-qaw-publish-wired")) wirePublishBtn(btn);
+      var btn2 = document.querySelector(PUBLISH_BTN_SEL);
+      if (btn2 && !btn2.getAttribute("data-qaw-publish-wired")) wirePublishBtn(btn2);
     });
     mo.observe(document.body, { childList: true, subtree: true });
   }
@@ -25804,8 +26060,8 @@ This won't delete the actual file.`)) return;
       var parts = key.split("");
       if (parts.length < 3) return;
       if (parts[parts.length - 1] !== basename) return;
-      var note = notes[key];
-      var bs = Array.isArray(note.bullets) ? note.bullets : [];
+      var note2 = notes[key];
+      var bs = Array.isArray(note2.bullets) ? note2.bullets : [];
       bs.forEach(function(b) {
         var t = String(b.text || "").trim();
         if (t) bullets.push(t);
@@ -25981,10 +26237,10 @@ This won't delete the actual file.`)) return;
     ta.dispatchEvent(new Event("change", { bubbles: true }));
   }
   function ccxMakeBtn(label, attr) {
-    var btn = document.createElement("button");
-    btn.setAttribute(attr, "1");
-    btn.textContent = label;
-    btn.style.cssText = [
+    var btn2 = document.createElement("button");
+    btn2.setAttribute(attr, "1");
+    btn2.textContent = label;
+    btn2.style.cssText = [
       "display:block",
       "width:100%",
       "margin-bottom:6px",
@@ -26000,19 +26256,19 @@ This won't delete the actual file.`)) return;
       "transition:color 0.15s",
       "box-sizing:border-box"
     ].join(";");
-    btn.addEventListener("mouseenter", function() {
-      if (!btn.disabled) btn.style.color = "#e2e8f0";
+    btn2.addEventListener("mouseenter", function() {
+      if (!btn2.disabled) btn2.style.color = "#e2e8f0";
     });
-    btn.addEventListener("mouseleave", function() {
-      if (!btn.disabled) btn.style.color = "#94a3b8";
+    btn2.addEventListener("mouseleave", function() {
+      if (!btn2.disabled) btn2.style.color = "#94a3b8";
     });
-    return btn;
+    return btn2;
   }
-  function ccxSetBtnState(btn, label, disabled) {
-    btn.textContent = label;
-    btn.disabled = disabled;
-    btn.style.opacity = disabled ? "0.6" : "1";
-    if (!disabled) btn.style.color = "#94a3b8";
+  function ccxSetBtnState(btn2, label, disabled) {
+    btn2.textContent = label;
+    btn2.disabled = disabled;
+    btn2.style.opacity = disabled ? "0.6" : "1";
+    if (!disabled) btn2.style.color = "#94a3b8";
   }
   var ccxIsGenerating = false;
   function ccxInjectButtonRow(publishBtn) {
@@ -26408,21 +26664,21 @@ This won't delete the actual file.`)) return;
     var foot = state.panelEl.querySelector("[data-qaw-drawer-footer]");
     if (!foot) return;
     if (foot.querySelector("[" + BR_BTN_ATTR + "]")) return;
-    var btn = document.createElement("button");
-    btn.setAttribute(BR_BTN_ATTR, "1");
-    btn.type = "button";
-    btn.textContent = "\u{1F41B} Report bug";
-    btn.title = "Report a bug in Notes App";
-    btn.style.cssText = "position:absolute;top:10px;right:14px;background:none;color:#475569;border:none;font-size:10px;font-family:monospace;cursor:pointer;padding:0;line-height:1.4;";
-    btn.addEventListener("mouseenter", function() {
-      btn.style.color = "#94a3b8";
+    var btn2 = document.createElement("button");
+    btn2.setAttribute(BR_BTN_ATTR, "1");
+    btn2.type = "button";
+    btn2.textContent = "\u{1F41B} Report bug";
+    btn2.title = "Report a bug in Notes App";
+    btn2.style.cssText = "position:absolute;top:10px;right:14px;background:none;color:#475569;border:none;font-size:10px;font-family:monospace;cursor:pointer;padding:0;line-height:1.4;";
+    btn2.addEventListener("mouseenter", function() {
+      btn2.style.color = "#94a3b8";
     });
-    btn.addEventListener("mouseleave", function() {
-      btn.style.color = "#475569";
+    btn2.addEventListener("mouseleave", function() {
+      btn2.style.color = "#475569";
     });
-    btn.addEventListener("click", brOpenModal);
+    btn2.addEventListener("click", brOpenModal);
     foot.style.position = "relative";
-    foot.appendChild(btn);
+    foot.appendChild(btn2);
     var storage = document.createElement("div");
     storage.setAttribute(BR_STORAGE_ATTR, "1");
     storage.style.cssText = "position:absolute;top:25px;right:14px;font-size:9px;font-family:monospace;line-height:1.2;pointer-events:auto;user-select:none;";
@@ -26610,7 +26866,7 @@ This won't delete the actual file.`)) return;
     } catch (_) {
     }
     try {
-      if ("1.563") return "1.563";
+      if ("1.576") return "1.576";
     } catch (_) {
     }
     return "unknown";
@@ -26755,13 +27011,13 @@ This won't delete the actual file.`)) return;
     scanTimer = setTimeout(scanLogRows, 250);
   }
   function appendRunLogPayloadToBullet(editKey, bulletIdx, payload) {
-    var note = state.store && state.store.notes ? state.store.notes[editKey] : null;
-    if (!note || !Array.isArray(note.bullets)) return false;
-    var b = note.bullets[bulletIdx];
+    var note2 = state.store && state.store.notes ? state.store.notes[editKey] : null;
+    if (!note2 || !Array.isArray(note2.bullets)) return false;
+    var b = note2.bullets[bulletIdx];
     if (!b) return false;
     var applied = applyRunLogPayloadToBullet(b, payload);
     if (!applied.applied) return false;
-    note.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+    note2.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
     saveStoreImmediate();
     if (applied.timestampId) {
       recordHistoryEvent(editKey, {
@@ -26771,7 +27027,12 @@ This won't delete the actual file.`)) return;
         timestampId: applied.timestampId
       });
     }
-    renderPanelForKey(editKey);
+    var viewer = state.panelEl && state.panelEl.querySelector("[data-qaw-notes-viewer]");
+    if (viewer && typeof viewer._qawRedrawCards === "function") {
+      viewer._qawRedrawCards();
+    } else {
+      renderPanelForKey(editKey);
+    }
     return true;
   }
   function animateDropOntoCard(card, target) {
@@ -26853,11 +27114,515 @@ This won't delete the actual file.`)) return;
   init_discover();
   init_daily_work();
   init_env_verification();
-  function init() {
-    if (window.top !== window) return;
-    if (/task-wolf\.com$/i.test(location.hostname)) {
+
+  // src/notes/52-task-wolf-shift-controls.ts
+  init_constants();
+  init_store();
+  init_shift();
+  var hostObserver = null;
+  var refreshTimer = null;
+  var mountedHost = null;
+  var writingBridge = false;
+  function genShiftId() {
+    return "s" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+  }
+  function roundToNearestQuarterHour2(d) {
+    var x = new Date(d.getTime());
+    x.setSeconds(0, 0);
+    x.setMilliseconds(0);
+    var m = x.getMinutes();
+    var rounded = Math.round(m / 15) * 15;
+    if (rounded === 60) {
+      x.setHours(x.getHours() + 1);
+      x.setMinutes(0);
+    } else {
+      x.setMinutes(rounded);
+    }
+    return x;
+  }
+  function pad2(n) {
+    return n < 10 ? "0" + n : String(n);
+  }
+  function toDatetimeLocalValue(d) {
+    var x = new Date(d.getTime());
+    return x.getFullYear() + "-" + pad2(x.getMonth() + 1) + "-" + pad2(x.getDate()) + "T" + pad2(x.getHours()) + ":" + pad2(x.getMinutes());
+  }
+  function fromDatetimeLocalValue(raw) {
+    var s = String(raw || "").trim();
+    if (!s) return null;
+    var d = new Date(s);
+    if (!Number.isFinite(d.getTime())) return null;
+    return roundToNearestQuarterHour2(d);
+  }
+  function fmtDateTime(iso) {
+    try {
+      return new Date(iso).toLocaleString(void 0, { dateStyle: "short", timeStyle: "short" });
+    } catch (_e) {
+      return iso || "";
+    }
+  }
+  function fmtDuration(ms) {
+    var min = Math.max(0, Math.floor(ms / 6e4));
+    var h = Math.floor(min / 60);
+    var m = min % 60;
+    return h > 0 ? h + "h " + m + "m" : m + "m";
+  }
+  function defaultComposeTimes() {
+    var start = roundToNearestQuarterHour2(/* @__PURE__ */ new Date());
+    var end = roundToNearestQuarterHour2(new Date(start.getTime() + SHIFT_DURATION_MS));
+    return { start, end };
+  }
+  function getUiMode(host) {
+    var m = host.getAttribute("data-qaw-shift-ui");
+    if (m === "compose-start" || m === "summary" || m === "edit" || m === "confirm-end") return m;
+    return "idle";
+  }
+  function setUiMode(host, mode) {
+    host.setAttribute("data-qaw-shift-ui", mode);
+  }
+  function findTeamColumn() {
+    var labels = Array.from(document.querySelectorAll("label"));
+    for (var i = 0; i < labels.length; i++) {
+      if ((labels[i].textContent || "").trim() !== "QA Team") continue;
+      var form = labels[i].closest(".MuiFormControl-root");
+      var col = form ? form.closest('[class*="w-1/2"]') : null;
+      return col || (form ? form.parentElement : null);
+    }
+    return null;
+  }
+  function ensureHost() {
+    var col = findTeamColumn();
+    if (!col) return null;
+    var existingHosts = Array.from(document.querySelectorAll("[data-qaw-task-wolf-shift]"));
+    var hostInCurrentColumn = null;
+    for (var i = 0; i < existingHosts.length; i++) {
+      var h = existingHosts[i];
+      if (col.contains(h)) {
+        hostInCurrentColumn = h;
+      } else if (h.parentElement) {
+        h.parentElement.removeChild(h);
+      }
+    }
+    if (hostInCurrentColumn) return hostInCurrentColumn;
+    var host = document.createElement("div");
+    host.setAttribute("data-qaw-task-wolf-shift", "1");
+    host.setAttribute("data-qaw-shift-ui", "idle");
+    host.style.cssText = "margin-top:12px;border:1px solid #d8dbe3;border-radius:8px;background:#fff;box-shadow:0 1px 2px rgba(15,23,42,0.05);padding:10px 12px;color:#111827;";
+    col.appendChild(host);
+    return host;
+  }
+  function btn(label, opts) {
+    var variant = opts.variant || "secondary";
+    var styles = {
+      primary: { bg: "#16a34a", border: "#15803d", color: "#fff" },
+      secondary: { bg: "#f8fafc", border: "#cbd5e1", color: "#334155" },
+      danger: { bg: "#991b1b", border: "#7f1d1d", color: "#fff" }
+    };
+    var s = styles[variant] || styles.secondary;
+    var b = document.createElement("button");
+    b.type = "button";
+    b.textContent = label;
+    b.disabled = !!opts.disabled || writingBridge;
+    b.style.cssText = "border:1px solid " + s.border + ";background:" + s.bg + ";color:" + s.color + ";border-radius:6px;padding:6px 10px;font-size:12px;font-weight:600;cursor:pointer;line-height:1.2;";
+    if (opts.onClick) {
+      b.addEventListener("click", function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (writingBridge) return;
+        opts.onClick();
+      });
+    }
+    return b;
+  }
+  function fieldRow(label, input) {
+    var row2 = document.createElement("label");
+    row2.style.cssText = "display:block;margin-bottom:8px;font-size:12px;color:#374151;";
+    var cap = document.createElement("span");
+    cap.style.cssText = "display:block;font-weight:600;margin-bottom:4px;";
+    cap.textContent = label;
+    row2.appendChild(cap);
+    input.style.cssText = "display:block;width:100%;box-sizing:border-box;border:1px solid #cbd5e1;border-radius:6px;padding:6px 8px;font-size:12px;color:#111827;background:#fff;";
+    row2.appendChild(input);
+    return row2;
+  }
+  function note(text, color) {
+    var el = document.createElement("div");
+    el.style.cssText = "font-size:11px;color:" + (color || "#6b7280") + ";line-height:1.4;margin-bottom:8px;";
+    el.textContent = text;
+    return el;
+  }
+  function errorLine(msg) {
+    var el = document.createElement("div");
+    el.setAttribute("data-qaw-shift-error", "1");
+    el.style.cssText = "font-size:11px;color:#b91c1c;margin:4px 0 8px;min-height:14px;";
+    el.textContent = msg;
+    return el;
+  }
+  function readTimesFromForm(startInp, endInp) {
+    var start = fromDatetimeLocalValue(startInp.value);
+    var end = fromDatetimeLocalValue(endInp.value);
+    if (!start || !end) return { start, end, error: "Enter valid start and end times." };
+    if (end.getTime() <= start.getTime()) return { start, end, error: "Shift end must be after shift start." };
+    return { start, end, error: "" };
+  }
+  function writeBridge(act, history2, nextMode) {
+    while (history2.length > 80) history2.shift();
+    writingBridge = true;
+    try {
+      writeShiftBridgeState(act || null, history2);
+      if (mountedHost && document.body.contains(mountedHost)) {
+        setUiMode(mountedHost, nextMode);
+        renderTaskWolfShiftControls();
+      }
+    } finally {
+      writingBridge = false;
+    }
+  }
+  function commitStart(host, startInp, endInp) {
+    var times = readTimesFromForm(startInp, endInp);
+    var errEl = host.querySelector("[data-qaw-shift-error]");
+    if (times.error) {
+      if (errEl) errEl.textContent = times.error;
       return;
     }
+    if (errEl) errEl.textContent = "";
+    var bridge = readShiftBridgeState();
+    writeBridge(
+      {
+        id: genShiftId(),
+        startIso: times.start.toISOString(),
+        plannedEndIso: times.end.toISOString(),
+        kind: "investigation"
+      },
+      bridge.investigationShiftHistory || [],
+      "summary"
+    );
+  }
+  function commitEdit(host, startInp, endInp) {
+    var times = readTimesFromForm(startInp, endInp);
+    var errEl = host.querySelector("[data-qaw-shift-error]");
+    if (times.error) {
+      if (errEl) errEl.textContent = times.error;
+      return;
+    }
+    if (errEl) errEl.textContent = "";
+    var bridge = readShiftBridgeState();
+    var act = bridge.investigationShift;
+    if (!act || !act.id) {
+      setUiMode(host, "idle");
+      renderTaskWolfShiftControls();
+      return;
+    }
+    act.startIso = times.start.toISOString();
+    act.plannedEndIso = times.end.toISOString();
+    writeBridge(act, bridge.investigationShiftHistory || [], "summary");
+  }
+  function commitEnd() {
+    var bridge = readShiftBridgeState();
+    var act = bridge.investigationShift;
+    if (!act || !act.id) return;
+    var history2 = bridge.investigationShiftHistory || [];
+    history2.push({
+      id: act.id,
+      startIso: act.startIso,
+      endIso: (/* @__PURE__ */ new Date()).toISOString(),
+      kind: act.kind || "investigation",
+      plannedEndIso: act.plannedEndIso || null
+    });
+    writeBridge(null, history2, "idle");
+  }
+  function renderHeader(host, act, mode) {
+    var head = document.createElement("div");
+    head.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;";
+    var title = document.createElement("div");
+    title.style.cssText = "font-size:12px;font-weight:700;color:#374151;text-transform:uppercase;letter-spacing:0.04em;";
+    title.textContent = "QAW Investigation Shift";
+    head.appendChild(title);
+    var badge = document.createElement("span");
+    var active = !!(act && act.id);
+    badge.style.cssText = "font-size:11px;font-weight:700;border-radius:999px;padding:3px 8px;" + (active ? "background:#dcfce7;color:#166534;border:1px solid #86efac;" : "background:#f1f5f9;color:#475569;border:1px solid #cbd5e1;");
+    badge.textContent = active ? "Active" : "Creation";
+    head.appendChild(badge);
+    host.appendChild(head);
+    if (mode === "compose-start") {
+      host.appendChild(note("Draft \u2014 not started yet. Click Start shift to begin.", "#b45309"));
+    } else if (mode === "edit") {
+      host.appendChild(note("Editing shift times \u2014 click Save changes or Cancel.", "#b45309"));
+    } else if (mode === "confirm-end") {
+      host.appendChild(note("Ready to end this investigation shift?", "#b45309"));
+    }
+  }
+  function renderSummary(host, act) {
+    var body = document.createElement("div");
+    body.style.cssText = "font-size:12px;color:#4b5563;line-height:1.45;margin-bottom:10px;";
+    var elapsed = act.startIso ? Date.now() - new Date(act.startIso).getTime() : 0;
+    var lines = [];
+    lines.push("Started " + (act.startIso ? fmtDateTime(act.startIso) : "unknown"));
+    lines.push("Elapsed " + fmtDuration(elapsed));
+    if (act.plannedEndIso) {
+      var endMs = new Date(act.plannedEndIso).getTime();
+      if (Number.isFinite(endMs)) {
+        lines.push("Ends " + fmtDateTime(act.plannedEndIso) + " (" + Math.round(shiftElapsedProgressPct(act) * 100) + "%)");
+      }
+    }
+    body.textContent = lines.join(" \xB7 ");
+    host.appendChild(body);
+    var actions = document.createElement("div");
+    actions.style.cssText = "display:flex;gap:6px;flex-wrap:wrap;";
+    actions.appendChild(
+      btn("Edit shift", {
+        variant: "secondary",
+        onClick: function() {
+          setUiMode(host, "edit");
+          renderTaskWolfShiftControls();
+        }
+      })
+    );
+    actions.appendChild(
+      btn("End shift", {
+        variant: "danger",
+        onClick: function() {
+          setUiMode(host, "confirm-end");
+          renderTaskWolfShiftControls();
+        }
+      })
+    );
+    host.appendChild(actions);
+  }
+  function renderEndConfirm(host, act) {
+    var box = document.createElement("div");
+    box.style.cssText = "border:1px solid #fecaca;background:#fef2f2;border-radius:8px;padding:9px 10px;margin-bottom:10px;";
+    var title = document.createElement("div");
+    title.style.cssText = "font-size:12px;font-weight:700;color:#7f1d1d;margin-bottom:4px;";
+    title.textContent = "End investigation shift?";
+    box.appendChild(title);
+    var detail = document.createElement("div");
+    detail.style.cssText = "font-size:11px;color:#991b1b;line-height:1.4;";
+    detail.textContent = "This will stop the active shift and save it to shift history. Started " + (act && act.startIso ? fmtDateTime(act.startIso) : "unknown") + ".";
+    box.appendChild(detail);
+    host.appendChild(box);
+    var actions = document.createElement("div");
+    actions.style.cssText = "display:flex;gap:6px;flex-wrap:wrap;";
+    actions.appendChild(btn("End shift now", { variant: "danger", onClick: commitEnd }));
+    actions.appendChild(
+      btn("Keep shift", {
+        variant: "secondary",
+        onClick: function() {
+          setUiMode(host, "summary");
+          renderTaskWolfShiftControls();
+        }
+      })
+    );
+    host.appendChild(actions);
+  }
+  function renderComposeStart(host, act) {
+    var defaults = defaultComposeTimes();
+    var startVal = act && act.startIso ? new Date(act.startIso) : defaults.start;
+    var endVal = act && act.plannedEndIso ? new Date(act.plannedEndIso) : act && act.startIso ? roundToNearestQuarterHour2(new Date(new Date(act.startIso).getTime() + SHIFT_DURATION_MS)) : defaults.end;
+    var startInp = document.createElement("input");
+    startInp.type = "datetime-local";
+    startInp.value = toDatetimeLocalValue(startVal);
+    var endInp = document.createElement("input");
+    endInp.type = "datetime-local";
+    endInp.value = toDatetimeLocalValue(endVal);
+    host.appendChild(fieldRow("Shift start", startInp));
+    host.appendChild(fieldRow("Shift end", endInp));
+    host.appendChild(errorLine(""));
+    var actions = document.createElement("div");
+    actions.style.cssText = "display:flex;flex-wrap:wrap;gap:6px;margin-top:4px;";
+    actions.appendChild(
+      btn("Start shift", {
+        variant: "primary",
+        onClick: function() {
+          commitStart(host, startInp, endInp);
+        }
+      })
+    );
+    actions.appendChild(
+      btn("Cancel", {
+        variant: "secondary",
+        onClick: function() {
+          setUiMode(host, "idle");
+          renderTaskWolfShiftControls();
+        }
+      })
+    );
+    host.appendChild(actions);
+  }
+  function renderEdit(host, act) {
+    var startVal = act.startIso ? new Date(act.startIso) : roundToNearestQuarterHour2(/* @__PURE__ */ new Date());
+    var endVal = act.plannedEndIso ? new Date(act.plannedEndIso) : roundToNearestQuarterHour2(new Date(startVal.getTime() + SHIFT_DURATION_MS));
+    var startInp = document.createElement("input");
+    startInp.type = "datetime-local";
+    startInp.value = toDatetimeLocalValue(startVal);
+    var endInp = document.createElement("input");
+    endInp.type = "datetime-local";
+    endInp.value = toDatetimeLocalValue(endVal);
+    host.appendChild(fieldRow("Shift start", startInp));
+    host.appendChild(fieldRow("Shift end", endInp));
+    host.appendChild(errorLine(""));
+    var actions = document.createElement("div");
+    actions.style.cssText = "display:flex;flex-wrap:wrap;gap:6px;margin-top:4px;";
+    actions.appendChild(
+      btn("Save changes", {
+        variant: "primary",
+        onClick: function() {
+          commitEdit(host, startInp, endInp);
+        }
+      })
+    );
+    actions.appendChild(
+      btn("Cancel", {
+        variant: "secondary",
+        onClick: function() {
+          setUiMode(host, "summary");
+          renderTaskWolfShiftControls();
+        }
+      })
+    );
+    host.appendChild(actions);
+  }
+  function renderIdle(host) {
+    host.appendChild(
+      note("No investigation shift is active. New notes default to creation context.")
+    );
+    var actions = document.createElement("div");
+    actions.style.cssText = "display:flex;gap:6px;flex-wrap:wrap;margin-top:4px;";
+    actions.appendChild(
+      btn("Start investigation shift", {
+        variant: "primary",
+        onClick: function() {
+          setUiMode(host, "compose-start");
+          renderTaskWolfShiftControls();
+        }
+      })
+    );
+    host.appendChild(actions);
+  }
+  function reconcileUiMode(host, bridge) {
+    var mode = getUiMode(host);
+    var hasActive = !!(bridge.investigationShift && bridge.investigationShift.id);
+    if (mode === "compose-start" && hasActive) return "summary";
+    if (mode === "edit" && !hasActive) return "idle";
+    if (mode === "confirm-end" && !hasActive) return "idle";
+    if (mode === "summary" && !hasActive) return "idle";
+    if (mode === "compose-start" && !hasActive) return "compose-start";
+    if (mode === "edit" && hasActive) return "edit";
+    if (mode === "confirm-end" && hasActive) return "confirm-end";
+    return hasActive ? "summary" : "idle";
+  }
+  function renderTaskWolfShiftControls() {
+    var host = ensureHost();
+    if (!host) {
+      mountedHost = null;
+      return;
+    }
+    var bridge = readShiftBridgeState();
+    var act = bridge.investigationShift;
+    var mode = reconcileUiMode(host, bridge);
+    setUiMode(host, mode);
+    mountedHost = host;
+    host.innerHTML = "";
+    renderHeader(host, act, mode);
+    if (mode === "compose-start") {
+      renderComposeStart(host, act);
+    } else if (mode === "edit" && act && act.id) {
+      renderEdit(host, act);
+    } else if (mode === "confirm-end" && act && act.id) {
+      renderEndConfirm(host, act);
+    } else if (act && act.id) {
+      renderSummary(host, act);
+    } else {
+      renderIdle(host);
+    }
+  }
+  function initTaskWolfShiftControls() {
+    if (!/task-wolf\.com$/i.test(location.hostname)) return;
+    renderTaskWolfShiftControls();
+    if (!hostObserver) {
+      hostObserver = new MutationObserver(function() {
+        if (!document.querySelector("[data-qaw-task-wolf-shift]")) renderTaskWolfShiftControls();
+      });
+      hostObserver.observe(document.body || document.documentElement, { childList: true, subtree: true });
+    }
+    if (!refreshTimer) {
+      refreshTimer = setInterval(function() {
+        if (!mountedHost || !document.body.contains(mountedHost)) return;
+        var mode = getUiMode(mountedHost);
+        if (mode === "compose-start" || mode === "edit" || mode === "confirm-end") return;
+        renderTaskWolfShiftControls();
+      }, 3e4);
+    }
+    if (typeof GM_addValueChangeListener === "function") {
+      try {
+        GM_addValueChangeListener(SHIFT_BRIDGE_GM_KEY, function() {
+          renderTaskWolfShiftControls();
+        });
+      } catch (_e) {
+      }
+    }
+  }
+
+  // src/notes/13-init.ts
+  function isGlobalSafeModeEnabled() {
+    try {
+      return localStorage.getItem(GLOBAL_SAFE_MODE_KEY) === "1";
+    } catch (_e) {
+      return false;
+    }
+  }
+  function isReportScrapeWindow() {
+    try {
+      return /^_qaw_(bug|maint)_scrape_/i.test(String(window.name || ""));
+    } catch (_e) {
+      return false;
+    }
+  }
+  function stopNotesForGlobalSafeMode() {
+    if (state.pollTimer) {
+      clearInterval(state.pollTimer);
+      state.pollTimer = null;
+    }
+    if (state.flowPassedObserver) {
+      state.flowPassedObserver.disconnect();
+      state.flowPassedObserver = null;
+    }
+    if (state.watchLineDomObserver) {
+      state.watchLineDomObserver.disconnect();
+      state.watchLineDomObserver = null;
+    }
+    if (state.softBreakpointObserver) {
+      state.softBreakpointObserver.disconnect();
+      state.softBreakpointObserver = null;
+    }
+    if (state.throwTrackerInterval) {
+      clearInterval(state.throwTrackerInterval);
+      state.throwTrackerInterval = null;
+    }
+    if (state.speedDialEl) {
+      state.speedDialEl.remove();
+      state.speedDialEl = null;
+    }
+    closePanel();
+  }
+  function init() {
+    if (window.top !== window) return;
+    if (isReportScrapeWindow()) return;
+    if (/task-wolf\.com$/i.test(location.hostname)) {
+      initTaskWolfShiftControls();
+      return;
+    }
+    if (isGlobalSafeModeEnabled()) return;
+    var onSafeMode = function(e) {
+      var ce = e;
+      if (ce.detail && ce.detail.enabled === false) return;
+      if (ce.detail && ce.detail.enabled !== true && !isGlobalSafeModeEnabled()) return;
+      stopNotesForGlobalSafeMode();
+    };
+    window.addEventListener(GLOBAL_SAFE_MODE_EVENT, onSafeMode);
+    window.addEventListener("storage", function(e) {
+      if (e.key === GLOBAL_SAFE_MODE_KEY && e.newValue === "1") stopNotesForGlobalSafeMode();
+    });
     state.store = loadStore();
     var initialCtx = parseContext();
     var handlingEnvVerification = initPendingEnvVerificationWatcher();

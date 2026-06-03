@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         QA Wolf — run finished chime
 // @namespace    http://tampermonkey.net/
-// @version      1.19
+// @version      1.28
 // @description  Short sound when a code run finishes. Records last run duration, current run start time (for live elapsed in investigation notes). Click the page once if the browser blocks audio until gesture.
 // @match        https://app.qawolf.com/*
 // @grant        none
@@ -26,6 +26,8 @@
   var POLL_MS = 250;
   var RUN_CHIME_METRICS_KEY = "_qawRunChimeMetrics";
   var CHIME_FIRED_KEY = "_qawChimeFired";
+  var GLOBAL_SAFE_MODE_KEY = "_qawUserscriptsSafeMode";
+  var GLOBAL_SAFE_MODE_EVENT = "qaw-userscripts-safe-mode";
   var TAB_ID = Math.random().toString(36).slice(2);
   try {
     _ss = sessionStorage.getItem("_qawTabId");
@@ -57,6 +59,8 @@
   var audioUnlocked = false;
   var runSegmentStart = null;
   var runSegmentFile = null;
+  var pollTimer = null;
+  var mo = null;
   function getActiveFlowFileName() {
     var tabs = document.querySelectorAll('[class*="styles_tab__"]');
     var active = null;
@@ -118,7 +122,7 @@
   function isFlowPassed() {
     try {
       var panel = document.getElementById("gitwolf-file-editor-panel") || document.body;
-      return (panel.innerText || panel.textContent || "").toLowerCase().indexOf("flow passed") !== -1;
+      return (panel.textContent || "").toLowerCase().indexOf("flow passed") !== -1;
     } catch (e) {
       return false;
     }
@@ -179,8 +183,39 @@
     } catch (e) {
     }
   }
-  document.addEventListener("click", unlockAudioOnce, true);
-  document.addEventListener("keydown", unlockAudioOnce, true);
+  function isGlobalSafeModeEnabled() {
+    try {
+      return localStorage.getItem(GLOBAL_SAFE_MODE_KEY) === "1";
+    } catch (_e) {
+      return false;
+    }
+  }
+  function isReportScrapeWindow() {
+    try {
+      return /^_qaw_(bug|maint)_scrape_/i.test(String(window.name || ""));
+    } catch (_e) {
+      return false;
+    }
+  }
+  function stopChimeForGlobalSafeMode() {
+    if (pollTimer) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }
+    if (mo) {
+      mo.disconnect();
+      mo = null;
+    }
+    if (settleTimer) {
+      clearTimeout(settleTimer);
+      settleTimer = null;
+    }
+    document.removeEventListener("click", unlockAudioOnce, true);
+    document.removeEventListener("keydown", unlockAudioOnce, true);
+    wasRunning = false;
+    runSegmentStart = null;
+    runSegmentFile = null;
+  }
   function onPoll() {
     var running = stopVisible();
     if (running) {
@@ -223,22 +258,38 @@
       runSegmentFile = null;
     }, SETTLE_MS);
   }
-  wasRunning = stopVisible();
-  if (wasRunning) {
-    runSegmentStart = Date.now();
-    runSegmentFile = getActiveFlowFileName();
-    if (runSegmentFile) {
-      writeFileMetrics(runSegmentFile, { currentRunStartedAt: runSegmentStart, completedRunStartedAt: null });
+  function startChime() {
+    if (isReportScrapeWindow()) return;
+    if (isGlobalSafeModeEnabled()) return;
+    document.addEventListener("click", unlockAudioOnce, true);
+    document.addEventListener("keydown", unlockAudioOnce, true);
+    wasRunning = stopVisible();
+    if (wasRunning) {
+      runSegmentStart = Date.now();
+      runSegmentFile = getActiveFlowFileName();
+      if (runSegmentFile) {
+        writeFileMetrics(runSegmentFile, { currentRunStartedAt: runSegmentStart, completedRunStartedAt: null });
+      }
     }
+    pollTimer = setInterval(onPoll, POLL_MS);
+    mo = new MutationObserver(function() {
+      onPoll();
+    });
+    mo.observe(document.documentElement, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["style", "class", "disabled", "hidden"]
+    });
   }
-  setInterval(onPoll, POLL_MS);
-  var mo = new MutationObserver(function() {
-    onPoll();
+  window.addEventListener(GLOBAL_SAFE_MODE_EVENT, function(e) {
+    var ce = e;
+    if (ce.detail && ce.detail.enabled === false) return;
+    if (ce.detail && ce.detail.enabled !== true && !isGlobalSafeModeEnabled()) return;
+    stopChimeForGlobalSafeMode();
   });
-  mo.observe(document.documentElement, {
-    childList: true,
-    subtree: true,
-    attributes: true,
-    attributeFilter: ["style", "class", "disabled", "hidden"]
+  window.addEventListener("storage", function(e) {
+    if (e.key === GLOBAL_SAFE_MODE_KEY && e.newValue === "1") stopChimeForGlobalSafeMode();
   });
+  startChime();
 })();
