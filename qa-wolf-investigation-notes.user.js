@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         QA Wolf Investigation Notes
 // @namespace    http://tampermonkey.net/
-// @version      1.592
+// @version      1.600
 // @description  Per-file investigation notes: quick links (new-tab opens, PoC textarea, client-wide notes), client/env chips, instant tooltips, run timing, shift sync, work mode, export, search. data-e2e investigation-* hooks.
 // @author       You
 // @match        https://app.qawolf.com/*
@@ -939,15 +939,98 @@
       }
     }
   }
+  function currentPanelNoteKey() {
+    try {
+      return state.panelEl && state.panelEl.getAttribute("data-qaw-edit-key") || "";
+    } catch (_e) {
+      return "";
+    }
+  }
+  function noteHasBugRevalData(n) {
+    if (!n || typeof n !== "object") return false;
+    if (n.status === "bugged") return true;
+    var bullets = Array.isArray(n.bullets) ? n.bullets : [];
+    return bullets.some(function(b) {
+      return !!(b && (b.lastRevalidatedAt || b.bugReport && b.bugReport.url || b.bugReport && Object.prototype.hasOwnProperty.call(b.bugReport, "closed")));
+    });
+  }
+  function recordNoteSaveDebug(event) {
+    try {
+      var memNote = event.memNote;
+      var diskNote = event.diskNote;
+      delete event.memNote;
+      delete event.diskNote;
+      if (!noteHasBugRevalData(memNote) && !noteHasBugRevalData(diskNote)) return;
+      var raw = localStorage.getItem(NOTE_SAVE_DEBUG_KEY);
+      var arr = raw ? JSON.parse(raw) : [];
+      if (!Array.isArray(arr)) arr = [];
+      arr.push(Object.assign({
+        ts: (/* @__PURE__ */ new Date()).toISOString(),
+        path: location.pathname,
+        file: function() {
+          try {
+            return new URLSearchParams(location.search).get("file") || "";
+          } catch (_e) {
+            return "";
+          }
+        }()
+      }, event));
+      if (arr.length > 160) arr = arr.slice(arr.length - 160);
+      localStorage.setItem(NOTE_SAVE_DEBUG_KEY, JSON.stringify(arr));
+    } catch (_e) {
+    }
+  }
   function saveStoreImmediate() {
+    var writableNoteKey = currentPanelNoteKey();
     Object.keys(state.store.notes).forEach(function(noteK) {
-      enforceBugBulletPins(state.store.notes[noteK]);
+      var memNote = state.store.notes[noteK];
       try {
-        localStorage.setItem(NOTE_LS_KEY_PREFIX + noteK, JSON.stringify(state.store.notes[noteK]));
+        var diskRaw = localStorage.getItem(NOTE_LS_KEY_PREFIX + noteK);
+        var diskNote = diskRaw ? JSON.parse(diskRaw) : null;
+        var mt = memNote && memNote.updatedAt && String(memNote.updatedAt) || "";
+        var dt = diskNote && diskNote.updatedAt && String(diskNote.updatedAt) || "";
+        if (diskNote && (!writableNoteKey || noteK !== writableNoteKey)) {
+          state.store.notes[noteK] = diskNote;
+          recordNoteSaveDebug({
+            action: "skip-non-owner",
+            noteKey: noteK,
+            writableNoteKey,
+            memUpdatedAt: mt,
+            diskUpdatedAt: dt,
+            memNote,
+            diskNote
+          });
+          return;
+        }
+        if (diskNote && dt > mt) {
+          state.store.notes[noteK] = diskNote;
+          recordNoteSaveDebug({
+            action: "skip-disk-newer",
+            noteKey: noteK,
+            writableNoteKey,
+            memUpdatedAt: mt,
+            diskUpdatedAt: dt,
+            memNote,
+            diskNote
+          });
+          return;
+        }
+      } catch (_mergeReadErr) {
+      }
+      enforceBugBulletPins(memNote);
+      try {
+        localStorage.setItem(NOTE_LS_KEY_PREFIX + noteK, JSON.stringify(memNote));
+        recordNoteSaveDebug({
+          action: "write",
+          noteKey: noteK,
+          writableNoteKey,
+          memUpdatedAt: memNote && memNote.updatedAt && String(memNote.updatedAt) || "",
+          memNote
+        });
       } catch (e) {
         console.warn("[qaw-store] failed to save note", {
           noteKey: noteK,
-          size: JSON.stringify(state.store.notes[noteK] || {}).length,
+          size: JSON.stringify(memNote || {}).length,
           error: e
         });
       }
@@ -1206,7 +1289,7 @@
       }
     }
   }
-  var lastBackupAt, NOTE_KEY_SEP, _cachedReporterIdentity, EXPORT_VIEWS_GM_KEY;
+  var lastBackupAt, NOTE_SAVE_DEBUG_KEY, NOTE_KEY_SEP, _cachedReporterIdentity, EXPORT_VIEWS_GM_KEY;
   var init_store = __esm({
     "src/notes/02-store.ts"() {
       "use strict";
@@ -1214,6 +1297,7 @@
       init_constants();
       init_storage_cleanup();
       lastBackupAt = 0;
+      NOTE_SAVE_DEBUG_KEY = "_qawNoteSaveDebug";
       NOTE_KEY_SEP = "";
       _cachedReporterIdentity = null;
       EXPORT_VIEWS_GM_KEY = "_qawExportViews_v1";
@@ -1641,8 +1725,20 @@
     return Math.max(0, Math.min(1, (n - startMs) / (endMs - startMs)));
   }
   function applyShiftProgressChipVisual(chip, act) {
-    var pctStr = Math.round(shiftElapsedProgressPct(act) * 100) + "%";
-    chip.style.background = "linear-gradient(to right,#14532d " + pctStr + ",#0a1f13 " + pctStr + ")";
+    var pct = shiftElapsedProgressPct(act);
+    if (pct >= 1) {
+      chip.style.background = "#3f1d1d";
+      chip.style.color = "#fecaca";
+      chip.style.border = "1px solid #7f1d1d";
+    } else if (pct >= 0.9) {
+      chip.style.background = "#78350f";
+      chip.style.color = "#fde68a";
+      chip.style.border = "1px solid #d97706";
+    } else {
+      chip.style.background = "#14532d";
+      chip.style.color = "#bbf7d0";
+      chip.style.border = "1px solid #22c55e";
+    }
   }
   function updateShiftProgressChip() {
     if (!state.panelEl) return;
@@ -4512,43 +4608,28 @@
     chip.style.color = s.fg;
     chip.style.border = "1px solid " + s.border;
   }
-  function roundToNearestQuarterHour(d) {
-    var x = new Date(d.getTime());
-    x.setSeconds(0, 0);
-    var m = x.getMinutes();
-    var rounded = Math.round(m / 15) * 15;
-    if (rounded === 60) {
-      x.setHours(x.getHours() + 1);
-      x.setMinutes(0);
-    } else {
-      x.setMinutes(rounded);
-    }
-    return x;
-  }
-  function formatLocalTime12h(d) {
-    var hh = d.getHours();
-    var mm = String(d.getMinutes()).padStart(2, "0");
-    var ampm = hh >= 12 ? "PM" : "AM";
-    var h12 = hh % 12;
-    if (h12 === 0) h12 = 12;
-    return h12 + ":" + mm + " " + ampm;
-  }
-  function parseLocalTime12hInput(raw, fallback) {
-    var s = String(raw || "").trim().toUpperCase();
-    if (!s) return null;
-    var m = s.match(/^(\d{1,2})(?::(\d{2}))?\s*(AM|PM)$/);
-    if (!m) return null;
-    var h12 = parseInt(m[1], 10);
-    var mm = m[2] != null ? parseInt(m[2], 10) : 0;
-    if (h12 < 1 || h12 > 12 || mm < 0 || mm > 59) return null;
-    var hh24 = h12 % 12;
-    if (m[3] === "PM") hh24 += 12;
-    var d = new Date(fallback.getTime());
-    d.setHours(hh24, mm, 0, 0);
-    return d;
-  }
   function wireHeadNicknameChip(chip, meta, kind) {
     chip.title = kind === "client" ? "Client name is read from QA Wolf" : "Environment name is read from QA Wolf";
+  }
+  function paintHeadContextChip(chip) {
+    var active = state.store && state.store.investigationShift && state.store.investigationShift.id ? state.store.investigationShift : null;
+    if (active) {
+      applyShiftProgressChipVisual(chip, active);
+      chip.title = shiftDetailTooltip(active, hasGmShiftBridge());
+      chip.textContent = "Investigation";
+    } else {
+      chip.style.background = "#334155";
+      chip.style.color = "#e2e8f0";
+      chip.style.border = "1px solid #64748b";
+      chip.title = shiftDetailTooltip(null, hasGmShiftBridge());
+      chip.textContent = "Creation";
+    }
+  }
+  function refreshHeadContextChip() {
+    if (!state.panelEl) return;
+    var chip = state.panelEl.querySelector("[data-qaw-head-ctx-chip]");
+    if (!chip) return;
+    paintHeadContextChip(chip);
   }
   function escapeSlackMrkdwnLinkLabel(s) {
     return String(s || "").replace(/[\r\n]+/g, " ").replace(/\|/g, " \u2014 ").replace(/</g, "").trim();
@@ -4699,159 +4780,11 @@
     wrapEnv.appendChild(envChip);
     row2.appendChild(wrapEnv);
     (function() {
-      var SHIFT_DURATION_MS_LOCAL = 210 * 60 * 1e3;
-      var ctxChip = document.createElement("button");
-      ctxChip.type = "button";
+      var ctxChip = document.createElement("span");
       ctxChip.setAttribute("data-qaw-head-ctx-chip", "1");
       ctxChip.setAttribute("data-e2e", "investigation-head-context-chip");
-      ctxChip.style.cssText = "display:inline-flex;align-items:center;font-size:11px;font-weight:700;letter-spacing:0.02em;padding:5px 12px;border-radius:999px;font-family:monospace;user-select:none;position:relative;overflow:hidden;flex-shrink:0;cursor:pointer;";
-      function closeShiftMenu() {
-        var old = document.querySelector("[data-qaw-shift-chip-menu]");
-        if (old) old.remove();
-        document.removeEventListener("click", closeShiftMenu, true);
-      }
-      function paintChip() {
-        var s2 = state.store.investigationShift;
-        var active = !!(s2 && s2.id);
-        if (active) {
-          applyShiftProgressChipVisual(ctxChip, s2);
-          ctxChip.style.color = "#bbf7d0";
-          ctxChip.style.border = "1px solid #22c55e";
-          ctxChip.title = "Investigation shift active \u2014 click for shift options";
-          ctxChip.textContent = "Investigation";
-        } else {
-          ctxChip.style.background = "#334155";
-          ctxChip.style.color = "#e2e8f0";
-          ctxChip.style.border = "1px solid #64748b";
-          ctxChip.title = "Creation mode \u2014 click for shift options";
-          ctxChip.textContent = "Creation";
-        }
-      }
-      function applyShiftChange() {
-        paintChip();
-        refreshDrawerFooter();
-        refreshNotesHead(editKey);
-      }
-      function onStartShift() {
-        var suggested = roundToNearestQuarterHour(new Date(Date.now() + 210 * 60 * 1e3));
-        var raw = window.prompt(
-          "Set expected end time (12-hour local time, e.g. 1:30 PM):",
-          formatLocalTime12h(suggested)
-        );
-        if (raw == null) return;
-        var parsed = parseLocalTime12hInput(raw, suggested);
-        if (!parsed) {
-          window.alert("Invalid time format. Use 12-hour time like 1:30 PM.");
-          return;
-        }
-        var rounded = roundToNearestQuarterHour(parsed);
-        startInvestigationShift(rounded.toISOString());
-        applyShiftChange();
-      }
-      function onEndShift() {
-        if (!window.confirm("End investigation shift now?")) return;
-        endInvestigationShift();
-        applyShiftChange();
-      }
-      function onEditShiftStart() {
-        applyStoreFromDiskMergedNotes();
-        var act = state.store.investigationShift;
-        if (!act || !act.id) return;
-        var fallback = act.startIso ? new Date(act.startIso) : /* @__PURE__ */ new Date();
-        var raw = window.prompt(
-          "Shift start time (12-hour local time, e.g. 1:30 PM):",
-          formatLocalTime12h(fallback)
-        );
-        if (raw == null) return;
-        var parsed = parseLocalTime12hInput(raw, fallback);
-        if (!parsed) {
-          window.alert("Invalid time format. Use 12-hour time like 1:30 PM.");
-          return;
-        }
-        var rounded = roundToNearestQuarterHour(parsed);
-        act.startIso = rounded.toISOString();
-        saveStoreImmediate();
-        refreshInvestigationShiftBar();
-        applyShiftChange();
-      }
-      function onEditShiftPlannedEnd() {
-        applyStoreFromDiskMergedNotes();
-        var act = state.store.investigationShift;
-        if (!act || !act.id) return;
-        var fallback;
-        if (act.plannedEndIso) {
-          fallback = new Date(act.plannedEndIso);
-        } else {
-          var startMs = act.startIso ? new Date(act.startIso).getTime() : Date.now();
-          fallback = roundToNearestQuarterHour(new Date(startMs + SHIFT_DURATION_MS_LOCAL));
-        }
-        var raw = window.prompt(
-          "Expected shift end time (12-hour local time, e.g. 1:30 PM):",
-          formatLocalTime12h(fallback)
-        );
-        if (raw == null) return;
-        var parsed = parseLocalTime12hInput(raw, fallback);
-        if (!parsed) {
-          window.alert("Invalid time format. Use 12-hour time like 1:30 PM.");
-          return;
-        }
-        var rounded = roundToNearestQuarterHour(parsed);
-        act.plannedEndIso = rounded.toISOString();
-        saveStoreImmediate();
-        refreshInvestigationShiftBar();
-        applyShiftChange();
-      }
-      function openShiftMenu() {
-        closeShiftMenu();
-        var menu = document.createElement("div");
-        menu.setAttribute("data-qaw-shift-chip-menu", "1");
-        menu.style.cssText = "position:fixed;z-index:2147483020;background:#0f172a;border:1px solid #475569;border-radius:6px;padding:3px;min-width:220px;box-shadow:0 4px 14px rgba(0,0,0,0.6);";
-        var btnStyle2 = "display:block;width:100%;text-align:left;padding:6px 9px;color:#e2e8f0;background:none;border:0;font-family:monospace;font-size:11px;cursor:pointer;border-radius:4px;";
-        function appendMenuButton(label, e2e, onPick) {
-          var b = document.createElement("button");
-          b.type = "button";
-          b.setAttribute("data-e2e", e2e);
-          b.style.cssText = btnStyle2;
-          b.textContent = label;
-          b.addEventListener("mouseenter", function() {
-            b.style.background = "#1e293b";
-          });
-          b.addEventListener("mouseleave", function() {
-            b.style.background = "none";
-          });
-          b.addEventListener("click", function(ev) {
-            ev.stopPropagation();
-            closeShiftMenu();
-            onPick();
-          });
-          menu.appendChild(b);
-        }
-        var isActive = !!(state.store.investigationShift && state.store.investigationShift.id);
-        if (isActive) {
-          appendMenuButton("Edit shift start time\u2026", "investigation-shift-edit-start", onEditShiftStart);
-          appendMenuButton("Edit expected end time\u2026", "investigation-shift-edit-planned-end", onEditShiftPlannedEnd);
-        }
-        appendMenuButton(
-          isActive ? "End investigation shift" : "Start investigation shift",
-          isActive ? "investigation-shift-end" : "investigation-shift-start",
-          function() {
-            if (isActive) onEndShift();
-            else onStartShift();
-          }
-        );
-        document.body.appendChild(menu);
-        var r = ctxChip.getBoundingClientRect();
-        menu.style.left = Math.round(Math.max(8, r.left)) + "px";
-        menu.style.top = Math.round(r.bottom + 6) + "px";
-        setTimeout(function() {
-          document.addEventListener("click", closeShiftMenu, true);
-        }, 0);
-      }
-      paintChip();
-      ctxChip.addEventListener("click", function(e) {
-        e.stopPropagation();
-        openShiftMenu();
-      });
+      ctxChip.style.cssText = "display:inline-flex;align-items:center;font-size:11px;font-weight:700;letter-spacing:0.02em;padding:5px 12px;border-radius:999px;font-family:monospace;user-select:none;position:relative;overflow:hidden;flex-shrink:0;cursor:default;";
+      paintHeadContextChip(ctxChip);
       row2.appendChild(ctxChip);
     })();
     head.appendChild(row2);
@@ -4902,18 +4835,6 @@
       warnWrap.appendChild(activeBtn);
       head.appendChild(warnWrap);
     }
-  }
-  function refreshNotesHead(editKey) {
-    if (!state.panelEl || !editKey) return;
-    var meta = parseNoteKey(editKey);
-    if (!meta) return;
-    var head = state.panelEl.querySelector("[data-qaw-notes-head]");
-    if (!head) return;
-    ensureClientMetadata(meta.client);
-    var c = head.querySelector("[data-qaw-head-client-chip]");
-    var e = head.querySelector("[data-qaw-head-env-chip]");
-    if (c) c.textContent = getClientDisplayName(meta.client);
-    if (e) e.textContent = getEnvDisplayName(meta.envId);
   }
   function resolveBulletLineAndBody(b) {
     var t = b.text != null ? String(b.text) : "";
@@ -6272,7 +6193,7 @@
     var reportStatus = deriveReportStatus(note2);
     if (reportStatus) return reportStatus;
     var current = String(note2 && note2.status || "").trim();
-    if (!current || current === "empty" || current === "bugged" || current === "maintenance") return "open";
+    if (!current || current === "empty") return "open";
     return current;
   }
   function recomputeNoteStatusFromReports(note2) {
@@ -6295,6 +6216,10 @@
   function maybeRevertStatusOpen(n) {
     var prev = n.status;
     var next = recomputeNoteStatusFromReports(n);
+    if (prev === "bugged" && next === "bugged" && !deriveReportStatus(n)) {
+      n.status = "open";
+      next = "open";
+    }
     var chip = state.panelEl ? state.panelEl.querySelector("[data-qaw-status-chip]") : null;
     if (chip && next !== prev) applyStatusChipVisual(chip, next);
   }
@@ -6424,6 +6349,10 @@
   function maybeRevertMaintenanceStatusOpen(n) {
     var prev = n.status;
     var next = recomputeNoteStatusFromReports(n);
+    if (prev === "maintenance" && next === "maintenance" && !deriveReportStatus(n)) {
+      n.status = "open";
+      next = "open";
+    }
     var chip = state.panelEl ? state.panelEl.querySelector("[data-qaw-status-chip]") : null;
     if (chip && next !== prev) applyStatusChipVisual(chip, next);
   }
@@ -6913,82 +6842,94 @@
     }
     return false;
   }
-  function latestRevalidatedForBugReport(clientSlug, reportUrl) {
-    var rid = parseBugReportId(reportUrl);
-    var notes = state.store && state.store.notes || {};
-    var best = 0;
-    Object.keys(notes).forEach(function(k) {
-      var parts = k.split("");
-      if (!parts.length || parts[0] !== clientSlug) return;
-      var bullets = notes[k] && notes[k].bullets || [];
-      bullets.forEach(function(b) {
-        if (!b || b.tag !== "bug" || !b.bugReport || !b.bugReport.url || !b.lastRevalidatedAt) return;
-        var brId = parseBugReportId(String(b.bugReport.url));
-        if (brId !== rid) return;
-        var ms = new Date(String(b.lastRevalidatedAt)).getTime();
-        if (Number.isFinite(ms) && ms > best) best = ms;
-      });
-    });
-    return best ? new Date(best).toISOString() : "";
+  function noteFileMatchesBugFlow(clientSlug, envId, noteFileName, bugFlowDisplayName) {
+    if (flowNameMatchesNoteFile(noteFileName, bugFlowDisplayName)) return true;
+    var ref = resolveIndexedFileReference(clientSlug, envId, noteFileName);
+    return !!(ref && flowNameMatchesNoteFile(ref.fullPath, bugFlowDisplayName));
   }
-  function lastRevalidatedForBugFlow(clientSlug, reportUrl, bugFlowDisplayName) {
-    var rid = parseBugReportId(reportUrl);
+  function buildBugNoteIndex(clientSlug) {
+    var index = { byReportId: {} };
     var notes = state.store && state.store.notes || {};
-    var best = 0;
     Object.keys(notes).forEach(function(k) {
       var parts = k.split("");
       if (parts.length < 3 || parts[0] !== clientSlug) return;
-      if (!flowNameMatchesNoteFile(parts[2], bugFlowDisplayName)) return;
+      var noteFileName = parts[2];
+      var fileNames = [noteFileName];
+      var ref = resolveIndexedFileReference(clientSlug, parts[1], noteFileName);
+      if (ref && ref.fullPath && fileNames.indexOf(ref.fullPath) === -1) fileNames.push(ref.fullPath);
       var bullets = notes[k] && notes[k].bullets || [];
       bullets.forEach(function(b) {
-        if (!b || b.tag !== "bug" || !b.bugReport || !b.bugReport.url || !b.lastRevalidatedAt) return;
-        var brId = parseBugReportId(String(b.bugReport.url));
-        if (brId !== rid) return;
-        var ms = new Date(String(b.lastRevalidatedAt)).getTime();
-        if (Number.isFinite(ms) && ms > best) best = ms;
+        if (!b || !b.bugReport || !b.bugReport.url) return;
+        var rid = parseBugReportId(String(b.bugReport.url));
+        if (!index.byReportId[rid]) index.byReportId[rid] = [];
+        index.byReportId[rid].push({
+          reportId: rid,
+          fileNames,
+          lastRevalidatedAt: b.lastRevalidatedAt ? String(b.lastRevalidatedAt) : "",
+          closed: !!b.bugReport.closed
+        });
       });
+    });
+    return index;
+  }
+  function indexedRecordMatchesFlow(rec, flowDisplayName2) {
+    for (var i = 0; i < rec.fileNames.length; i++) {
+      if (flowNameMatchesNoteFile(rec.fileNames[i], flowDisplayName2)) return true;
+    }
+    return false;
+  }
+  function latestRevalidatedForBugReport(index, reportUrl) {
+    var rid = parseBugReportId(reportUrl);
+    var records = index.byReportId[rid] || [];
+    var best = 0;
+    records.forEach(function(rec) {
+      if (!rec.lastRevalidatedAt) return;
+      var ms = new Date(rec.lastRevalidatedAt).getTime();
+      if (Number.isFinite(ms) && ms > best) best = ms;
     });
     return best ? new Date(best).toISOString() : "";
   }
-  function isBugClosedForFlow(clientSlug, reportUrl, flowDisplayName2) {
+  function lastRevalidatedForBugFlow(index, reportUrl, bugFlowDisplayName) {
     var rid = parseBugReportId(reportUrl);
-    var notes = state.store && state.store.notes || {};
+    var records = index.byReportId[rid] || [];
+    var best = 0;
+    records.forEach(function(rec) {
+      if (!rec.lastRevalidatedAt || !indexedRecordMatchesFlow(rec, bugFlowDisplayName)) return;
+      var ms = new Date(rec.lastRevalidatedAt).getTime();
+      if (Number.isFinite(ms) && ms > best) best = ms;
+    });
+    return best ? new Date(best).toISOString() : "";
+  }
+  function isBugClosedForFlow(index, reportUrl, flowDisplayName2) {
+    var rid = parseBugReportId(reportUrl);
+    var records = index.byReportId[rid] || [];
     var found = false;
-    Object.keys(notes).forEach(function(k) {
+    records.forEach(function(rec) {
       if (found) return;
-      var parts = k.split("");
-      if (parts.length < 3 || parts[0] !== clientSlug) return;
-      if (!flowNameMatchesNoteFile(parts[2], flowDisplayName2)) return;
-      var bullets = notes[k] && notes[k].bullets || [];
-      bullets.forEach(function(b) {
-        if (found) return;
-        if (!b || b.tag !== "bug" || !b.bugReport || !b.bugReport.url) return;
-        if (parseBugReportId(String(b.bugReport.url)) !== rid) return;
-        if (b.bugReport.closed) found = true;
-      });
+      if (rec.closed && indexedRecordMatchesFlow(rec, flowDisplayName2)) found = true;
     });
     return found;
   }
-  function effectiveRevalIsoForFlowRow(clientSlug, reportUrl, flowDisplayName2, totalFlowsForBug) {
-    var precise = lastRevalidatedForBugFlow(clientSlug, reportUrl, flowDisplayName2);
+  function effectiveRevalIsoForFlowRow(index, reportUrl, flowDisplayName2, totalFlowsForBug) {
+    var precise = lastRevalidatedForBugFlow(index, reportUrl, flowDisplayName2);
     if (precise) return precise;
-    if (totalFlowsForBug === 1) return latestRevalidatedForBugReport(clientSlug, reportUrl);
+    if (totalFlowsForBug === 1) return latestRevalidatedForBugReport(index, reportUrl);
     return "";
   }
-  function flowRowNeedsRevalidation(clientSlug, reportUrl, flowDisplayName2, totalFlowsForBug) {
-    var per = lastRevalidatedForBugFlow(clientSlug, reportUrl, flowDisplayName2);
+  function flowRowNeedsRevalidation(index, reportUrl, flowDisplayName2, totalFlowsForBug) {
+    var per = lastRevalidatedForBugFlow(index, reportUrl, flowDisplayName2);
     if (per) return !isIsoInRecentRevalWindow(per);
     if (totalFlowsForBug === 1) {
-      var agg = latestRevalidatedForBugReport(clientSlug, reportUrl);
+      var agg = latestRevalidatedForBugReport(index, reportUrl);
       if (agg) return !isIsoInRecentRevalWindow(agg);
     }
     return true;
   }
-  function bugGroupShowsRevalClock(clientSlug, entry) {
+  function bugGroupShowsRevalClock(index, entry) {
     if (!entry.flows || !entry.flows.length) return false;
     var total = entry.flows.length;
     for (var i = 0; i < total; i++) {
-      if (flowRowNeedsRevalidation(clientSlug, entry.reportUrl, entry.flows[i].flowName, total)) return true;
+      if (flowRowNeedsRevalidation(index, entry.reportUrl, entry.flows[i].flowName, total)) return true;
     }
     return false;
   }
@@ -7388,13 +7329,14 @@
         list.appendChild(empty);
         return;
       }
+      var bugNoteIndex = buildBugNoteIndex(clientSlug);
       entries.forEach(function(entry) {
         var card = document.createElement("details");
         card.style.cssText = "border:1px solid #334155;border-radius:8px;background:#0f172a;overflow:hidden;";
         var summary = document.createElement("summary");
         summary.style.cssText = "cursor:pointer;list-style:none;padding:8px 10px;display:flex;align-items:center;gap:8px;";
         var bugLabel = entry.number || "#" + String(entry.reportId || "").slice(0, 6);
-        var showGroupClock = bugGroupShowsRevalClock(clientSlug, entry);
+        var showGroupClock = bugGroupShowsRevalClock(bugNoteIndex, entry);
         var spBug = document.createElement("span");
         spBug.style.cssText = "font-size:11px;color:#fca5a5;flex-shrink:0;";
         spBug.textContent = "Bug";
@@ -7408,7 +7350,7 @@
         var closedN = 0;
         if (entry.flows) {
           entry.flows.forEach(function(f) {
-            if (isBugClosedForFlow(clientSlug, entry.reportUrl, f.flowName)) closedN++;
+            if (isBugClosedForFlow(bugNoteIndex, entry.reportUrl, f.flowName)) closedN++;
           });
         }
         var openN = flowN - closedN;
@@ -7424,8 +7366,8 @@
         if (allClosed) {
           var spRerun = document.createElement("span");
           spRerun.style.cssText = "font-size:10px;font-weight:600;font-family:monospace;letter-spacing:0.03em;background:#0f172a;color:#4ade80;padding:2px 8px;border-radius:999px;border:1px solid #166534;";
-          spRerun.textContent = "Needs run in runner";
-          spRerun.title = "All flows are closed in notes. Re-run them in the runner, then re-collect bugs to clear this entry.";
+          spRerun.textContent = "Needs runner recheck";
+          spRerun.title = "This flow may already be fixed, but the Bugs tab only knows after you collect bugs again.";
           spFlows.appendChild(spRerun);
         } else if (closedN === 0) {
           var spAll = document.createElement("span");
@@ -7493,7 +7435,7 @@
               actions.appendChild(document.createTextNode("|"));
               actions.appendChild(runLink);
             }
-            var flowClosed = isBugClosedForFlow(clientSlug, entry.reportUrl, f.flowName);
+            var flowClosed = isBugClosedForFlow(bugNoteIndex, entry.reportUrl, f.flowName);
             var reval = document.createElement("span");
             if (flowClosed) {
               var CLOSED_CHIP = "font-size:10px;font-weight:600;font-family:monospace;letter-spacing:0.03em;background:#0f172a;color:#64748b;padding:2px 8px;border-radius:999px;border:1px solid #334155;text-decoration:line-through;";
@@ -7501,8 +7443,8 @@
               reval.style.cssText = CLOSED_CHIP;
               reval.title = "Marked closed in investigation notes for this file.";
             } else {
-              var preciseFlowIso = lastRevalidatedForBugFlow(clientSlug, entry.reportUrl, f.flowName);
-              var flowRevalIso = effectiveRevalIsoForFlowRow(clientSlug, entry.reportUrl, f.flowName, entry.flows.length);
+              var preciseFlowIso = lastRevalidatedForBugFlow(bugNoteIndex, entry.reportUrl, f.flowName);
+              var flowRevalIso = effectiveRevalIsoForFlowRow(bugNoteIndex, entry.reportUrl, f.flowName, entry.flows.length);
               var usedBugWideFallback = !!flowRevalIso && !preciseFlowIso;
               var flowRevalLabel = flowRevalIso ? formatShortDateTime(flowRevalIso) : "";
               var flowRecent = !!(flowRevalIso && isIsoInRecentRevalWindow(flowRevalIso));
@@ -7537,9 +7479,11 @@
         if (!n || n.status !== "bugged") return false;
         var meta = parseNoteKey(ek);
         if (!meta || meta.client !== clientSlug) return false;
+        var noteClient = meta.client;
+        var noteEnvId = meta.envId;
         var noteFileName = meta.fileName;
         return !trackedFlowNames.some(function(fn) {
-          return flowNameMatchesNoteFile(noteFileName, fn);
+          return noteFileMatchesBugFlow(noteClient, noteEnvId, noteFileName, fn);
         });
       });
       if (untrackedKeys.length > 0) {
@@ -10305,6 +10249,11 @@
     }
     addButton("Revalidate now", function() {
       b.lastRevalidatedAt = (/* @__PURE__ */ new Date()).toISOString();
+      if (b.bugReport && b.bugReport.url) b.bugReport.closed = false;
+      b.favorite = true;
+      var n = state.store && state.store.notes ? state.store.notes[editKey] : null;
+      if (n) recomputeNoteStatusFromReports(n);
+      touchNote(editKey);
       persist();
       redraw({});
       recordHistoryEvent(editKey, {
@@ -10321,6 +10270,7 @@
       b.favorite = isClosed ? true : false;
       var n = state.store && state.store.notes ? state.store.notes[editKey] : null;
       if (n) maybeRevertStatusOpen(n);
+      touchNote(editKey);
       persist();
       redraw({});
       recordHistoryEvent(editKey, {
@@ -14665,23 +14615,27 @@
   }
   function appendTextWithRgbSwatches(container, text, knownFacets) {
     if (!text) return;
-    var rgbRe = /\brgb\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}\s*\)/gi;
+    var colorRe = /\brgb\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}\s*\)|(^|[^\w-])(#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8}))(?![0-9a-f])/gi;
     var lastIdx = 0;
     var match;
-    while ((match = rgbRe.exec(text)) !== null) {
-      if (match.index > lastIdx) {
-        appendTextWithFacetHashtags(container, text.slice(lastIdx, match.index), knownFacets || []);
+    while ((match = colorRe.exec(text)) !== null) {
+      var colorText = match[2] || match[0];
+      var colorStart = match[2] ? match.index + (match[1] || "").length : match.index;
+      if (colorStart > lastIdx) {
+        appendTextWithFacetHashtags(container, text.slice(lastIdx, colorStart), knownFacets || []);
       }
-      var rgbText = match[0];
-      container.appendChild(document.createTextNode(rgbText));
-      if (isStrictRgbLiteral(rgbText)) {
-        container.appendChild(makeRgbSwatch(rgbText));
+      container.appendChild(document.createTextNode(colorText));
+      if (isStrictColorLiteral(colorText)) {
+        container.appendChild(makeColorSwatch(colorText));
       }
-      lastIdx = match.index + match[0].length;
+      lastIdx = colorStart + colorText.length;
     }
     if (lastIdx < text.length) {
       appendTextWithFacetHashtags(container, text.slice(lastIdx), knownFacets || []);
     }
+  }
+  function isStrictColorLiteral(colorText) {
+    return isStrictRgbLiteral(colorText) || /^#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i.test(colorText);
   }
   function isStrictRgbLiteral(rgbText) {
     var m = rgbText.match(/^rgb\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*\)$/i);
@@ -14691,7 +14645,7 @@
     var b = parseInt(m[3], 10);
     return r >= 0 && r <= 255 && g >= 0 && g <= 255 && b >= 0 && b <= 255;
   }
-  function makeRgbSwatch(rgbText) {
+  function makeColorSwatch(colorText) {
     var swatch = document.createElement("span");
     swatch.style.cssText = [
       "display:inline-block",
@@ -14702,9 +14656,9 @@
       "border-radius:2px",
       "border:1px solid rgba(148,163,184,0.65)",
       "vertical-align:middle",
-      "background:" + rgbText
+      "background:" + colorText
     ].join(";");
-    swatch.title = rgbText;
+    swatch.title = colorText;
     return swatch;
   }
   function formatLocatorPopoverText(raw) {
@@ -23346,7 +23300,7 @@ This won't delete the actual file.`)) return;
       } catch (e) {
       }
       try {
-        if ("1.592") return "1.592";
+        if ("1.600") return "1.600";
       } catch (e2) {
       }
       return "unknown";
@@ -24677,6 +24631,7 @@ This won't delete the actual file.`)) return;
   init_quicklinks();
   init_panel_shell();
   init_open_export();
+  init_head();
   init_render_panel();
   init_chime_ingest();
   init_gutter_menu();
@@ -26351,7 +26306,7 @@ This won't delete the actual file.`)) return;
     } catch (_) {
     }
     try {
-      if ("1.592") return "1.592";
+      if ("1.600") return "1.600";
     } catch (_) {
     }
     return "unknown";
@@ -26620,7 +26575,7 @@ This won't delete the actual file.`)) return;
   function genShiftId() {
     return "s" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
   }
-  function roundToNearestQuarterHour2(d) {
+  function roundToNearestQuarterHour(d) {
     var x = new Date(d.getTime());
     x.setSeconds(0, 0);
     x.setMilliseconds(0);
@@ -26646,7 +26601,7 @@ This won't delete the actual file.`)) return;
     if (!s) return null;
     var d = new Date(s);
     if (!Number.isFinite(d.getTime())) return null;
-    return roundToNearestQuarterHour2(d);
+    return roundToNearestQuarterHour(d);
   }
   function fmtDateTime(iso) {
     try {
@@ -26662,8 +26617,8 @@ This won't delete the actual file.`)) return;
     return h > 0 ? h + "h " + m + "m" : m + "m";
   }
   function defaultComposeTimes() {
-    var start = roundToNearestQuarterHour2(/* @__PURE__ */ new Date());
-    var end = roundToNearestQuarterHour2(new Date(start.getTime() + SHIFT_DURATION_MS));
+    var start = roundToNearestQuarterHour(/* @__PURE__ */ new Date());
+    var end = roundToNearestQuarterHour(new Date(start.getTime() + SHIFT_DURATION_MS));
     return { start, end };
   }
   function getUiMode(host) {
@@ -26912,7 +26867,7 @@ This won't delete the actual file.`)) return;
   function renderComposeStart(host, act) {
     var defaults = defaultComposeTimes();
     var startVal = act && act.startIso ? new Date(act.startIso) : defaults.start;
-    var endVal = act && act.plannedEndIso ? new Date(act.plannedEndIso) : act && act.startIso ? roundToNearestQuarterHour2(new Date(new Date(act.startIso).getTime() + SHIFT_DURATION_MS)) : defaults.end;
+    var endVal = act && act.plannedEndIso ? new Date(act.plannedEndIso) : act && act.startIso ? roundToNearestQuarterHour(new Date(new Date(act.startIso).getTime() + SHIFT_DURATION_MS)) : defaults.end;
     var startInp = document.createElement("input");
     startInp.type = "datetime-local";
     startInp.value = toDatetimeLocalValue(startVal);
@@ -26944,8 +26899,8 @@ This won't delete the actual file.`)) return;
     host.appendChild(actions);
   }
   function renderEdit(host, act) {
-    var startVal = act.startIso ? new Date(act.startIso) : roundToNearestQuarterHour2(/* @__PURE__ */ new Date());
-    var endVal = act.plannedEndIso ? new Date(act.plannedEndIso) : roundToNearestQuarterHour2(new Date(startVal.getTime() + SHIFT_DURATION_MS));
+    var startVal = act.startIso ? new Date(act.startIso) : roundToNearestQuarterHour(/* @__PURE__ */ new Date());
+    var endVal = act.plannedEndIso ? new Date(act.plannedEndIso) : roundToNearestQuarterHour(new Date(startVal.getTime() + SHIFT_DURATION_MS));
     var startInp = document.createElement("input");
     startInp.type = "datetime-local";
     startInp.value = toDatetimeLocalValue(startVal);
@@ -28633,6 +28588,7 @@ This won't delete the actual file.`)) return;
           if (!syncShiftBridgeIntoStore()) return;
           if (state.panelEl) {
             refreshInvestigationShiftBar();
+            refreshHeadContextChip();
             refreshDrawerFooter();
             if (!hasActiveCardEdit()) {
               var ek = state.panelEl.getAttribute("data-qaw-edit-key");
