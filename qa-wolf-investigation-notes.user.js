@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         QA Wolf Investigation Notes
 // @namespace    http://tampermonkey.net/
-// @version      1.600
+// @version      1.620
 // @description  Per-file investigation notes: quick links (new-tab opens, PoC textarea, client-wide notes), client/env chips, instant tooltips, run timing, shift sync, work mode, export, search. data-e2e investigation-* hooks.
 // @author       You
 // @match        https://app.qawolf.com/*
@@ -112,13 +112,18 @@
         pendingRunLogCopy: null,
         /** Helper function requested by a flow helper chip before the helper panel renders. */
         pendingHelperPanelFn: "",
-        helperFilePanelState: {}
+        helperFilePanelState: {},
+        /** Notes init ran and is not paused by global safe mode. */
+        notesRunning: false,
+        safeModeListenersWired: false,
+        bugReportFooterMo: null,
+        bugReportStoragePoll: null
       };
     }
   });
 
   // src/notes/01-constants.ts
-  var STORAGE_KEY, NOTE_LS_KEY_PREFIX, META_STORAGE_KEY, DEBOUNCE_MS, POLL_MS, GLOBAL_SAFE_MODE_KEY, GLOBAL_SAFE_MODE_EVENT, SHIFT_BRIDGE_GM_KEY, TASK_WOLF_SHIFT_DOM_BRIDGE_DISABLED, SETTINGS_GM_KEY, TASK_WOLF_HQ_URL, RUN_CHIME_METRICS_KEY, OPEN_TABS_KEY, SHIFT_END_CTA_SENT_KEY, DAILY_CLIENT_WORK_KEY, CLIENT_SCOPE_ENV, CLIENT_NOTES_FILE, PENDING_HELPER_FN_KEY, COVERAGE_GM_KEY, OUTLINE_GENERATOR_GM_KEY, NOTES_SYNTAX_TOOLTIP, RUN_METRICS_TOOLTIP, RAW_LINE, RAW_CHAR_TO_TAG, RAW_TAG_TO_CHAR, FACET_OPTIONS, FACET_DEFINITIONS, TEAM_DEFAULT_SLACK_IMAGE_CHANNEL, TEAM_DEFAULT_CLOUDINARY_CLOUD_NAME, TEAM_DEFAULT_CLOUDINARY_UPLOAD_PRESET, Z_INV_DRAWER, Z_INV_MODAL, STATUS_OPTIONS, STATUS_CHIP_STYLE, WORK_MODE_OPTIONS;
+  var STORAGE_KEY, NOTE_LS_KEY_PREFIX, META_STORAGE_KEY, DEBOUNCE_MS, POLL_MS, GLOBAL_SAFE_MODE_KEY, GLOBAL_SAFE_MODE_EVENT, QAW_DEBUG_LS_KEY, SHIFT_BRIDGE_GM_KEY, TASK_WOLF_SHIFT_DOM_BRIDGE_DISABLED, SETTINGS_GM_KEY, TASK_WOLF_HQ_URL, RUN_CHIME_METRICS_KEY, OPEN_TABS_KEY, SHIFT_END_CTA_SENT_KEY, DAILY_CLIENT_WORK_KEY, CLIENT_SCOPE_ENV, CLIENT_NOTES_FILE, PENDING_HELPER_FN_KEY, COVERAGE_GM_KEY, OUTLINE_GENERATOR_GM_KEY, NOTES_SYNTAX_TOOLTIP, RUN_METRICS_TOOLTIP, RAW_LINE, RAW_CHAR_TO_TAG, RAW_TAG_TO_CHAR, FACET_OPTIONS, FACET_DEFINITIONS, TEAM_DEFAULT_SLACK_IMAGE_CHANNEL, TEAM_DEFAULT_CLOUDINARY_CLOUD_NAME, TEAM_DEFAULT_CLOUDINARY_UPLOAD_PRESET, Z_INV_DRAWER, Z_INV_MODAL, STATUS_OPTIONS, STATUS_CHIP_STYLE, WORK_MODE_OPTIONS;
   var init_constants = __esm({
     "src/notes/01-constants.ts"() {
       "use strict";
@@ -129,6 +134,7 @@
       POLL_MS = 500;
       GLOBAL_SAFE_MODE_KEY = "_qawUserscriptsSafeMode";
       GLOBAL_SAFE_MODE_EVENT = "qaw-userscripts-safe-mode";
+      QAW_DEBUG_LS_KEY = "_qawDebug";
       SHIFT_BRIDGE_GM_KEY = "_qawInvNotesShiftBridge_v1";
       TASK_WOLF_SHIFT_DOM_BRIDGE_DISABLED = true;
       SETTINGS_GM_KEY = "_qawInvNotesSettings_v1";
@@ -177,6 +183,130 @@
         dni: { bg: "#5b21b6", fg: "#ede9fe", border: "#a78bfa" }
       };
       WORK_MODE_OPTIONS = ["follow", "investigation", "creation", "bugreval"];
+    }
+  });
+
+  // src/notes/54-diagnostics.ts
+  function isQawDebugEnabled() {
+    try {
+      return localStorage.getItem(QAW_DEBUG_LS_KEY) === "1";
+    } catch (_e) {
+      return false;
+    }
+  }
+  function qawWarnOnce(key, message) {
+    var k = String(key || "").trim();
+    if (!k || _warnedOnce.has(k)) return;
+    _warnedOnce.add(k);
+    try {
+      console.warn("[qaw] " + message);
+    } catch (_e) {
+    }
+  }
+  function countNoteKeys() {
+    var n = 0;
+    try {
+      for (var i = 0; i < localStorage.length; i++) {
+        var lk = localStorage.key(i) || "";
+        if (lk.startsWith(NOTE_LS_KEY_PREFIX)) n++;
+      }
+    } catch (_e) {
+    }
+    return n;
+  }
+  function readJsonArrayTail(key, max) {
+    try {
+      var raw = localStorage.getItem(key);
+      if (!raw) return [];
+      var arr = JSON.parse(raw);
+      if (!Array.isArray(arr)) return [];
+      return arr.slice(Math.max(0, arr.length - max));
+    } catch (_e) {
+      return [];
+    }
+  }
+  function collectQawDiagnostics() {
+    var _a, _b;
+    var notesVersion = "";
+    try {
+      notesVersion = String(globalThis.__QAW_NOTES_VERSION__ || "");
+    } catch (_e) {
+    }
+    var gmScriptVersion = "";
+    try {
+      gmScriptVersion = String(((_b = (_a = globalThis.GM_info) == null ? void 0 : _a.script) == null ? void 0 : _b.version) || "");
+    } catch (_e) {
+    }
+    var safeMode = false;
+    try {
+      safeMode = localStorage.getItem(GLOBAL_SAFE_MODE_KEY) === "1";
+    } catch (_e) {
+    }
+    return {
+      collectedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      url: function() {
+        try {
+          return location.href;
+        } catch (_e) {
+          return "";
+        }
+      }(),
+      notesVersion: notesVersion || gmScriptVersion,
+      safeMode,
+      debugEnabled: isQawDebugEnabled(),
+      noteKeyCount: countNoteKeys(),
+      hasMetaV2: function() {
+        try {
+          var raw = localStorage.getItem(META_STORAGE_KEY);
+          if (!raw) return false;
+          var m = JSON.parse(raw);
+          return !!(m && m.v === 2);
+        } catch (_e) {
+          return false;
+        }
+      }(),
+      hasRunChimeMetrics: function() {
+        try {
+          return !!localStorage.getItem(RUN_CHIME_METRICS_KEY);
+        } catch (_e) {
+          return false;
+        }
+      }(),
+      recentSaveDebug: readJsonArrayTail(NOTE_SAVE_DEBUG_KEY, 8)
+    };
+  }
+  function formatQawDiagnosticsText() {
+    return JSON.stringify(collectQawDiagnostics(), null, 2);
+  }
+  async function copyQawDiagnosticsToClipboard() {
+    var text = formatQawDiagnosticsText();
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch (_e) {
+    }
+    try {
+      var ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.cssText = "position:fixed;left:-9999px;top:0;opacity:0;";
+      document.body.appendChild(ta);
+      ta.select();
+      var ok = document.execCommand("copy");
+      ta.remove();
+      return !!ok;
+    } catch (_e2) {
+      return false;
+    }
+  }
+  var NOTE_SAVE_DEBUG_KEY, _warnedOnce;
+  var init_diagnostics = __esm({
+    "src/notes/54-diagnostics.ts"() {
+      "use strict";
+      init_constants();
+      NOTE_SAVE_DEBUG_KEY = "_qawNoteSaveDebug";
+      _warnedOnce = /* @__PURE__ */ new Set();
     }
   });
 
@@ -422,6 +552,7 @@
       drawerWidth: 540,
       investigationShift: null,
       investigationShiftHistory: [],
+      shiftBridgeUpdatedAt: "",
       quickLinks: {},
       quickLinksByClient: {},
       channelDedupeV1Done: false,
@@ -624,6 +755,11 @@
     if (e.plannedEndIso) out.plannedEndIso = e.plannedEndIso;
     return out;
   }
+  function shiftBridgeUpdatedAtMs(o) {
+    var raw = o && typeof o.shiftBridgeUpdatedAt === "string" ? o.shiftBridgeUpdatedAt : "";
+    var ms = raw ? Date.parse(raw) : 0;
+    return Number.isFinite(ms) ? ms : 0;
+  }
   function fingerprintInvestigationShiftBridge(o) {
     var i = o && o.investigationShift != null ? o.investigationShift : null;
     var h = o && Array.isArray(o.investigationShiftHistory) ? o.investigationShiftHistory : [];
@@ -641,7 +777,11 @@
     try {
       var b = JSON.parse(raw);
       if (!b || b.v !== 1) return;
+      var bridgeMs = shiftBridgeUpdatedAtMs(b);
+      var localMs = shiftBridgeUpdatedAtMs(p);
+      if (localMs > bridgeMs) return;
       p.investigationShift = normalizeShiftActive(b.investigationShift);
+      p.shiftBridgeUpdatedAt = typeof b.shiftBridgeUpdatedAt === "string" ? b.shiftBridgeUpdatedAt : "";
       if (Array.isArray(b.investigationShiftHistory)) {
         p.investigationShiftHistory = b.investigationShiftHistory.map(normalizeShiftHistoryEntry);
       }
@@ -670,6 +810,7 @@
     if (!Array.isArray(p.investigationShiftHistory)) p.investigationShiftHistory = [];
     if (p.investigationShift != null && typeof p.investigationShift !== "object") p.investigationShift = null;
     if (p.investigationShift && !p.investigationShift.kind) p.investigationShift.kind = "investigation";
+    if (typeof p.shiftBridgeUpdatedAt !== "string") p.shiftBridgeUpdatedAt = "";
     if (!p.quickLinks || typeof p.quickLinks !== "object") p.quickLinks = {};
     var ql = p.quickLinks;
     if (typeof ql.externalChat !== "string") ql.externalChat = "";
@@ -752,6 +893,7 @@
       drawerWidth: p.drawerWidth != null ? p.drawerWidth : 540,
       investigationShift: p.investigationShift || null,
       investigationShiftHistory: p.investigationShiftHistory || [],
+      shiftBridgeUpdatedAt: typeof p.shiftBridgeUpdatedAt === "string" ? p.shiftBridgeUpdatedAt : "",
       quickLinks: p.quickLinks || {},
       quickLinksByClient: p.quickLinksByClient || {},
       channelDedupeV1Done: p.channelDedupeV1Done === true,
@@ -810,15 +952,17 @@
           var p = Object.assign(defaultStore(), meta);
           p.v = 1;
           p.notes = {};
-          Object.keys(localStorage).forEach(function(lk) {
-            if (!lk.startsWith(NOTE_LS_KEY_PREFIX)) return;
+          for (var li = 0; li < localStorage.length; li++) {
+            var lk = localStorage.key(li);
+            if (!lk || !lk.startsWith(NOTE_LS_KEY_PREFIX)) continue;
             var noteK = lk.slice(NOTE_LS_KEY_PREFIX.length);
             try {
               var noteRaw = localStorage.getItem(lk);
               if (noteRaw) p.notes[noteK] = JSON.parse(noteRaw);
             } catch (e3) {
+              qawWarnOnce("load-note-" + noteK, "Skipped malformed note in storage: " + noteK);
             }
-          });
+          }
           return normalizeStore(p);
         }
       }
@@ -827,8 +971,8 @@
       if (!pv1 || typeof pv1 !== "object") pv1 = defaultStore();
       var normalized = normalizeStore(pv1);
       try {
-        Object.keys(normalized.notes).forEach(function(noteK) {
-          localStorage.setItem(NOTE_LS_KEY_PREFIX + noteK, JSON.stringify(normalized.notes[noteK]));
+        Object.keys(normalized.notes).forEach(function(noteK2) {
+          localStorage.setItem(NOTE_LS_KEY_PREFIX + noteK2, JSON.stringify(normalized.notes[noteK2]));
         });
         localStorage.setItem(META_STORAGE_KEY, JSON.stringify(buildMeta(normalized)));
       } catch (eMig) {
@@ -844,7 +988,8 @@
       var payload = {
         v: 1,
         investigationShift: state.store.investigationShift,
-        investigationShiftHistory: state.store.investigationShiftHistory || []
+        investigationShiftHistory: state.store.investigationShiftHistory || [],
+        shiftBridgeUpdatedAt: state.store.shiftBridgeUpdatedAt || ""
       };
       GM_setValue(SHIFT_BRIDGE_GM_KEY, JSON.stringify(payload));
       state.lastAppliedBridgeShiftJson = fingerprintInvestigationShiftBridge(state.store);
@@ -866,6 +1011,7 @@
       if (!b || b.v !== 1) return out;
       out.investigationShift = normalizeShiftActive(b.investigationShift);
       out.investigationShiftHistory = Array.isArray(b.investigationShiftHistory) ? b.investigationShiftHistory.map(normalizeShiftHistoryEntry) : [];
+      out.shiftBridgeUpdatedAt = typeof b.shiftBridgeUpdatedAt === "string" ? b.shiftBridgeUpdatedAt : "";
     } catch (e2) {
     }
     return out;
@@ -875,7 +1021,8 @@
     var payload = {
       v: 1,
       investigationShift: normalizeShiftActive(investigationShift),
-      investigationShiftHistory: Array.isArray(investigationShiftHistory) ? investigationShiftHistory.map(normalizeShiftHistoryEntry) : []
+      investigationShiftHistory: Array.isArray(investigationShiftHistory) ? investigationShiftHistory.map(normalizeShiftHistoryEntry) : [],
+      shiftBridgeUpdatedAt: (/* @__PURE__ */ new Date()).toISOString()
     };
     try {
       GM_setValue(SHIFT_BRIDGE_GM_KEY, JSON.stringify(payload));
@@ -905,8 +1052,13 @@
     if (!b || b.v !== 1) return false;
     var cmp = fingerprintInvestigationShiftBridge(b);
     if (cmp === state.lastAppliedBridgeShiftJson) return false;
+    if (shiftBridgeUpdatedAtMs(state.store) > shiftBridgeUpdatedAtMs(b)) {
+      state.lastAppliedBridgeShiftJson = cmp;
+      return false;
+    }
     state.lastAppliedBridgeShiftJson = cmp;
     state.store.investigationShift = normalizeShiftActive(b.investigationShift);
+    state.store.shiftBridgeUpdatedAt = typeof b.shiftBridgeUpdatedAt === "string" ? b.shiftBridgeUpdatedAt : "";
     if (!state.store.investigationShift) state.store.investigationShift = null;
     if (Array.isArray(b.investigationShiftHistory)) {
       state.store.investigationShiftHistory = b.investigationShiftHistory.map(normalizeShiftHistoryEntry);
@@ -961,7 +1113,7 @@
       delete event.memNote;
       delete event.diskNote;
       if (!noteHasBugRevalData(memNote) && !noteHasBugRevalData(diskNote)) return;
-      var raw = localStorage.getItem(NOTE_SAVE_DEBUG_KEY);
+      var raw = localStorage.getItem(NOTE_SAVE_DEBUG_KEY2);
       var arr = raw ? JSON.parse(raw) : [];
       if (!Array.isArray(arr)) arr = [];
       arr.push(Object.assign({
@@ -976,7 +1128,7 @@
         }()
       }, event));
       if (arr.length > 160) arr = arr.slice(arr.length - 160);
-      localStorage.setItem(NOTE_SAVE_DEBUG_KEY, JSON.stringify(arr));
+      localStorage.setItem(NOTE_SAVE_DEBUG_KEY2, JSON.stringify(arr));
     } catch (_e) {
     }
   }
@@ -1028,6 +1180,7 @@
           memNote
         });
       } catch (e) {
+        qawWarnOnce("save-note-" + noteK, "[qaw-store] failed to save note " + noteK);
         console.warn("[qaw-store] failed to save note", {
           noteKey: noteK,
           size: JSON.stringify(memNote || {}).length,
@@ -1289,15 +1442,16 @@
       }
     }
   }
-  var lastBackupAt, NOTE_SAVE_DEBUG_KEY, NOTE_KEY_SEP, _cachedReporterIdentity, EXPORT_VIEWS_GM_KEY;
+  var lastBackupAt, NOTE_SAVE_DEBUG_KEY2, NOTE_KEY_SEP, _cachedReporterIdentity, EXPORT_VIEWS_GM_KEY;
   var init_store = __esm({
     "src/notes/02-store.ts"() {
       "use strict";
       init_state();
+      init_diagnostics();
       init_constants();
       init_storage_cleanup();
       lastBackupAt = 0;
-      NOTE_SAVE_DEBUG_KEY = "_qawNoteSaveDebug";
+      NOTE_SAVE_DEBUG_KEY2 = "_qawNoteSaveDebug";
       NOTE_KEY_SEP = "";
       _cachedReporterIdentity = null;
       EXPORT_VIEWS_GM_KEY = "_qawExportViews_v1";
@@ -1449,6 +1603,7 @@
       if (Number.isFinite(endMs)) next.plannedEndIso = new Date(endMs).toISOString();
     }
     state.store.investigationShift = next;
+    state.store.shiftBridgeUpdatedAt = (/* @__PURE__ */ new Date()).toISOString();
     if (!state.store.investigationShiftHistory) state.store.investigationShiftHistory = [];
     state.shiftEndingModalShown = false;
     clearShiftEndingTimers();
@@ -1474,6 +1629,7 @@
     });
     while (state.store.investigationShiftHistory.length > 80) state.store.investigationShiftHistory.shift();
     state.store.investigationShift = null;
+    state.store.shiftBridgeUpdatedAt = (/* @__PURE__ */ new Date()).toISOString();
     saveStoreImmediate();
     refreshInvestigationShiftBar();
   }
@@ -1557,6 +1713,7 @@
         var base = act.plannedEndIso ? new Date(act.plannedEndIso).getTime() : Date.now();
         act.plannedEndIso = new Date(base + 10 * 60 * 1e3).toISOString();
         if (act.id) clearShiftEndCtaSent(String(act.id));
+        state.store.shiftBridgeUpdatedAt = (/* @__PURE__ */ new Date()).toISOString();
         saveStoreImmediate();
       }
       refreshInvestigationShiftBar();
@@ -3197,6 +3354,2420 @@
       VERIFY_SESSION_KEY = "_qawEnvVerifySession_v1";
       VERIFIED_WINDOW_MS = 7 * 24 * 60 * 60 * 1e3;
       PENDING_MAX_MS = 2 * 60 * 1e3;
+    }
+  });
+
+  // src/notes/41-floating-panel.ts
+  function ensureTray() {
+    if (trayEl && document.body.contains(trayEl)) return trayEl;
+    trayEl = document.createElement("div");
+    trayEl.setAttribute("data-qaw-floating-tray", "1");
+    trayEl.style.cssText = "position:fixed;right:16px;bottom:16px;z-index:" + (Z_INV_MODAL + 80) + ";display:flex;align-items:center;gap:6px;flex-wrap:wrap;max-width:50vw;font-family:monospace;pointer-events:none;";
+    document.body.appendChild(trayEl);
+    return trayEl;
+  }
+  function updateTrayVisibility() {
+    if (!trayEl) return;
+    trayEl.style.display = trayEl.children.length ? "flex" : "none";
+  }
+  function clampPanel(panel) {
+    var rect = panel.getBoundingClientRect();
+    var left = Math.max(8, Math.min(rect.left, window.innerWidth - Math.min(80, rect.width)));
+    var top = Math.max(8, Math.min(rect.top, window.innerHeight - Math.min(48, rect.height)));
+    panel.style.left = Math.round(left) + "px";
+    panel.style.top = Math.round(top) + "px";
+  }
+  function makeButton(label, title) {
+    var btn3 = document.createElement("button");
+    btn3.type = "button";
+    btn3.textContent = label;
+    btn3.title = title;
+    btn3.style.cssText = "font-size:11px;background:none;color:#94a3b8;border:1px solid #334155;border-radius:5px;padding:3px 8px;cursor:pointer;font-family:monospace;line-height:1.3;";
+    btn3.addEventListener("mouseenter", function() {
+      btn3.style.color = "#e2e8f0";
+      btn3.style.borderColor = "#64748b";
+      btn3.style.background = "#1e293b";
+    });
+    btn3.addEventListener("mouseleave", function() {
+      btn3.style.color = "#94a3b8";
+      btn3.style.borderColor = "#334155";
+      btn3.style.background = "none";
+    });
+    return btn3;
+  }
+  function restoreFloatingPanel(id) {
+    var panel = activePanels[id];
+    if (!panel) return false;
+    panel.restore();
+    return true;
+  }
+  function getFloatingPanel(id) {
+    return activePanels[id] || null;
+  }
+  function createFloatingPanel(opts) {
+    if (activePanels[opts.id]) {
+      activePanels[opts.id].restore();
+      return activePanels[opts.id];
+    }
+    var width = opts.width || 720;
+    var height = opts.height || 560;
+    var zIndex = opts.zIndex || Z_INV_MODAL + 50;
+    var root = document.createElement("div");
+    root.setAttribute("data-qaw-floating-panel-root", opts.id);
+    root.setAttribute("data-qaw-overlay", "1");
+    root.style.cssText = "position:fixed;inset:0;z-index:" + zIndex + ";pointer-events:none;";
+    var panel = document.createElement("div");
+    panel.setAttribute("data-qaw-floating-panel", opts.id);
+    panel.style.cssText = "position:fixed;left:" + Math.max(16, Math.round((window.innerWidth - width) / 2)) + "px;top:" + Math.max(16, Math.round((window.innerHeight - height) / 2)) + "px;width:min(" + width + "px,calc(100vw - 32px));height:min(" + height + "px,calc(100vh - 32px));min-width:" + (opts.minWidth || 320) + "px;min-height:" + (opts.minHeight || 220) + "px;background:#0f172a;border:1px solid #475569;border-radius:10px;color:#e2e8f0;box-shadow:0 18px 56px rgba(0,0,0,0.62);display:flex;flex-direction:column;overflow:hidden;resize:both;pointer-events:auto;font-family:monospace;";
+    var header = document.createElement("div");
+    header.setAttribute("data-qaw-floating-panel-header", "1");
+    header.style.cssText = "display:flex;align-items:center;gap:8px;padding:9px 12px;border-bottom:1px solid #334155;background:#1e293b;cursor:move;user-select:none;flex-shrink:0;";
+    var titleEl = document.createElement("div");
+    titleEl.textContent = opts.title;
+    titleEl.style.cssText = "flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;font-weight:700;color:#f8fafc;";
+    header.appendChild(titleEl);
+    var actions = document.createElement("div");
+    actions.style.cssText = "display:flex;align-items:center;gap:6px;flex-shrink:0;";
+    var minBtn = makeButton("\u2013", "Minimize");
+    var closeBtn = makeButton("\xD7", "Close");
+    actions.appendChild(minBtn);
+    actions.appendChild(closeBtn);
+    header.appendChild(actions);
+    var body = document.createElement("div");
+    body.setAttribute("data-qaw-floating-panel-body", "1");
+    body.style.cssText = "flex:1;min-height:0;display:flex;flex-direction:column;background:#0f172a;";
+    panel.appendChild(header);
+    panel.appendChild(body);
+    root.appendChild(panel);
+    document.body.appendChild(root);
+    var chip = null;
+    var handle;
+    function makeChip() {
+      var tray = ensureTray();
+      var c = document.createElement("button");
+      c.type = "button";
+      c.setAttribute("data-qaw-floating-chip", opts.id);
+      c.textContent = opts.title;
+      c.style.cssText = "pointer-events:auto;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;font-weight:700;color:#dbeafe;background:#1e3a8a;border:1px solid #3b82f6;border-radius:999px;padding:6px 10px;cursor:pointer;font-family:monospace;box-shadow:0 6px 20px rgba(0,0,0,0.45);";
+      c.addEventListener("click", function() {
+        handle.restore();
+      });
+      tray.appendChild(c);
+      updateTrayVisibility();
+      return c;
+    }
+    var closed = false;
+    function cleanupListeners() {
+      document.removeEventListener("mousemove", onMouseMove);
+      document.removeEventListener("mouseup", onMouseUp);
+      window.removeEventListener("resize", onResize);
+      window.removeEventListener("beforeunload", cleanupListeners);
+    }
+    function close() {
+      if (closed) return;
+      closed = true;
+      if (chip) {
+        chip.remove();
+        chip = null;
+        updateTrayVisibility();
+      }
+      cleanupListeners();
+      delete activePanels[opts.id];
+      root.remove();
+      if (opts.onClose) opts.onClose();
+    }
+    function minimize() {
+      root.style.display = "none";
+      if (!chip) chip = makeChip();
+    }
+    function restore() {
+      root.style.display = "";
+      if (chip) {
+        chip.remove();
+        chip = null;
+        updateTrayVisibility();
+      }
+      clampPanel(panel);
+      try {
+        panel.focus();
+      } catch (e) {
+      }
+    }
+    handle = { root, panel, header, titleEl, body, actions, close, minimize, restore };
+    activePanels[opts.id] = handle;
+    minBtn.addEventListener("click", function(e) {
+      e.stopPropagation();
+      minimize();
+    });
+    closeBtn.addEventListener("click", function(e) {
+      e.stopPropagation();
+      close();
+    });
+    var dragging = false;
+    var dragDx = 0;
+    var dragDy = 0;
+    function onMouseMove(e) {
+      if (!dragging) return;
+      panel.style.left = Math.round(e.clientX - dragDx) + "px";
+      panel.style.top = Math.round(e.clientY - dragDy) + "px";
+      panel.style.right = "auto";
+      panel.style.bottom = "auto";
+    }
+    function onMouseUp() {
+      if (!dragging) return;
+      dragging = false;
+      clampPanel(panel);
+    }
+    function onResize() {
+      clampPanel(panel);
+    }
+    header.addEventListener("mousedown", function(e) {
+      if (e.target.closest("button")) return;
+      dragging = true;
+      var rect = panel.getBoundingClientRect();
+      dragDx = e.clientX - rect.left;
+      dragDy = e.clientY - rect.top;
+      e.preventDefault();
+    });
+    document.addEventListener("mousemove", onMouseMove);
+    document.addEventListener("mouseup", onMouseUp);
+    window.addEventListener("resize", onResize);
+    window.addEventListener("beforeunload", cleanupListeners);
+    return handle;
+  }
+  var activePanels, trayEl;
+  var init_floating_panel = __esm({
+    "src/notes/41-floating-panel.ts"() {
+      "use strict";
+      init_constants();
+      activePanels = {};
+      trayEl = null;
+    }
+  });
+
+  // src/notes/42-outline-generator.ts
+  function newOutlineRowId() {
+    return "or-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8);
+  }
+  function defaultOutlineGeneratorDraft() {
+    return { v: 1, headersText: "", rows: [], selectedIds: [], inputMode: "paste" };
+  }
+  function loadOutlineGeneratorDraft() {
+    var d = defaultOutlineGeneratorDraft();
+    if (typeof GM_getValue !== "function") return d;
+    try {
+      var raw = GM_getValue(OUTLINE_GENERATOR_GM_KEY, "");
+      if (!raw) return d;
+      var p = JSON.parse(raw);
+      return {
+        v: 1,
+        headersText: p.headersText != null ? String(p.headersText) : d.headersText,
+        rows: Array.isArray(p.rows) ? p.rows.map(function(r) {
+          return {
+            id: String(r.id || newOutlineRowId()),
+            rowNumber: typeof r.rowNumber === "number" ? r.rowNumber : r.rowNumber == null ? null : parseInt(String(r.rowNumber), 10) || null,
+            cells: Array.isArray(r.cells) ? r.cells.map(String) : [],
+            importedAt: String(r.importedAt || "")
+          };
+        }) : [],
+        selectedIds: Array.isArray(p.selectedIds) ? p.selectedIds.map(String) : [],
+        inputMode: p.inputMode === "file" ? "file" : "paste"
+      };
+    } catch (_e) {
+      return d;
+    }
+  }
+  function saveOutlineGeneratorDraft(draft) {
+    if (typeof GM_setValue !== "function") return;
+    try {
+      GM_setValue(OUTLINE_GENERATOR_GM_KEY, JSON.stringify(draft));
+    } catch (_e) {
+    }
+  }
+  function parseSpreadsheetPaste(text) {
+    var s = String(text || "").replace(/^\uFEFF/, "").trim();
+    if (!s) return [];
+    var lines = s.split(/\r?\n/).filter(function(line) {
+      return line.length > 0;
+    });
+    if (!lines.length) return [];
+    var tabLines = lines.filter(function(line) {
+      return line.indexOf("	") !== -1;
+    });
+    if (tabLines.length >= Math.max(1, Math.ceil(lines.length * 0.5))) {
+      return lines.map(function(line) {
+        return line.split("	").map(function(c) {
+          return c.replace(/\r$/, "");
+        });
+      });
+    }
+    return parseCsv(s);
+  }
+  function tableToCsvLine(cells) {
+    return cells.map(function(c) {
+      var v = String(c == null ? "" : c);
+      if (/[",\n\r]/.test(v)) return '"' + v.replace(/"/g, '""') + '"';
+      return v;
+    }).join(",");
+  }
+  function composeOutlineCsvText(headersText, dataRows) {
+    var parts = [];
+    var h = String(headersText || "").trim();
+    if (h) {
+      var headerTable = parseSpreadsheetPaste(h);
+      if (headerTable.length) {
+        parts.push(tableToCsvLine(headerTable[0]));
+      } else {
+        parts.push(h);
+      }
+    }
+    for (var i = 0; i < dataRows.length; i++) {
+      parts.push(tableToCsvLine(dataRows[i]));
+    }
+    return parts.join("\n");
+  }
+  function assignTrackerRowNumbers(startRow, count) {
+    var out = [];
+    if (startRow == null || !isFinite(startRow) || startRow < 1) {
+      for (var i = 0; i < count; i++) out.push(null);
+      return out;
+    }
+    var n = Math.floor(startRow);
+    for (var j = 0; j < count; j++) out.push(n + j);
+    return out;
+  }
+  function parsePastedDataRows(text) {
+    var table = parseSpreadsheetPaste(text);
+    if (!table.length) return { ok: false, error: "No rows found in paste." };
+    var data = table.slice();
+    if (data.length === 1 && data[0].every(function(c) {
+      return !String(c || "").trim();
+    })) {
+      return { ok: false, error: "Paste is empty." };
+    }
+    return { ok: true, rows: data };
+  }
+  function importRowsIntoDraft(draft, pastedText, startRowNumber) {
+    var parsed = parsePastedDataRows(pastedText);
+    if (!parsed.ok) return parsed;
+    var numbers = assignTrackerRowNumbers(startRowNumber, parsed.rows.length);
+    var now = (/* @__PURE__ */ new Date()).toISOString();
+    for (var i = 0; i < parsed.rows.length; i++) {
+      draft.rows.push({
+        id: newOutlineRowId(),
+        rowNumber: numbers[i],
+        cells: parsed.rows[i],
+        importedAt: now
+      });
+    }
+    return { ok: true, added: parsed.rows.length };
+  }
+  function deleteOutlineRows(draft, ids) {
+    var set = {};
+    for (var i = 0; i < ids.length; i++) set[ids[i]] = true;
+    draft.rows = draft.rows.filter(function(r) {
+      return !set[r.id];
+    });
+    draft.selectedIds = draft.selectedIds.filter(function(id) {
+      return !set[id];
+    });
+  }
+  function generateOutlineMarkdownFromDraft(draft, maxRows, flowBrowserOrOptions) {
+    if (!String(draft.headersText || "").trim()) {
+      return { ok: false, error: "Paste tracker headers first (Group, Workflow, Test Step)." };
+    }
+    var selected = draft.rows.filter(function(r) {
+      return draft.selectedIds.indexOf(r.id) !== -1;
+    });
+    if (!selected.length) return { ok: false, error: "Select at least one saved row." };
+    var dataRows = selected.map(function(r) {
+      return r.cells;
+    });
+    var csv = composeOutlineCsvText(draft.headersText, dataRows);
+    return generateOutlineMarkdownFromCsv(csv, maxRows, flowBrowserOrOptions);
+  }
+  function parseCsv(text) {
+    var s = String(text || "").replace(/^\uFEFF/, "");
+    var rows = [];
+    var row2 = [];
+    var field = "";
+    var i = 0;
+    var inQuotes = false;
+    function pushField() {
+      row2.push(field);
+      field = "";
+    }
+    function pushRow() {
+      pushField();
+      if (row2.length > 1 || row2[0] !== "" || rows.length === 0) rows.push(row2);
+      row2 = [];
+    }
+    while (i < s.length) {
+      var ch = s.charAt(i);
+      if (inQuotes) {
+        if (ch === '"') {
+          if (s.charAt(i + 1) === '"') {
+            field += '"';
+            i += 2;
+            continue;
+          }
+          inQuotes = false;
+          i++;
+          continue;
+        }
+        field += ch;
+        i++;
+        continue;
+      }
+      if (ch === '"') {
+        inQuotes = true;
+        i++;
+        continue;
+      }
+      if (ch === ",") {
+        pushField();
+        i++;
+        continue;
+      }
+      if (ch === "\r") {
+        i++;
+        continue;
+      }
+      if (ch === "\n") {
+        pushRow();
+        i++;
+        continue;
+      }
+      field += ch;
+      i++;
+    }
+    pushRow();
+    return rows;
+  }
+  function normalizeHeader(h) {
+    return String(h || "").trim().toLowerCase().replace(/\s+/g, " ");
+  }
+  function findColumnIndex(headers, candidates) {
+    for (var i = 0; i < headers.length; i++) {
+      var h = normalizeHeader(headers[i]);
+      for (var j = 0; j < candidates.length; j++) {
+        if (h === candidates[j]) return i;
+      }
+    }
+    return -1;
+  }
+  function parseOutlineCsvRows(text) {
+    var table = parseCsv(text);
+    if (!table.length) return { ok: false, error: "CSV is empty." };
+    var headers = table[0].map(function(c) {
+      return String(c || "").trim();
+    });
+    var groupIdx = findColumnIndex(headers, ["group"]);
+    var workflowIdx = findColumnIndex(headers, ["workflow"]);
+    var stepIdx = findColumnIndex(headers, ["test step", "teststep", "step"]);
+    if (groupIdx < 0) return { ok: false, error: "Missing required column: Group" };
+    if (workflowIdx < 0) return { ok: false, error: "Missing required column: Workflow" };
+    if (stepIdx < 0) return { ok: false, error: "Missing required column: Test Step" };
+    var rows = [];
+    for (var r = 1; r < table.length; r++) {
+      var line = table[r];
+      if (!line || !line.length) continue;
+      var group = groupIdx < line.length ? String(line[groupIdx] || "").trim() : "";
+      var workflow = workflowIdx < line.length ? String(line[workflowIdx] || "").trim() : "";
+      var testStep = stepIdx < line.length ? String(line[stepIdx] || "").trim() : "";
+      if (!group && !workflow && !testStep) continue;
+      rows.push({ group, workflow, testStep });
+    }
+    if (!rows.length) return { ok: false, error: "No data rows found after the header." };
+    return { ok: true, rows };
+  }
+  function forwardFillOutlineWorkflows(rows) {
+    var lastGroup = "";
+    var last = "";
+    for (var i = 0; i < rows.length; i++) {
+      var g = String(rows[i].group || "").trim();
+      if (g) lastGroup = g;
+      else rows[i].group = lastGroup;
+      var w = String(rows[i].workflow || "").trim();
+      if (w) last = w;
+      else rows[i].workflow = last;
+    }
+  }
+  function countOutlineStepRows(rows) {
+    var n = 0;
+    for (var i = 0; i < rows.length; i++) {
+      if (String(rows[i].testStep || "").trim()) n++;
+    }
+    return n;
+  }
+  function slugifyOutlineWorkflow(text) {
+    var s = String(text || "").toLowerCase();
+    s = s.replace(/[^a-z0-9\s-]/g, "");
+    s = s.replace(/[\s-]+/g, "-");
+    return s.replace(/^-+|-+$/g, "");
+  }
+  function slugNeedsWarning(text, slug) {
+    var original = String(text || "").trim();
+    if (!original) return false;
+    var spacingOnlySlug = original.toLowerCase().replace(/[\s-]+/g, "-").replace(/^-+|-+$/g, "");
+    return !slug || slug !== spacingOnlySlug;
+  }
+  function groupRowsByWorkflow(rows) {
+    var map = {};
+    var order = [];
+    for (var i = 0; i < rows.length; i++) {
+      var group = String(rows[i].group || "").trim();
+      var workflow = String(rows[i].workflow || "").trim();
+      var step = String(rows[i].testStep || "").trim();
+      if (!group || !workflow || !step) continue;
+      var key = group + "" + workflow;
+      if (!map[key]) {
+        map[key] = { group, workflow, steps: [] };
+        order.push(key);
+      }
+      map[key].steps.push(step);
+    }
+    return order.map(function(key2) {
+      return map[key2];
+    });
+  }
+  function buildFlowCode(workflow, steps, flowBrowser) {
+    var browser = flowBrowser || "Web - Chrome";
+    var code = 'import { flow, expect } from "@qawolf/flows/web";\n\n';
+    code += "export default flow(\n  " + JSON.stringify(workflow) + ",\n  " + JSON.stringify(browser) + ",\n";
+    code += "  async ({ test, ...testContext }) => {\n";
+    for (var i = 0; i < steps.length; i++) {
+      var step = steps[i];
+      var isLast = i === steps.length - 1;
+      code += "    await test(" + JSON.stringify(step) + ", async () => {\n";
+      code += "      //--------------------------------\n";
+      code += "      // Arrange:\n";
+      code += "      //--------------------------------\n\n";
+      code += "      // None\n\n";
+      code += "      //--------------------------------\n";
+      code += "      // Act:\n";
+      code += "      //--------------------------------\n\n\n";
+      code += "      //--------------------------------\n";
+      code += "      // Assert:\n";
+      code += "      //--------------------------------\n\n\n";
+      if (isLast) {
+        code += "      //--------------------------------\n";
+        code += "      // Clean up:\n";
+        code += "      //--------------------------------\n\n";
+        code += "      // No clean up required\n\n";
+      }
+      code += "    });\n\n";
+    }
+    code = code.replace(/\n+$/, "") + "\n  },\n);\n";
+    return code;
+  }
+  function normalizeOutlineTargetRoot(root) {
+    var r = String(root || "").trim() || "src/flows/";
+    r = r.replace(/\\/g, "/").replace(/^\/+/, "");
+    if (r && r.charAt(r.length - 1) !== "/") r += "/";
+    return r || "src/flows/";
+  }
+  function normalizeOutlineFileExtension(ext) {
+    return String(ext || "").trim().toLowerCase() === "js" ? "js" : "ts";
+  }
+  function normalizeOutlineOptions(flowBrowserOrOptions) {
+    if (typeof flowBrowserOrOptions === "string") {
+      return {
+        flowBrowser: flowBrowserOrOptions || "Web - Chrome",
+        targetRoot: "src/flows/",
+        fileExtension: "ts"
+      };
+    }
+    var opts = flowBrowserOrOptions || {};
+    return {
+      flowBrowser: String(opts.flowBrowser || "").trim() || "Web - Chrome",
+      targetRoot: normalizeOutlineTargetRoot(opts.targetRoot),
+      fileExtension: normalizeOutlineFileExtension(opts.fileExtension)
+    };
+  }
+  function generateOutlineMarkdownFromCsv(text, maxRows, flowBrowserOrOptions) {
+    var limit = maxRows != null && maxRows > 0 ? maxRows : OUTLINE_MAX_STEP_ROWS;
+    var opts = normalizeOutlineOptions(flowBrowserOrOptions);
+    var parsed = parseOutlineCsvRows(text);
+    if (!parsed.ok) return { ok: false, error: parsed.error };
+    var rows = parsed.rows.slice();
+    forwardFillOutlineWorkflows(rows);
+    var missingGroup = rows.some(function(r) {
+      return String(r.testStep || "").trim() && !String(r.group || "").trim();
+    });
+    if (missingGroup) {
+      return { ok: false, error: "Some rows have a Test Step but no Group (even after forward-fill)." };
+    }
+    var missingWorkflow = rows.some(function(r) {
+      return String(r.testStep || "").trim() && !String(r.workflow || "").trim();
+    });
+    if (missingWorkflow) {
+      return { ok: false, error: "Some rows have a Test Step but no Workflow (even after forward-fill)." };
+    }
+    var totalStepCount = countOutlineStepRows(rows);
+    if (!totalStepCount) return { ok: false, error: "No non-empty Test Step rows found." };
+    var allGroups = groupRowsByWorkflow(rows);
+    var groups = [];
+    var stepCount = 0;
+    for (var gi = 0; gi < allGroups.length; gi++) {
+      var candidate = allGroups[gi];
+      if (candidate.steps.length > limit && groups.length === 0) {
+        return {
+          ok: false,
+          error: "The first workflow has " + candidate.steps.length + " test steps. Max " + limit + " per batch. Split that workflow before generating."
+        };
+      }
+      if (stepCount + candidate.steps.length > limit) break;
+      groups.push(candidate);
+      stepCount += candidate.steps.length;
+    }
+    if (!groups.length) return { ok: false, error: "No workflow groups with test steps found." };
+    var omittedStepCount = totalStepCount - stepCount;
+    var omittedWorkflowNames = allGroups.slice(groups.length).map(function(g2) {
+      return g2.workflow;
+    });
+    var slugWarningNames = [];
+    var md = "# AI Task: Test Outline Generation\n\nPlease use your file-writing tools to create the following test files at the specified paths. Write the provided code blocks exactly as shown without modifications.\n\n---\n\n";
+    for (var g = 0; g < groups.length; g++) {
+      var group = groups[g];
+      var groupSlug = slugifyOutlineWorkflow(group.group) || "group";
+      var slug = slugifyOutlineWorkflow(group.workflow) || "workflow";
+      if (slugNeedsWarning(group.group, groupSlug) && slugWarningNames.indexOf(group.group) < 0) slugWarningNames.push(group.group);
+      if (slugNeedsWarning(group.workflow, slug) && slugWarningNames.indexOf(group.workflow) < 0) slugWarningNames.push(group.workflow);
+      var filename = opts.targetRoot + groupSlug + "/" + slug + ".flow." + opts.fileExtension;
+      var code = buildFlowCode(group.workflow, group.steps, opts.flowBrowser);
+      md += "## Task: Create `" + filename + "`\n";
+      md += "**Target Path:** `" + filename + "`\n\n";
+      md += "```" + (opts.fileExtension === "ts" ? "typescript" : "javascript") + "\n" + code + "```\n\n---\n\n";
+    }
+    return {
+      ok: true,
+      markdown: md,
+      stepCount,
+      totalStepCount,
+      workflowCount: groups.length,
+      omittedStepCount,
+      omittedWorkflowNames,
+      slugWarningNames
+    };
+  }
+  function escHtml(s) {
+    var d = document.createElement("div");
+    d.textContent = s;
+    return d.innerHTML;
+  }
+  function btnStyle(kind) {
+    if (kind === "primary") {
+      return "padding:6px 12px;border-radius:8px;border:1px solid #38bdf8;background:#0ea5e9;color:#0f172a;font-weight:700;cursor:pointer;font-size:11px;";
+    }
+    return "padding:6px 12px;border-radius:8px;border:1px solid #475569;background:#1e293b;color:#e2e8f0;cursor:pointer;font-size:11px;";
+  }
+  function mountOutlineGeneratorContent(container, mountOpts) {
+    var draft = loadOutlineGeneratorDraft();
+    if (mountOpts && mountOpts.defaultMode) draft.inputMode = mountOpts.defaultMode;
+    var lastMarkdown = "";
+    var lastCsvText = "";
+    var flowBrowser = "Web - Chrome";
+    var targetRoot = "src/flows/";
+    var fileExtension = "ts";
+    var wrap = document.createElement("div");
+    wrap.setAttribute("data-qaw-outline-generator", "1");
+    wrap.style.cssText = "border:1px solid #334155;border-radius:10px;background:#0f172a;padding:12px;display:flex;flex-direction:column;gap:10px;color:#e2e8f0;font-family:monospace;font-size:11px;min-height:100%;box-sizing:border-box;overflow:hidden;";
+    var hint = document.createElement("div");
+    hint.style.cssText = "color:#94a3b8;line-height:1.45;font-size:10px;";
+    hint.textContent = "Paste tracker headers and rows, or upload CSV. Select rows to generate ai_generation_instructions.md (max " + OUTLINE_MAX_STEP_ROWS + " test steps per batch).";
+    wrap.appendChild(hint);
+    var inputStep = document.createElement("div");
+    inputStep.style.cssText = "display:flex;flex-direction:column;gap:10px;min-height:0;flex:1;";
+    var outputStep = document.createElement("div");
+    outputStep.style.cssText = "display:none;flex-direction:column;gap:10px;min-height:0;flex:1;";
+    var backBtn = document.createElement("button");
+    backBtn.type = "button";
+    backBtn.textContent = "Back to rows";
+    backBtn.style.cssText = btnStyle("ghost");
+    backBtn.addEventListener("click", function() {
+      outputStep.style.display = "none";
+      inputStep.style.display = "flex";
+    });
+    outputStep.appendChild(backBtn);
+    var pastePanel = document.createElement("div");
+    pastePanel.setAttribute("data-qaw-outline-paste-panel", "1");
+    pastePanel.style.cssText = "display:flex;flex-direction:column;gap:8px;min-height:0;";
+    function openPasteModal(titleText, initialValue, placeholder, onSave) {
+      var shade = document.createElement("div");
+      shade.style.cssText = "position:fixed;inset:0;z-index:2147483647;background:rgba(2,6,23,0.72);display:flex;align-items:center;justify-content:center;padding:24px;";
+      var modal = document.createElement("div");
+      modal.style.cssText = "width:min(780px,calc(100vw - 48px));max-height:calc(100vh - 64px);border:1px solid #334155;border-radius:12px;background:#0f172a;color:#e2e8f0;box-shadow:0 18px 55px rgba(0,0,0,.45);padding:14px;display:flex;flex-direction:column;gap:10px;";
+      var titleEl = document.createElement("div");
+      titleEl.textContent = titleText;
+      titleEl.style.cssText = "font-size:13px;font-weight:700;color:#f8fafc;";
+      var ta = document.createElement("textarea");
+      ta.value = initialValue;
+      ta.placeholder = placeholder;
+      ta.style.cssText = "width:100%;min-height:220px;box-sizing:border-box;resize:vertical;border:1px solid #475569;border-radius:8px;background:#020617;color:#cbd5e1;padding:8px;font-family:monospace;font-size:11px;line-height:1.4;";
+      var actions2 = document.createElement("div");
+      actions2.style.cssText = "display:flex;justify-content:flex-end;gap:8px;";
+      var cancel = document.createElement("button");
+      cancel.type = "button";
+      cancel.textContent = "Cancel";
+      cancel.style.cssText = btnStyle("ghost");
+      var save = document.createElement("button");
+      save.type = "button";
+      save.textContent = "Save";
+      save.style.cssText = btnStyle("primary");
+      function close() {
+        shade.remove();
+      }
+      cancel.addEventListener("click", close);
+      save.addEventListener("click", function() {
+        onSave(ta.value);
+        close();
+      });
+      shade.addEventListener("click", function(e) {
+        if (e.target === shade) close();
+      });
+      actions2.appendChild(cancel);
+      actions2.appendChild(save);
+      modal.appendChild(titleEl);
+      modal.appendChild(ta);
+      modal.appendChild(actions2);
+      shade.appendChild(modal);
+      document.body.appendChild(shade);
+      ta.focus();
+      ta.select();
+    }
+    var headerControlRow = document.createElement("div");
+    headerControlRow.style.cssText = "display:flex;align-items:center;gap:8px;flex-wrap:wrap;";
+    var editHeadersBtn = document.createElement("button");
+    editHeadersBtn.type = "button";
+    editHeadersBtn.textContent = "Edit headers";
+    editHeadersBtn.style.cssText = btnStyle("ghost");
+    var pasteRowsBtn = document.createElement("button");
+    pasteRowsBtn.type = "button";
+    pasteRowsBtn.textContent = "Paste rows";
+    pasteRowsBtn.style.cssText = btnStyle("ghost");
+    var uploadCsvBtn = document.createElement("button");
+    uploadCsvBtn.type = "button";
+    uploadCsvBtn.textContent = "Upload CSV";
+    uploadCsvBtn.style.cssText = btnStyle("ghost");
+    var headerSummary = document.createElement("span");
+    headerSummary.style.cssText = "color:#94a3b8;font-size:10px;";
+    var rowsSummary = document.createElement("span");
+    rowsSummary.style.cssText = "color:#94a3b8;font-size:10px;";
+    headerControlRow.appendChild(editHeadersBtn);
+    headerControlRow.appendChild(pasteRowsBtn);
+    headerControlRow.appendChild(uploadCsvBtn);
+    headerControlRow.appendChild(headerSummary);
+    headerControlRow.appendChild(rowsSummary);
+    pastePanel.appendChild(headerControlRow);
+    var headersTa = document.createElement("textarea");
+    headersTa.value = draft.headersText;
+    headersTa.placeholder = "Group	Workflow	Test Step";
+    function updateHeaderSummary() {
+      var cells = headerCellsForGrid();
+      headerSummary.textContent = cells.length ? cells.length + " headers saved" : "No headers saved";
+    }
+    editHeadersBtn.addEventListener("click", function() {
+      openPasteModal("Edit tracker headers", draft.headersText, "Group	Workflow	Test Step", function(value) {
+        draft.headersText = value;
+        headersTa.value = value;
+        saveOutlineGeneratorDraft(draft);
+        updateHeaderSummary();
+        renderSavedRowList();
+      });
+    });
+    pasteRowsBtn.addEventListener("click", function() {
+      openPasteModal("Paste tracker rows", "", "Paste rows copied from the tracker sheet", function(value) {
+        var before = draft.rows.length;
+        var imp = importRowsIntoDraft(draft, value, null);
+        if (!imp.ok) {
+          setStatus(imp.error, "err");
+          return;
+        }
+        var addedRows = draft.rows.slice(before);
+        for (var i = 0; i < addedRows.length; i++) {
+          if (draft.selectedIds.indexOf(addedRows[i].id) < 0) draft.selectedIds.push(addedRows[i].id);
+        }
+        saveOutlineGeneratorDraft(draft);
+        renderSavedRowList();
+        setStatus("Added " + imp.added + " row" + (imp.added === 1 ? "" : "s") + ".", "ok");
+      });
+    });
+    var rowToolbar = document.createElement("div");
+    rowToolbar.style.cssText = "display:flex;gap:6px;flex-wrap:wrap;align-items:center;";
+    var deleteSelBtn = document.createElement("button");
+    var genPasteBtn = document.createElement("button");
+    deleteSelBtn.type = "button";
+    genPasteBtn.type = "button";
+    deleteSelBtn.textContent = "Delete selected";
+    genPasteBtn.textContent = "Generate";
+    deleteSelBtn.style.cssText = btnStyle("ghost");
+    genPasteBtn.style.cssText = btnStyle("primary");
+    var selCount = document.createElement("span");
+    selCount.style.cssText = "color:#64748b;font-size:10px;margin-left:4px;";
+    rowToolbar.appendChild(deleteSelBtn);
+    rowToolbar.appendChild(genPasteBtn);
+    rowToolbar.appendChild(selCount);
+    pastePanel.appendChild(rowToolbar);
+    var rowList = document.createElement("div");
+    rowList.style.cssText = "max-height:260px;overflow:auto;border:1px solid #334155;border-radius:8px;background:#020617;padding:4px;";
+    pastePanel.appendChild(rowList);
+    var status = document.createElement("div");
+    status.style.cssText = "font-size:10px;line-height:1.4;min-height:14px;";
+    var preview = document.createElement("textarea");
+    preview.readOnly = true;
+    preview.placeholder = "Generated Markdown preview will appear here\u2026";
+    preview.style.cssText = "width:100%;flex:1;min-height:260px;resize:none;box-sizing:border-box;border:1px solid #334155;border-radius:8px;background:#020617;color:#cbd5e1;padding:8px;font-family:monospace;font-size:10px;line-height:1.35;";
+    var copyBtn = document.createElement("button");
+    var downloadBtn = document.createElement("button");
+    copyBtn.type = "button";
+    downloadBtn.type = "button";
+    copyBtn.textContent = "Copy Markdown";
+    downloadBtn.textContent = "Download .md";
+    copyBtn.style.cssText = btnStyle("primary");
+    downloadBtn.style.cssText = btnStyle("ghost");
+    copyBtn.disabled = true;
+    downloadBtn.disabled = true;
+    function setStatus(text, tone) {
+      var color = tone === "ok" ? "#4ade80" : tone === "err" ? "#f87171" : "#94a3b8";
+      status.style.color = color;
+      status.textContent = text;
+    }
+    function setOutput(md, meta) {
+      lastMarkdown = md;
+      preview.value = md;
+      copyBtn.disabled = !md;
+      downloadBtn.disabled = !md;
+      setStatus(meta, "ok");
+      inputStep.style.display = "none";
+      outputStep.style.display = "flex";
+    }
+    function setOutputWithOmitted(md, prefix, omitted, suffix) {
+      lastMarkdown = md;
+      preview.value = md;
+      copyBtn.disabled = !md;
+      downloadBtn.disabled = !md;
+      status.style.color = "#4ade80";
+      status.innerHTML = escHtml(prefix) + '<span style="color:#f87171;">' + escHtml(omitted) + "</span>" + escHtml(suffix);
+      inputStep.style.display = "none";
+      outputStep.style.display = "flex";
+    }
+    function clearOutput(err) {
+      lastMarkdown = "";
+      preview.value = "";
+      copyBtn.disabled = true;
+      downloadBtn.disabled = true;
+      outputStep.style.display = "none";
+      inputStep.style.display = "flex";
+      if (err) setStatus(err, "err");
+      else setStatus("", "muted");
+    }
+    function applyGenerateResult(result) {
+      if (!result.ok) {
+        clearOutput(result.error);
+        return;
+      }
+      var metaPrefix = "Ready: " + result.stepCount + " of " + result.totalStepCount + " test step" + (result.totalStepCount === 1 ? "" : "s") + " across " + result.workflowCount + " complete workflow" + (result.workflowCount === 1 ? "" : "s");
+      var omittedMeta = result.omittedStepCount ? ". Omitted " + result.omittedStepCount + " step" + (result.omittedStepCount === 1 ? "" : "s") + "." : ".";
+      var suffixMeta = "";
+      if (result.slugWarningNames.length) {
+        suffixMeta += " Warning: filename slug changed for: " + result.slugWarningNames.join(", ") + ".";
+      }
+      if (result.omittedStepCount) {
+        setOutputWithOmitted(result.markdown, metaPrefix, omittedMeta, suffixMeta);
+      } else {
+        setOutput(result.markdown, metaPrefix + omittedMeta + suffixMeta);
+      }
+    }
+    function regenerateFromLastCsv() {
+      if (!lastCsvText) return;
+      applyGenerateResult(
+        generateOutlineMarkdownFromCsv(lastCsvText, void 0, {
+          flowBrowser,
+          targetRoot,
+          fileExtension
+        })
+      );
+    }
+    function regenerateFromPaste() {
+      applyGenerateResult(
+        generateOutlineMarkdownFromDraft(draft, void 0, {
+          flowBrowser,
+          targetRoot,
+          fileExtension
+        })
+      );
+    }
+    function regenerateActive() {
+      if (lastCsvText) regenerateFromLastCsv();
+      else if (draft.selectedIds.length) regenerateFromPaste();
+    }
+    function headerCellsForGrid() {
+      var headerTable = parseSpreadsheetPaste(draft.headersText || headersTa.value || "");
+      return headerTable.length ? headerTable[0] : [];
+    }
+    function renderGridTable(container2, rows, opts) {
+      container2.innerHTML = "";
+      if (!rows.length) {
+        var empty = document.createElement("div");
+        empty.style.cssText = "color:#64748b;font-size:10px;padding:6px;";
+        empty.textContent = opts.emptyText;
+        container2.appendChild(empty);
+        return;
+      }
+      var headers = headerCellsForGrid();
+      var maxCols = Math.max(headers.length, rows.reduce(function(max, r) {
+        return Math.max(max, r.length);
+      }, 0));
+      function firstMatchingIndex(candidates) {
+        for (var ci = 0; ci < candidates.length; ci++) {
+          for (var hi = 0; hi < headers.length; hi++) {
+            if (normalizeHeader(headers[hi]) === candidates[ci]) return hi;
+          }
+        }
+        return -1;
+      }
+      var displayIndexes = [];
+      [
+        ["#", "row #", "row number", "row"],
+        ["group"],
+        ["workflow"],
+        ["test step", "teststep", "step"]
+      ].forEach(function(candidates) {
+        var idx = firstMatchingIndex(candidates);
+        if (idx >= 0 && displayIndexes.indexOf(idx) < 0) displayIndexes.push(idx);
+      });
+      if (!displayIndexes.length) {
+        for (var fallback = 0; fallback < Math.min(4, maxCols); fallback++) displayIndexes.push(fallback);
+      }
+      var table = document.createElement("table");
+      table.style.cssText = "width:100%;border-collapse:collapse;font-size:10px;table-layout:auto;";
+      var thead = document.createElement("thead");
+      var headTr = document.createElement("tr");
+      var thFixed = document.createElement("th");
+      thFixed.style.cssText = "position:sticky;top:0;background:#020617;color:#64748b;text-align:left;padding:4px;border-bottom:1px solid #334155;width:24px;";
+      if (opts.onToggleAll) {
+        var allCb = document.createElement("input");
+        allCb.type = "checkbox";
+        allCb.checked = rows.length > 0 && rows.every(function(_row, idx) {
+          return opts.checkedForIndex(idx);
+        });
+        allCb.style.cssText = "accent-color:#38bdf8;";
+        allCb.addEventListener("change", function() {
+          opts.onToggleAll(allCb.checked);
+        });
+        thFixed.appendChild(allCb);
+      }
+      headTr.appendChild(thFixed);
+      for (var di = 0; di < displayIndexes.length; di++) {
+        var h = displayIndexes[di];
+        var th = document.createElement("th");
+        var normalizedHeader = normalizeHeader(headers[h] || "");
+        th.textContent = headers[h] || "Col " + (h + 1);
+        th.style.cssText = "position:sticky;top:0;background:#020617;color:#94a3b8;text-align:left;padding:4px;border-bottom:1px solid #334155;" + (normalizedHeader === "#" || normalizedHeader === "row #" || normalizedHeader === "row number" || normalizedHeader === "row" ? "width:64px;max-width:64px;" : normalizedHeader === "group" ? "width:180px;" : "min-width:220px;");
+        headTr.appendChild(th);
+      }
+      thead.appendChild(headTr);
+      table.appendChild(thead);
+      var tbody = document.createElement("tbody");
+      for (var rIdx = 0; rIdx < rows.length; rIdx++) {
+        (function(idx) {
+          var tr = document.createElement("tr");
+          tr.style.cssText = "border-bottom:1px solid #1e293b;";
+          var cbTd = document.createElement("td");
+          cbTd.style.cssText = "padding:4px;vertical-align:top;";
+          var cb = document.createElement("input");
+          cb.type = "checkbox";
+          cb.checked = opts.checkedForIndex(idx);
+          cb.style.cssText = "accent-color:#38bdf8;";
+          cb.addEventListener("change", function() {
+            opts.onCheck(idx, cb.checked);
+          });
+          cbTd.appendChild(cb);
+          tr.appendChild(cbTd);
+          for (var cIdx = 0; cIdx < displayIndexes.length; cIdx++) {
+            var c = displayIndexes[cIdx];
+            var normalizedCellHeader = normalizeHeader(headers[c] || "");
+            var td = document.createElement("td");
+            td.textContent = rows[idx][c] || "";
+            td.title = rows[idx][c] || "";
+            td.style.cssText = "padding:4px;color:#cbd5e1;vertical-align:top;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" + (normalizedCellHeader === "#" || normalizedCellHeader === "row #" || normalizedCellHeader === "row number" || normalizedCellHeader === "row" ? "width:64px;max-width:64px;" : "");
+            tr.appendChild(td);
+          }
+          tbody.appendChild(tr);
+        })(rIdx);
+      }
+      table.appendChild(tbody);
+      container2.appendChild(table);
+    }
+    function updateSelCount() {
+      rowsSummary.textContent = draft.rows.length ? draft.rows.length + " saved row" + (draft.rows.length === 1 ? "" : "s") : "No rows saved";
+      selCount.textContent = draft.rows.length ? draft.selectedIds.length + " / " + draft.rows.length + " selected" : "0 rows saved";
+    }
+    function renderSavedRowList() {
+      renderGridTable(rowList, draft.rows.map(function(r) {
+        return r.cells;
+      }), {
+        emptyText: "No saved rows yet. Paste rows above and import checked rows.",
+        checkedForIndex: function(idx) {
+          return draft.selectedIds.indexOf(draft.rows[idx].id) !== -1;
+        },
+        onCheck: function(idx, checked) {
+          var id = draft.rows[idx].id;
+          if (checked) {
+            if (draft.selectedIds.indexOf(id) < 0) draft.selectedIds.push(id);
+          } else {
+            draft.selectedIds = draft.selectedIds.filter(function(selectedId) {
+              return selectedId !== id;
+            });
+          }
+          saveOutlineGeneratorDraft(draft);
+          updateSelCount();
+        },
+        onToggleAll: function(checked) {
+          draft.selectedIds = checked ? draft.rows.map(function(r) {
+            return r.id;
+          }) : [];
+          saveOutlineGeneratorDraft(draft);
+          renderSavedRowList();
+        }
+      });
+      updateSelCount();
+    }
+    deleteSelBtn.addEventListener("click", function() {
+      if (!draft.selectedIds.length) {
+        setStatus("Select rows to delete.", "err");
+        return;
+      }
+      deleteOutlineRows(draft, draft.selectedIds.slice());
+      saveOutlineGeneratorDraft(draft);
+      renderSavedRowList();
+      clearOutput("");
+      setStatus("Deleted selected rows.", "ok");
+    });
+    genPasteBtn.addEventListener("click", regenerateFromPaste);
+    inputStep.appendChild(pastePanel);
+    updateHeaderSummary();
+    renderSavedRowList();
+    var optsRow = document.createElement("div");
+    optsRow.style.cssText = "display:flex;align-items:center;gap:6px;flex-wrap:wrap;";
+    var chipStyle = "font-size:10px;font-family:monospace;padding:3px 8px;border-radius:999px;border:1px solid #475569;background:#1e293b;color:#cbd5e1;cursor:pointer;";
+    var inputChipStyle = "max-width:260px;min-width:130px;box-sizing:border-box;background:#020617;color:#e2e8f0;border:1px solid #38bdf8;border-radius:999px;padding:3px 8px;font-family:monospace;font-size:10px;";
+    function makeEditableOptionChip(label, getValue, setValue) {
+      var wrapChip = document.createElement("span");
+      wrapChip.style.cssText = "display:inline-flex;align-items:center;max-width:100%;";
+      var chip = document.createElement("button");
+      chip.type = "button";
+      chip.style.cssText = chipStyle;
+      function refresh() {
+        chip.textContent = label + ": " + getValue();
+      }
+      refresh();
+      chip.addEventListener("click", function(e) {
+        e.stopPropagation();
+        if (wrapChip.querySelector("input")) return;
+        var startVal = getValue();
+        chip.style.display = "none";
+        var inp = document.createElement("input");
+        inp.type = "text";
+        inp.value = startVal;
+        inp.style.cssText = inputChipStyle;
+        wrapChip.insertBefore(inp, chip);
+        inp.focus();
+        inp.select();
+        function finish(save) {
+          if (!inp.parentNode) return;
+          if (save) setValue(inp.value);
+          refresh();
+          chip.style.display = "";
+          inp.remove();
+          regenerateActive();
+        }
+        inp.addEventListener("blur", function() {
+          finish(true);
+        });
+        inp.addEventListener("keydown", function(ev) {
+          if (ev.key === "Enter") {
+            ev.preventDefault();
+            inp.blur();
+          }
+          if (ev.key === "Escape") {
+            ev.preventDefault();
+            finish(false);
+          }
+        });
+      });
+      wrapChip.appendChild(chip);
+      return wrapChip;
+    }
+    var envChip = makeEditableOptionChip("Env", function() {
+      return flowBrowser;
+    }, function(v) {
+      flowBrowser = v.trim() || "Web - Chrome";
+    });
+    var rootChip = makeEditableOptionChip("Root", function() {
+      return targetRoot;
+    }, function(v) {
+      targetRoot = normalizeOutlineTargetRoot(v);
+    });
+    var extToggle = document.createElement("span");
+    extToggle.setAttribute("role", "button");
+    extToggle.tabIndex = 0;
+    extToggle.style.cssText = "display:inline-flex;align-items:center;overflow:hidden;border-radius:999px;border:1px solid #475569;background:#0f172a;font-family:monospace;font-size:10px;cursor:pointer;";
+    var jsSeg = document.createElement("span");
+    var tsSeg = document.createElement("span");
+    extToggle.appendChild(jsSeg);
+    extToggle.appendChild(tsSeg);
+    function syncOptionChips() {
+      jsSeg.textContent = "js";
+      tsSeg.textContent = "ts";
+      jsSeg.style.cssText = fileExtension === "js" ? "padding:3px 7px;border-radius:999px;background:#1e293b;color:#bae6fd;font-weight:700;" : "padding:3px 6px;color:#64748b;";
+      tsSeg.style.cssText = fileExtension === "ts" ? "padding:3px 7px;border-radius:999px;background:#1e293b;color:#bae6fd;font-weight:700;" : "padding:3px 6px;color:#64748b;";
+    }
+    syncOptionChips();
+    optsRow.appendChild(envChip);
+    optsRow.appendChild(rootChip);
+    optsRow.appendChild(extToggle);
+    var fileInput = document.createElement("input");
+    fileInput.type = "file";
+    fileInput.accept = ".csv,text/csv";
+    fileInput.style.cssText = "display:none;";
+    inputStep.appendChild(fileInput);
+    uploadCsvBtn.addEventListener("click", function() {
+      fileInput.click();
+    });
+    var actions = document.createElement("div");
+    actions.style.cssText = "display:flex;gap:8px;flex-wrap:wrap;";
+    actions.appendChild(copyBtn);
+    actions.appendChild(downloadBtn);
+    outputStep.appendChild(optsRow);
+    wrap.appendChild(inputStep);
+    wrap.appendChild(status);
+    outputStep.appendChild(preview);
+    outputStep.appendChild(actions);
+    wrap.appendChild(outputStep);
+    function toggleFileExtension() {
+      fileExtension = fileExtension === "ts" ? "js" : "ts";
+      syncOptionChips();
+      regenerateActive();
+    }
+    extToggle.addEventListener("click", function() {
+      toggleFileExtension();
+    });
+    extToggle.addEventListener("keydown", function(ev) {
+      if (ev.key === "Enter" || ev.key === " ") {
+        ev.preventDefault();
+        toggleFileExtension();
+      }
+    });
+    fileInput.addEventListener("change", function() {
+      var file = fileInput.files && fileInput.files[0];
+      if (!file) {
+        lastCsvText = "";
+        clearOutput("");
+        setStatus("", "muted");
+        return;
+      }
+      var reader = new FileReader();
+      reader.onload = function() {
+        lastCsvText = String(reader.result || "");
+        regenerateFromLastCsv();
+      };
+      reader.onerror = function() {
+        clearOutput("Could not read the CSV file.");
+      };
+      reader.readAsText(file);
+    });
+    copyBtn.addEventListener("click", function() {
+      if (!lastMarkdown) return;
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(lastMarkdown).then(function() {
+          setStatus("Copied Markdown to clipboard.", "ok");
+        }).catch(function() {
+          setStatus("Copy failed \u2014 try Download .md instead.", "err");
+        });
+        return;
+      }
+      setStatus("Clipboard unavailable in this browser.", "err");
+    });
+    downloadBtn.addEventListener("click", function() {
+      if (!lastMarkdown) return;
+      var blob = new Blob([lastMarkdown], { type: "text/markdown;charset=utf-8" });
+      var link = document.createElement("a");
+      link.href = URL.createObjectURL(blob);
+      link.download = "ai_generation_instructions.md";
+      link.click();
+      URL.revokeObjectURL(link.href);
+      setStatus("Downloaded ai_generation_instructions.md", "ok");
+    });
+    container.appendChild(wrap);
+  }
+  function openOutlineGeneratorPanel(mountOpts) {
+    if (restoreFloatingPanel(OUTLINE_GENERATOR_PANEL_ID)) return;
+    var shell = createFloatingPanel({
+      id: OUTLINE_GENERATOR_PANEL_ID,
+      title: "Test Outline Generator",
+      width: 840,
+      height: 720,
+      minWidth: 460,
+      minHeight: 400
+    });
+    shell.body.style.padding = "12px";
+    shell.body.style.overflow = "hidden";
+    shell.body.style.display = "flex";
+    shell.body.style.flexDirection = "column";
+    mountOutlineGeneratorContent(shell.body, mountOpts);
+  }
+  var OUTLINE_MAX_STEP_ROWS, OUTLINE_GENERATOR_PANEL_ID;
+  var init_outline_generator = __esm({
+    "src/notes/42-outline-generator.ts"() {
+      "use strict";
+      init_constants();
+      init_floating_panel();
+      OUTLINE_MAX_STEP_ROWS = 20;
+      OUTLINE_GENERATOR_PANEL_ID = "outline-generator-panel";
+    }
+  });
+
+  // src/notes/53-coverage-requests.ts
+  function newReferenceFlowId() {
+    return "rf" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  }
+  function newCoveragePlanRowId() {
+    return newReferenceFlowId();
+  }
+  function newCoverageCustomTodoId() {
+    return "ct" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  }
+  function defaultCoveragePlanRowName(index) {
+    var n = Math.max(1, Math.floor(index) + 1);
+    return "Flow/test " + n;
+  }
+  function defaultReferenceFlowName(index) {
+    return defaultCoveragePlanRowName(index);
+  }
+  function normalizeReferenceFlows(raw) {
+    if (!Array.isArray(raw)) return [];
+    var out = [];
+    raw.forEach(function(item, idx) {
+      if (!item || typeof item !== "object") return;
+      var o = item;
+      var name = String(o.name || "").trim();
+      out.push({
+        id: String(o.id || newReferenceFlowId()),
+        name: name || defaultReferenceFlowName(idx),
+        addedToTracker: !!o.addedToTracker,
+        loomRecorded: !!o.loomRecorded
+      });
+    });
+    return out;
+  }
+  function normalizeCoverageCustomTodos(raw) {
+    if (!Array.isArray(raw)) return [];
+    var out = [];
+    raw.forEach(function(item) {
+      if (!item || typeof item !== "object") return;
+      var o = item;
+      var text = String(o.text || "").trim();
+      if (!text) return;
+      out.push({
+        id: String(o.id || newCoverageCustomTodoId()),
+        text,
+        done: !!o.done
+      });
+    });
+    return out;
+  }
+  function normalizeCoveragePlanRows(raw) {
+    if (!Array.isArray(raw)) return [];
+    var out = [];
+    raw.forEach(function(item, idx) {
+      if (!item || typeof item !== "object") return;
+      var o = item;
+      var name = String(o.name || "").trim();
+      if (!name) return;
+      out.push({
+        id: String(o.id || newCoveragePlanRowId()),
+        name,
+        selected: o.selected !== false,
+        addedToTracker: !!o.addedToTracker,
+        loomRecorded: !!o.loomRecorded,
+        attachedToCr: !!o.attachedToCr,
+        needsClarification: !!o.needsClarification,
+        clarificationNote: String(o.clarificationNote || "")
+      });
+    });
+    return out;
+  }
+  function normalizeCoveragePlan(ws) {
+    var direct = normalizeCoveragePlanRows(ws.coveragePlan);
+    if (direct.length) return direct;
+    return normalizeReferenceFlows(ws.referenceFlows).map(function(f) {
+      return {
+        id: f.id,
+        name: f.name,
+        selected: true,
+        addedToTracker: f.addedToTracker,
+        loomRecorded: f.loomRecorded,
+        attachedToCr: false,
+        needsClarification: false,
+        clarificationNote: ""
+      };
+    });
+  }
+  function coverageUsesCoveragePlan(ws) {
+    return ws.coveragePlanMode !== "simple";
+  }
+  function applyCoveragePlanColumnToggle(rows, rowId, key, next) {
+    var selected = rows.filter(function(r) {
+      return r.selected !== false;
+    });
+    var target = rows.filter(function(r) {
+      return r.id === rowId;
+    })[0];
+    var shouldFanOut = !!target && target.selected !== false && selected.length >= 2;
+    rows.forEach(function(r) {
+      if (r.id === rowId || shouldFanOut && r.selected !== false) {
+        r[key] = next;
+      }
+    });
+    return rows;
+  }
+  function coverageTrackerChecksSatisfied(ws) {
+    var rows = normalizeCoveragePlan(ws);
+    if (coverageUsesCoveragePlan(ws)) {
+      return rows.length > 0 && rows.every(function(r) {
+        return r.addedToTracker;
+      });
+    }
+    return !!(ws.checks && ws.checks.addedToCoverageTracker);
+  }
+  function coverageLoomsChecksSatisfied(ws) {
+    var rows = normalizeCoveragePlan(ws);
+    if (coverageUsesCoveragePlan(ws)) {
+      return rows.length > 0 && rows.every(function(r) {
+        return r.loomRecorded;
+      });
+    }
+    return !!(ws.checks && ws.checks.loomsRecorded);
+  }
+  function coverageAttachedChecksSatisfied(ws) {
+    var rows = normalizeCoveragePlan(ws);
+    if (coverageUsesCoveragePlan(ws)) {
+      return rows.length > 0 && rows.every(function(r) {
+        return r.attachedToCr;
+      });
+    }
+    return !!(ws.checks && ws.checks.attachedFlows);
+  }
+  function coveragePlanWorkflowReady(ws) {
+    return coverageTrackerChecksSatisfied(ws) && coverageLoomsChecksSatisfied(ws) && coverageAttachedChecksSatisfied(ws);
+  }
+  function coverageReadyForMarkDone(ws) {
+    return coveragePlanWorkflowReady(ws);
+  }
+  function syncTopLevelChecksFromReferenceFlows(ws) {
+    if (!ws.checks) ws.checks = defaultChecks();
+    ws.coveragePlan = normalizeCoveragePlan(ws);
+    if (!coveragePlanWorkflowReady(ws)) ws.checks.markDoneInTaskWolf = false;
+  }
+  function parseCoveragePlanLines(text) {
+    var out = [];
+    String(text || "").split(/\r?\n/).forEach(function(line) {
+      var t = line.trim();
+      if (t) out.push(t);
+    });
+    return out;
+  }
+  function defaultChecks() {
+    return {
+      addedToCoverageTracker: false,
+      loomsRecorded: false,
+      attachedFlows: false,
+      markDoneInTaskWolf: false
+    };
+  }
+  function parseCoverageRequestPage() {
+    var m = (window.location.pathname || "").match(/^\/([^/]+)\/coverage-requests\/([^/]+)\/?$/i);
+    if (!m || !m[1] || !m[2]) return null;
+    return { client: decodeURIComponent(m[1]), requestId: decodeURIComponent(m[2]) };
+  }
+  function loadCoverageData() {
+    var empty = { v: 1, trackerByClient: {}, requests: {} };
+    if (typeof GM_getValue !== "function") return empty;
+    try {
+      var raw = GM_getValue(COVERAGE_GM_KEY, "");
+      if (!raw) return empty;
+      var p = JSON.parse(raw);
+      return {
+        v: 1,
+        trackerByClient: p.trackerByClient && typeof p.trackerByClient === "object" ? p.trackerByClient : {},
+        requests: p.requests && typeof p.requests === "object" ? p.requests : {}
+      };
+    } catch (_e) {
+      return empty;
+    }
+  }
+  function saveCoverageData(data) {
+    if (typeof GM_setValue !== "function") return;
+    try {
+      GM_setValue(COVERAGE_GM_KEY, JSON.stringify(data));
+    } catch (_e) {
+    }
+  }
+  function scrapeCoveragePageMeta() {
+    var out = {
+      requestNumber: "",
+      title: "",
+      status: "",
+      priority: "",
+      requestedBy: "",
+      estimatedCompletion: ""
+    };
+    var crumb = document.querySelector('[class*="breadcrumb"], nav[aria-label*="breadcrumb" i]');
+    var crumbText = crumb ? crumb.textContent || "" : "";
+    var numMatch = crumbText.match(/#\s*(\d+)/);
+    if (!numMatch) {
+      var headings = Array.from(document.querySelectorAll("h1, h2, h3"));
+      for (var hi = 0; hi < headings.length; hi++) {
+        var hm = (headings[hi].textContent || "").match(/#\s*(\d+)/);
+        if (hm) {
+          numMatch = hm;
+          break;
+        }
+      }
+    }
+    if (numMatch) out.requestNumber = numMatch[1];
+    var h1 = document.querySelector("h1");
+    if (h1) out.title = (h1.textContent || "").trim();
+    function cleanFieldValue(label, value) {
+      var outValue = String(value || "").replace(/\s+/g, " ").trim();
+      if (outValue.indexOf(label) === 0) outValue = outValue.slice(label.length).trim();
+      if (outValue.length % 2 === 0) {
+        var half = outValue.slice(0, outValue.length / 2);
+        if (half && half === outValue.slice(outValue.length / 2)) outValue = half;
+      }
+      return outValue;
+    }
+    function fieldAfterLabel(label) {
+      var nodes = Array.from(document.querySelectorAll("h6, h5, h4, label, span, p, div"));
+      for (var i = 0; i < nodes.length; i++) {
+        if ((nodes[i].textContent || "").trim() !== label) continue;
+        var sib = nodes[i].nextElementSibling;
+        if (sib) {
+          var sibText = cleanFieldValue(label, sib.textContent || "");
+          if (sibText) return sibText;
+        }
+        var row2 = nodes[i].parentElement;
+        if (!row2) continue;
+        var chips = row2.querySelectorAll("span, div, p");
+        for (var j = 0; j < chips.length; j++) {
+          var t = cleanFieldValue(label, chips[j].textContent || "");
+          if (t && t !== label) return t;
+        }
+      }
+      return "";
+    }
+    out.status = fieldAfterLabel("Status");
+    out.priority = fieldAfterLabel("Priority");
+    out.requestedBy = fieldAfterLabel("Requested by");
+    out.estimatedCompletion = fieldAfterLabel("Estimated completion date");
+    return out;
+  }
+  function getOrCreateWorkspace(ctx) {
+    var data = loadCoverageData();
+    var existing = data.requests[ctx.requestId];
+    if (existing && existing.client === ctx.client) {
+      if (!existing.checks) existing.checks = defaultChecks();
+      if (existing.checks.addedToCoverageTracker == null) {
+        existing.checks.addedToCoverageTracker = !!existing.checks.trackerUpdated;
+      }
+      if (existing.checks.attachedFlows == null) {
+        existing.checks.attachedFlows = !!existing.checks.flowOutlinesExist;
+      }
+      if (existing.checks.markDoneInTaskWolf == null) {
+        existing.checks.markDoneInTaskWolf = false;
+      }
+      existing.referenceFlows = normalizeReferenceFlows(existing.referenceFlows);
+      existing.coveragePlan = normalizeCoveragePlan(existing);
+      existing.customTodos = normalizeCoverageCustomTodos(existing.customTodos);
+      syncTopLevelChecksFromReferenceFlows(existing);
+      return existing;
+    }
+    var scraped = scrapeCoveragePageMeta();
+    var ws = {
+      client: ctx.client,
+      requestId: ctx.requestId,
+      requestNumber: scraped.requestNumber,
+      title: scraped.title,
+      pageUrl: window.location.href,
+      claimed: false,
+      claimedAt: "",
+      checks: defaultChecks(),
+      privateNotes: "",
+      referenceFlows: [],
+      coveragePlan: [],
+      customTodos: [],
+      scraped: {
+        status: scraped.status,
+        priority: scraped.priority,
+        requestedBy: scraped.requestedBy,
+        estimatedCompletion: scraped.estimatedCompletion
+      }
+    };
+    data.requests[ctx.requestId] = ws;
+    saveCoverageData(data);
+    return ws;
+  }
+  function saveWorkspace(ws) {
+    var data = loadCoverageData();
+    data.requests[ws.requestId] = ws;
+    saveCoverageData(data);
+  }
+  function getTrackerUrl(client) {
+    return (loadCoverageData().trackerByClient[client] || "").trim();
+  }
+  function setTrackerUrl(client, url) {
+    var data = loadCoverageData();
+    data.trackerByClient[client] = String(url || "").trim();
+    saveCoverageData(data);
+  }
+  function findRelatedFlowsBlock() {
+    var labels = Array.from(document.querySelectorAll("h6, h5, h4, label, span, p, div"));
+    for (var i = 0; i < labels.length; i++) {
+      if ((labels[i].textContent || "").trim() === "Related flows") {
+        return labels[i].closest("div") || labels[i];
+      }
+    }
+    return null;
+  }
+  function findSidebarAnchor() {
+    var relatedEl = findRelatedFlowsBlock();
+    if (relatedEl) {
+      var block = relatedEl.closest("div");
+      if (block && block.parentElement) {
+        var parent = block.parentElement;
+        var next = block.nextElementSibling;
+        if (next && next.tagName === "HR") return next;
+        return block;
+      }
+    }
+    var asides = Array.from(document.querySelectorAll("aside"));
+    if (asides.length) return asides[asides.length - 1];
+    return null;
+  }
+  function highlightRelatedFlows() {
+    var block = findRelatedFlowsBlock();
+    if (!block) return;
+    block.scrollIntoView({ behavior: "smooth", block: "center" });
+    var prevOutline = block.style.outline;
+    var prevRadius = block.style.borderRadius;
+    var prevTransition = block.style.transition;
+    block.style.transition = "outline-color .15s ease";
+    block.style.outline = "2px solid #f59e0b";
+    block.style.borderRadius = "8px";
+    var highlighted = block;
+    setTimeout(function() {
+      highlighted.style.outline = prevOutline;
+      highlighted.style.borderRadius = prevRadius;
+      highlighted.style.transition = prevTransition;
+    }, 1600);
+  }
+  function getCoverageTrackerUrl(client) {
+    return getTrackerUrl(client);
+  }
+  function openCoverageTrackerModal(client, onSaved) {
+    showTrackerUrlModal(client, onSaved || function() {
+    });
+  }
+  function scrollCoveragePageToRelatedFlows() {
+    highlightRelatedFlows();
+  }
+  function openCoverageLoomLibrary() {
+    window.open(COVERAGE_LOOM_LIBRARY_URL, "_blank", "noopener,noreferrer");
+  }
+  function btn(label, opts) {
+    var variant = opts.variant || "secondary";
+    var styles = {
+      primary: { bg: "#2563eb", border: "#1d4ed8", color: "#fff" },
+      secondary: { bg: "#fff", border: "#cbd5e1", color: "#334155" },
+      danger: { bg: "#fff", border: "#fecaca", color: "#b91c1c" },
+      link: { bg: "transparent", border: "transparent", color: "#2563eb" }
+    };
+    var s = styles[variant] || styles.secondary;
+    var b = document.createElement("button");
+    b.type = "button";
+    b.textContent = label;
+    b.style.cssText = "display:" + (opts.fullWidth === false ? "inline-block" : "block") + ";width:" + (opts.fullWidth === false ? "auto" : "100%") + ";border:1px solid " + s.border + ";background:" + s.bg + ";color:" + s.color + ";border-radius:7px;padding:7px 10px;font-size:12px;font-weight:650;cursor:pointer;line-height:1.3;text-align:" + (opts.fullWidth === false ? "center" : "left") + ";";
+    if (variant === "link") {
+      b.style.textDecoration = "underline";
+      b.style.padding = "2px 0";
+    }
+    if (opts.onClick) {
+      b.addEventListener("click", function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        opts.onClick();
+      });
+    }
+    return b;
+  }
+  function fieldLabel(text) {
+    var el = document.createElement("div");
+    el.style.cssText = "font-size:11px;font-weight:650;color:#64748b;margin:12px 0 5px;";
+    el.textContent = text;
+    return el;
+  }
+  function showAddCoveragePlanModal(ctx, ws) {
+    var overlay = document.createElement("div");
+    overlay.style.cssText = "position:fixed;inset:0;z-index:2147483646;background:rgba(15,23,42,.45);display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box;";
+    var panel = document.createElement("div");
+    panel.style.cssText = "width:min(440px,100%);background:#fff;border-radius:10px;padding:14px 16px;box-shadow:0 12px 40px rgba(15,23,42,.2);font-family:system-ui,-apple-system,sans-serif;";
+    var title = document.createElement("div");
+    title.style.cssText = "font-size:14px;font-weight:700;color:#0f172a;margin-bottom:6px;";
+    title.textContent = "Add flows / tests";
+    panel.appendChild(title);
+    var hint = document.createElement("div");
+    hint.style.cssText = "font-size:11px;color:#64748b;line-height:1.45;margin-bottom:8px;";
+    hint.textContent = "One flow or test per line. New rows start unselected and unchecked.";
+    panel.appendChild(hint);
+    var textarea = document.createElement("textarea");
+    textarea.placeholder = "Checkout happy path\nLogin smoke test";
+    textarea.style.cssText = "width:100%;min-height:120px;box-sizing:border-box;border:1px solid #cbd5e1;border-radius:7px;padding:8px;font-size:12px;line-height:1.4;resize:vertical;font-family:inherit;";
+    panel.appendChild(textarea);
+    var actions = document.createElement("div");
+    actions.style.cssText = "display:flex;justify-content:flex-end;gap:8px;margin-top:10px;";
+    function close() {
+      overlay.remove();
+    }
+    actions.appendChild(
+      btn("Cancel", {
+        variant: "secondary",
+        fullWidth: false,
+        onClick: close
+      })
+    );
+    actions.appendChild(
+      btn("Add rows", {
+        variant: "primary",
+        fullWidth: false,
+        onClick: function() {
+          var lines = parseCoveragePlanLines(textarea.value);
+          if (!lines.length) {
+            close();
+            return;
+          }
+          var rows = normalizeCoveragePlan(ws);
+          lines.forEach(function(name) {
+            rows.push({
+              id: newCoveragePlanRowId(),
+              name,
+              selected: false,
+              addedToTracker: false,
+              loomRecorded: false,
+              attachedToCr: false,
+              needsClarification: false,
+              clarificationNote: ""
+            });
+          });
+          ws.coveragePlan = rows;
+          syncTopLevelChecksFromReferenceFlows(ws);
+          saveWorkspace(ws);
+          close();
+          renderCard(ctx);
+        }
+      })
+    );
+    panel.appendChild(actions);
+    overlay.appendChild(panel);
+    overlay.addEventListener("click", function(e) {
+      if (e.target === overlay) close();
+    });
+    document.body.appendChild(overlay);
+    textarea.focus();
+  }
+  function showCoverageClarificationModal(ctx, row2, persist) {
+    var overlay = document.createElement("div");
+    overlay.style.cssText = "position:fixed;inset:0;z-index:2147483646;background:rgba(15,23,42,.45);display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box;";
+    var panel = document.createElement("div");
+    panel.style.cssText = "width:min(440px,100%);background:#fff;border-radius:10px;padding:14px 16px;box-shadow:0 12px 40px rgba(15,23,42,.2);font-family:system-ui,-apple-system,sans-serif;color:#0f172a;";
+    var titleRow = document.createElement("div");
+    titleRow.style.cssText = "display:flex;align-items:flex-start;justify-content:space-between;gap:10px;margin-bottom:8px;";
+    var titleWrap = document.createElement("div");
+    var title = document.createElement("div");
+    title.style.cssText = "font-size:14px;font-weight:700;color:#0f172a;line-height:1.25;";
+    title.textContent = "Clarification note";
+    var subtitle = document.createElement("div");
+    subtitle.style.cssText = "font-size:11px;color:#64748b;line-height:1.35;margin-top:2px;";
+    subtitle.textContent = row2.name;
+    titleWrap.appendChild(title);
+    titleWrap.appendChild(subtitle);
+    titleRow.appendChild(titleWrap);
+    var closeBtn = btn("Close", {
+      variant: "secondary",
+      fullWidth: false,
+      onClick: function() {
+        overlay.remove();
+        renderCard(ctx);
+      }
+    });
+    titleRow.appendChild(closeBtn);
+    panel.appendChild(titleRow);
+    var notes = document.createElement("textarea");
+    notes.placeholder = "What needs clarification?";
+    notes.value = row2.clarificationNote || "";
+    notes.style.cssText = "width:100%;min-height:120px;box-sizing:border-box;border:1px solid #cbd5e1;border-radius:7px;padding:8px;font-size:12px;line-height:1.4;resize:vertical;font-family:inherit;";
+    notes.addEventListener("input", function() {
+      row2.clarificationNote = notes.value;
+      row2.needsClarification = !!notes.value.trim();
+      persist();
+    });
+    panel.appendChild(notes);
+    var footer = document.createElement("div");
+    footer.style.cssText = "display:flex;justify-content:space-between;align-items:center;gap:8px;margin-top:8px;";
+    var autosave = document.createElement("div");
+    autosave.style.cssText = "font-size:10px;color:#94a3b8;";
+    autosave.textContent = "Autosaves while you type.";
+    footer.appendChild(autosave);
+    footer.appendChild(
+      btn("Clear note", {
+        variant: "link",
+        fullWidth: false,
+        onClick: function() {
+          notes.value = "";
+          row2.clarificationNote = "";
+          row2.needsClarification = false;
+          persist();
+        }
+      })
+    );
+    panel.appendChild(footer);
+    overlay.appendChild(panel);
+    overlay.addEventListener("click", function(e) {
+      if (e.target === overlay) {
+        overlay.remove();
+        renderCard(ctx);
+      }
+    });
+    document.body.appendChild(overlay);
+    notes.focus();
+  }
+  function showDeleteCoverageRowsModal(ctx, ws, rows) {
+    var selectedCount = rows.filter(function(r) {
+      return r.selected !== false;
+    }).length;
+    if (!selectedCount) return;
+    var overlay = document.createElement("div");
+    overlay.style.cssText = "position:fixed;inset:0;z-index:2147483646;background:rgba(15,23,42,.45);display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box;";
+    var panel = document.createElement("div");
+    panel.style.cssText = "width:min(380px,100%);background:#fff;border-radius:10px;padding:14px 16px;box-shadow:0 12px 40px rgba(15,23,42,.2);font-family:system-ui,-apple-system,sans-serif;color:#0f172a;";
+    var title = document.createElement("div");
+    title.style.cssText = "font-size:14px;font-weight:700;color:#0f172a;margin-bottom:6px;";
+    title.textContent = "Delete selected flow" + (selectedCount === 1 ? "?" : "s?");
+    panel.appendChild(title);
+    var body = document.createElement("div");
+    body.style.cssText = "font-size:12px;color:#64748b;line-height:1.45;margin-bottom:12px;";
+    body.textContent = "This will remove " + selectedCount + " selected row" + (selectedCount === 1 ? "" : "s") + " from this Coverage Plan.";
+    panel.appendChild(body);
+    function close() {
+      overlay.remove();
+    }
+    var actions = document.createElement("div");
+    actions.style.cssText = "display:flex;justify-content:flex-end;align-items:center;gap:8px;";
+    actions.appendChild(
+      btn("Cancel", {
+        variant: "secondary",
+        fullWidth: false,
+        onClick: close
+      })
+    );
+    actions.appendChild(
+      btn("Delete", {
+        variant: "danger",
+        fullWidth: false,
+        onClick: function() {
+          ws.coveragePlan = rows.filter(function(r) {
+            return r.selected === false;
+          });
+          syncTopLevelChecksFromReferenceFlows(ws);
+          if (!ws.coveragePlan.length && ws.checks) ws.checks.markDoneInTaskWolf = false;
+          saveWorkspace(ws);
+          close();
+          renderCard(ctx);
+        }
+      })
+    );
+    panel.appendChild(actions);
+    overlay.appendChild(panel);
+    overlay.addEventListener("click", function(e) {
+      if (e.target === overlay) close();
+    });
+    document.body.appendChild(overlay);
+  }
+  function coveragePlanSection(ctx, ws) {
+    var rows = normalizeCoveragePlan(ws);
+    ws.coveragePlan = rows;
+    var section2 = document.createElement("div");
+    section2.style.cssText = "margin:12px 0 10px;";
+    var title = document.createElement("div");
+    title.style.cssText = "font-size:12px;font-weight:700;color:#475569;margin-bottom:6px;";
+    title.textContent = "Coverage Plan";
+    section2.appendChild(title);
+    var hint = document.createElement("div");
+    hint.style.cssText = "font-size:10px;color:#64748b;line-height:1.35;margin-bottom:6px;";
+    if (rows.length) {
+      hint.appendChild(document.createTextNode("All rows must have "));
+      hint.appendChild(captionAction("Coverage Tracker", "Open or edit tracker link", function() {
+        showTrackerUrlModal(ctx.client, function() {
+          renderCard(ctx);
+        });
+      }));
+      hint.appendChild(document.createTextNode(", "));
+      hint.appendChild(captionAction("Loom", "Open Loom videos", function() {
+        window.open("https://www.loom.com/looms/videos", "_blank", "noopener,noreferrer");
+      }));
+      hint.appendChild(document.createTextNode(", and "));
+      hint.appendChild(captionAction("Attached to CR", "Jump to related flows", highlightRelatedFlows));
+      hint.appendChild(document.createTextNode(" checked."));
+    } else {
+      hint.textContent = "No plan rows yet. Add flows when you know what to cover.";
+    }
+    section2.appendChild(hint);
+    function persist() {
+      ws.coveragePlan = rows;
+      syncTopLevelChecksFromReferenceFlows(ws);
+      saveWorkspace(ws);
+    }
+    function switchToSimpleChecklist() {
+      ws.coveragePlanMode = "simple";
+      syncTopLevelChecksFromReferenceFlows(ws);
+      saveWorkspace(ws);
+      renderCard(ctx);
+    }
+    function planCheckCell(row2, key) {
+      var cell = document.createElement("div");
+      cell.style.cssText = "display:flex;align-items:center;justify-content:center;border-left:1px solid #e2e8f0;";
+      var inp = document.createElement("input");
+      inp.type = "checkbox";
+      inp.checked = !!row2[key];
+      inp.title = "Toggle";
+      inp.style.cssText = "width:15px;height:15px;accent-color:#2563eb;cursor:pointer;";
+      inp.addEventListener("change", function() {
+        rows = applyCoveragePlanColumnToggle(rows, row2.id, key, inp.checked);
+        persist();
+        renderCard(ctx);
+      });
+      cell.appendChild(inp);
+      return cell;
+    }
+    function flowNameCell(row2, rowIdx) {
+      var cell = document.createElement("div");
+      cell.style.cssText = "min-width:0;width:100%;box-sizing:border-box;color:#475569;padding:2px 0 2px 6px;font-size:11px;font-weight:650;line-height:1.3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
+      function label() {
+        var span = document.createElement("span");
+        span.textContent = row2.name || defaultCoveragePlanRowName(rowIdx);
+        span.title = "Click to edit";
+        span.style.cssText = "cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
+        span.addEventListener("click", function(e) {
+          e.preventDefault();
+          e.stopPropagation();
+          edit(span);
+        });
+        return span;
+      }
+      function edit(target) {
+        var input = document.createElement("input");
+        input.type = "text";
+        input.value = row2.name || defaultCoveragePlanRowName(rowIdx);
+        input.style.cssText = "width:100%;min-width:0;box-sizing:border-box;border:1px solid #93c5fd;border-radius:3px;padding:1px 4px;font-size:11px;font-weight:650;line-height:1.3;font-family:inherit;color:#334155;";
+        function saveName() {
+          var next = input.value.trim();
+          if (next) {
+            row2.name = next;
+            persist();
+          }
+          input.replaceWith(label());
+        }
+        input.addEventListener("blur", saveName);
+        input.addEventListener("keydown", function(e) {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            input.blur();
+          }
+          if (e.key === "Escape") {
+            e.preventDefault();
+            input.value = row2.name || defaultCoveragePlanRowName(rowIdx);
+            input.blur();
+          }
+        });
+        target.replaceWith(input);
+        input.focus();
+        input.select();
+      }
+      cell.appendChild(label());
+      return cell;
+    }
+    function headerButton(label, title2, onClick, muted) {
+      var h = document.createElement("button");
+      h.type = "button";
+      h.textContent = label;
+      h.title = title2;
+      h.style.cssText = "border:0;background:transparent;color:" + (muted ? "#94a3b8" : "#334155") + ";font:inherit;font-weight:800;text-transform:uppercase;letter-spacing:.015em;padding:0 0 0 3px;text-align:center;cursor:pointer;text-decoration:underline;text-underline-offset:2px;border-left:1px solid #e2e8f0;";
+      h.addEventListener("click", function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        onClick();
+      });
+      return h;
+    }
+    function captionAction(label, title2, onClick) {
+      var b = document.createElement("button");
+      b.type = "button";
+      b.textContent = label;
+      b.title = title2;
+      b.style.cssText = "border:0;background:transparent;color:#334155;font:inherit;font-weight:750;padding:0;cursor:pointer;text-decoration:underline;text-decoration-thickness:1.5px;text-underline-offset:2px;";
+      b.addEventListener("click", function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        onClick();
+      });
+      return b;
+    }
+    var table = document.createElement("div");
+    table.style.cssText = "display:flex;flex-direction:column;gap:0;min-height:108px;border:1px solid #e2e8f0;border-radius:7px;overflow:hidden;background:#fff;";
+    var trackerUrl = getTrackerUrl(ctx.client);
+    var header = document.createElement("div");
+    header.style.cssText = "display:grid;grid-template-columns:18px minmax(105px,1fr) 52px 42px 48px 38px;gap:3px;align-items:center;font-size:9px;font-weight:800;color:#334155;text-transform:uppercase;letter-spacing:.015em;padding:5px 6px;border-bottom:1px solid #e2e8f0;background:#f8fafc;";
+    var allSelected = rows.length > 0 && rows.every(function(r) {
+      return r.selected !== false;
+    });
+    var anySelected = rows.some(function(r) {
+      return r.selected !== false;
+    });
+    var selectAll = document.createElement("input");
+    selectAll.type = "checkbox";
+    selectAll.checked = allSelected;
+    selectAll.indeterminate = anySelected && !allSelected;
+    selectAll.disabled = rows.length === 0;
+    selectAll.title = allSelected ? "Unselect all rows" : "Select all rows";
+    selectAll.style.cssText = "width:14px;height:14px;accent-color:#2563eb;cursor:" + (rows.length ? "pointer" : "not-allowed") + ";margin:0;";
+    selectAll.addEventListener("change", function() {
+      rows.forEach(function(r) {
+        r.selected = selectAll.checked;
+      });
+      persist();
+      renderCard(ctx);
+    });
+    var selectHeadCell = document.createElement("div");
+    selectHeadCell.style.cssText = "display:flex;align-items:center;justify-content:center;";
+    selectHeadCell.appendChild(selectAll);
+    header.appendChild(selectHeadCell);
+    var flowHead = document.createElement("div");
+    flowHead.textContent = "Flow";
+    flowHead.style.cssText = "border-left:1px solid #e2e8f0;padding-left:6px;";
+    header.appendChild(flowHead);
+    header.appendChild(headerButton("Tracker", "Open or edit tracker link", function() {
+      showTrackerUrlModal(ctx.client, function() {
+        renderCard(ctx);
+      });
+    }, !trackerUrl));
+    header.appendChild(headerButton("Loom", "Open Loom recorder", function() {
+      window.open("https://www.loom.com/looms/videos", "_blank", "noopener,noreferrer");
+    }));
+    header.appendChild(headerButton("Attach", "Jump to related flows", highlightRelatedFlows));
+    var noteHead = document.createElement("div");
+    noteHead.textContent = "Note";
+    noteHead.style.cssText = "text-align:center;border-left:1px solid #e2e8f0;";
+    header.appendChild(noteHead);
+    table.appendChild(header);
+    if (!rows.length) {
+      var emptyRow = document.createElement("div");
+      emptyRow.style.cssText = "display:flex;align-items:center;justify-content:center;min-height:46px;color:#94a3b8;font-size:11px;font-style:italic;border-bottom:1px solid #e2e8f0;";
+      emptyRow.textContent = "No existing flows.";
+      table.appendChild(emptyRow);
+    }
+    rows.forEach(function(row2, rowIdx) {
+      var line = document.createElement("div");
+      line.style.cssText = "display:grid;grid-template-columns:18px minmax(105px,1fr) 52px 42px 48px 38px;gap:3px;align-items:center;padding:4px 6px;border-bottom:1px solid #e2e8f0;";
+      var selectCell = document.createElement("div");
+      selectCell.style.cssText = "display:flex;align-items:center;justify-content:center;";
+      var selected = row2.selected !== false;
+      var rowSelect = document.createElement("input");
+      rowSelect.type = "checkbox";
+      rowSelect.checked = selected;
+      rowSelect.title = selected ? "Unselect row" : "Select row";
+      rowSelect.style.cssText = "width:14px;height:14px;accent-color:#2563eb;cursor:pointer;margin:0;";
+      rowSelect.addEventListener("change", function() {
+        row2.selected = rowSelect.checked;
+        persist();
+        renderCard(ctx);
+      });
+      selectCell.appendChild(rowSelect);
+      line.appendChild(selectCell);
+      line.appendChild(flowNameCell(row2, rowIdx));
+      line.appendChild(planCheckCell(row2, "addedToTracker"));
+      line.appendChild(planCheckCell(row2, "loomRecorded"));
+      line.appendChild(planCheckCell(row2, "attachedToCr"));
+      var clarifyCell = document.createElement("div");
+      clarifyCell.style.cssText = "display:flex;justify-content:center;border-left:1px solid #e2e8f0;";
+      var clarifyBtn = document.createElement("button");
+      clarifyBtn.type = "button";
+      var hasNote = !!(row2.clarificationNote || "").trim();
+      clarifyBtn.textContent = hasNote ? "note" : "--";
+      clarifyBtn.title = hasNote ? row2.clarificationNote : "Add optional clarification note";
+      clarifyBtn.style.cssText = "border:1px solid " + (hasNote ? "#fcd34d" : "#e2e8f0") + ";background:" + (hasNote ? "#fffbeb" : "#f8fafc") + ";color:" + (hasNote ? "#92400e" : "#64748b") + ";border-radius:6px;padding:1px 6px;font-size:10px;cursor:pointer;font-family:inherit;min-width:28px;";
+      clarifyBtn.addEventListener("click", function() {
+        showCoverageClarificationModal(ctx, row2, persist);
+      });
+      clarifyCell.appendChild(clarifyBtn);
+      line.appendChild(clarifyCell);
+      table.appendChild(line);
+    });
+    var addFlowRow = document.createElement("div");
+    addFlowRow.style.cssText = "display:grid;grid-template-columns:18px minmax(105px,1fr) 52px 42px 48px 38px;gap:3px;align-items:center;padding:4px 6px;border-bottom:1px solid #e2e8f0;";
+    addFlowRow.appendChild(document.createElement("div"));
+    var addFlowCell = document.createElement("div");
+    addFlowCell.style.cssText = "border-left:1px solid #e2e8f0;padding-left:6px;";
+    addFlowCell.appendChild(
+      btn("+ Add flow", {
+        variant: "link",
+        fullWidth: false,
+        onClick: function() {
+          showAddCoveragePlanModal(ctx, ws);
+        }
+      })
+    );
+    addFlowRow.appendChild(addFlowCell);
+    addFlowRow.appendChild(document.createElement("div"));
+    addFlowRow.appendChild(document.createElement("div"));
+    addFlowRow.appendChild(document.createElement("div"));
+    addFlowRow.appendChild(document.createElement("div"));
+    table.appendChild(addFlowRow);
+    var footerRow = document.createElement("div");
+    footerRow.style.cssText = "display:grid;grid-template-columns:18px minmax(105px,1fr) 52px 42px 48px 38px;gap:3px;align-items:center;padding:6px;";
+    footerRow.appendChild(document.createElement("div"));
+    var footerCell = document.createElement("div");
+    footerCell.style.cssText = "grid-column:2 / -1;border-left:1px solid #e2e8f0;padding-left:6px;";
+    var rowActions = document.createElement("div");
+    rowActions.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;";
+    var leftActions = document.createElement("div");
+    leftActions.style.cssText = "display:flex;align-items:center;gap:8px;flex-wrap:wrap;";
+    leftActions.appendChild(
+      btn("Use Simple Checklist Instead", {
+        variant: "secondary",
+        fullWidth: false,
+        onClick: switchToSimpleChecklist
+      })
+    );
+    rowActions.appendChild(leftActions);
+    var rightActions = document.createElement("div");
+    rightActions.style.cssText = "display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end;";
+    if (rows.some(function(r) {
+      return r.selected !== false;
+    })) {
+      var deleteAction = btn("Delete selected", {
+        variant: "danger",
+        fullWidth: false,
+        onClick: function() {
+          showDeleteCoverageRowsModal(ctx, ws, rows);
+        }
+      });
+      deleteAction.style.color = "#b91c1c";
+      deleteAction.style.fontWeight = "700";
+      rightActions.appendChild(
+        deleteAction
+      );
+    }
+    rowActions.appendChild(rightActions);
+    footerCell.appendChild(rowActions);
+    footerRow.appendChild(footerCell);
+    table.appendChild(footerRow);
+    section2.appendChild(table);
+    return section2;
+  }
+  function checkboxRow(key, label, ws, onChange, opts) {
+    var wrap = document.createElement("div");
+    wrap.style.cssText = "display:block;margin:6px 0;";
+    var row2 = document.createElement("label");
+    var disabled = !!(opts && opts.disabled);
+    row2.style.cssText = "display:inline-flex;align-items:flex-start;gap:8px;font-size:12px;" + (disabled ? "color:#94a3b8;cursor:not-allowed;" : "color:#334155;cursor:pointer;") + "line-height:1.35;";
+    var inp = document.createElement("input");
+    inp.type = "checkbox";
+    inp.checked = !!ws.checks[key];
+    inp.disabled = disabled;
+    if (disabled && opts && opts.disabledTitle) inp.title = opts.disabledTitle;
+    inp.style.cssText = "margin-top:2px;accent-color:#2563eb;";
+    inp.addEventListener("change", function() {
+      if (disabled) return;
+      ws.checks[key] = inp.checked;
+      saveWorkspace(ws);
+      onChange();
+    });
+    var span = document.createElement("span");
+    span.textContent = label;
+    row2.appendChild(inp);
+    row2.appendChild(span);
+    wrap.appendChild(row2);
+    return wrap;
+  }
+  function markDoneSection(ws, onChange) {
+    var wrap = document.createElement("div");
+    wrap.style.cssText = "margin:10px 0 6px;padding-top:8px;border-top:1px solid #e2e8f0;";
+    var ready = coverageReadyForMarkDone(ws);
+    var b = document.createElement("button");
+    b.type = "button";
+    b.textContent = "Mark as Done in Task Wolf";
+    b.disabled = !ready;
+    b.title = ready ? "Mark this coverage request complete" : "Complete selected rows or discovery checklist first";
+    b.style.cssText = "display:block;width:100%;box-sizing:border-box;border:1px solid " + (ready ? "#1d4ed8" : "#cbd5e1") + ";background:" + (ready ? "#2563eb" : "#f8fafc") + ";color:" + (ready ? "#fff" : "#94a3b8") + ";border-radius:7px;padding:7px 10px;font-size:12px;font-weight:700;font-family:inherit;cursor:" + (ready ? "pointer" : "not-allowed") + ";line-height:1.3;text-align:center;";
+    b.addEventListener("click", function(e) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (!ready) return;
+      ws.checks.markDoneInTaskWolf = true;
+      saveWorkspace(ws);
+      onChange();
+    });
+    wrap.appendChild(b);
+    return wrap;
+  }
+  function showTrackerUrlModal(client, onDone) {
+    var current = getTrackerUrl(client);
+    var overlay = document.createElement("div");
+    overlay.style.cssText = "position:fixed;inset:0;z-index:2147483646;background:rgba(15,23,42,.45);display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box;";
+    var panel = document.createElement("div");
+    panel.style.cssText = "width:min(440px,100%);background:#fff;border-radius:10px;padding:14px 16px;box-shadow:0 12px 40px rgba(15,23,42,.2);font-family:system-ui,-apple-system,sans-serif;color:#0f172a;";
+    var title = document.createElement("div");
+    title.style.cssText = "font-size:14px;font-weight:700;color:#0f172a;margin-bottom:4px;";
+    title.textContent = "Coverage Tracker";
+    panel.appendChild(title);
+    var hint = document.createElement("div");
+    hint.style.cssText = "font-size:11px;color:#64748b;line-height:1.4;margin-bottom:8px;";
+    hint.textContent = "Set the tracker sheet for this client. The table header will always bring you back here.";
+    panel.appendChild(hint);
+    var input = document.createElement("input");
+    input.type = "url";
+    input.value = current || "";
+    input.placeholder = "https://";
+    input.style.cssText = "width:100%;box-sizing:border-box;border:1px solid #cbd5e1;border-radius:7px;padding:8px;font-size:12px;font-family:inherit;margin-bottom:10px;";
+    panel.appendChild(input);
+    function close() {
+      overlay.remove();
+    }
+    var actions = document.createElement("div");
+    actions.style.cssText = "display:flex;justify-content:space-between;align-items:center;gap:8px;";
+    var left = document.createElement("div");
+    left.style.cssText = "display:flex;gap:8px;align-items:center;";
+    left.appendChild(
+      btn("Open tracker", {
+        variant: "secondary",
+        fullWidth: false,
+        onClick: function() {
+          var url = input.value.trim() || current;
+          if (url) window.open(url, "_blank", "noopener,noreferrer");
+        }
+      })
+    );
+    actions.appendChild(left);
+    var right = document.createElement("div");
+    right.style.cssText = "display:flex;gap:8px;align-items:center;";
+    right.appendChild(
+      btn("Cancel", {
+        variant: "secondary",
+        fullWidth: false,
+        onClick: close
+      })
+    );
+    right.appendChild(
+      btn("Save", {
+        variant: "primary",
+        fullWidth: false,
+        onClick: function() {
+          setTrackerUrl(client, input.value.trim());
+          close();
+          onDone();
+        }
+      })
+    );
+    actions.appendChild(right);
+    panel.appendChild(actions);
+    overlay.appendChild(panel);
+    overlay.addEventListener("click", function(e) {
+      if (e.target === overlay) close();
+    });
+    document.body.appendChild(overlay);
+    input.focus();
+    input.select();
+  }
+  function coverageRequestIsComplete(ws) {
+    return !!(ws.claimed && ws.checks && coveragePlanWorkflowReady(ws) && ws.checks.markDoneInTaskWolf);
+  }
+  function completePill(ctx) {
+    var wrap = document.createElement("span");
+    wrap.style.cssText = "position:relative;display:inline-flex;align-items:center;min-width:72px;min-height:24px;";
+    var complete = document.createElement("span");
+    complete.textContent = "Complete";
+    complete.style.cssText = "border:1px solid #bbf7d0;background:#ecfdf5;color:#166534;border-radius:999px;padding:4px 9px;font-size:11px;font-weight:700;line-height:1.2;transition:opacity .12s;";
+    var reopen = document.createElement("button");
+    reopen.type = "button";
+    reopen.textContent = "Reopen";
+    reopen.title = "Reopen helper";
+    reopen.style.cssText = "position:absolute;right:0;top:0;opacity:0;border:1px solid #cbd5e1;background:#fff;color:#334155;border-radius:999px;padding:4px 9px;font-size:11px;font-weight:700;cursor:pointer;line-height:1.2;transition:opacity .12s;";
+    function showReopen() {
+      complete.style.opacity = "0";
+      reopen.style.opacity = "1";
+    }
+    function showComplete() {
+      complete.style.opacity = "1";
+      reopen.style.opacity = "0";
+    }
+    wrap.addEventListener("mouseenter", showReopen);
+    wrap.addEventListener("mouseleave", showComplete);
+    wrap.addEventListener("focusin", showReopen);
+    wrap.addEventListener("focusout", showComplete);
+    reopen.addEventListener("click", function(e) {
+      e.preventDefault();
+      e.stopPropagation();
+      reopenedCompleteRequests[ctx.requestId] = true;
+      renderCard(ctx);
+    });
+    wrap.appendChild(complete);
+    wrap.appendChild(reopen);
+    return wrap;
+  }
+  function cardHeader(_ws) {
+    var title = document.createElement("div");
+    title.style.cssText = "font-size:13px;font-weight:750;color:#0f172a;margin-bottom:4px;";
+    title.textContent = "QAW Coverage Helper";
+    return title;
+  }
+  function renderCard(ctx) {
+    var anchor = findSidebarAnchor();
+    if (!anchor || !anchor.parentElement) return;
+    var ws = getOrCreateWorkspace(ctx);
+    lastRenderedCoverageKey = ctx.client + "/" + ctx.requestId;
+    var existing = document.querySelector("[data-qaw-coverage-helper]");
+    if (existing) existing.remove();
+    var card = document.createElement("div");
+    card.setAttribute("data-qaw-coverage-helper", "1");
+    card.style.cssText = "margin-top:-26px;padding-bottom:4px;font-family:system-ui,-apple-system,sans-serif;color:#0f172a;";
+    var headerRow = document.createElement("div");
+    headerRow.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px;";
+    headerRow.appendChild(cardHeader(ws));
+    if (ws.claimed) {
+      if (coverageRequestIsComplete(ws) && !reopenedCompleteRequests[ctx.requestId]) {
+        headerRow.appendChild(completePill(ctx));
+      } else {
+        var headerActions = document.createElement("div");
+        headerActions.style.cssText = "display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end;";
+        var outlineBtn = btn("\u2728 Outline Generator", {
+          variant: "secondary",
+          fullWidth: false,
+          onClick: function() {
+            openOutlineGeneratorPanel({ defaultMode: "paste" });
+          }
+        });
+        outlineBtn.style.background = "rgb(39,59,108)";
+        outlineBtn.style.borderColor = "rgb(15,23,42)";
+        outlineBtn.style.color = "#fff";
+        outlineBtn.style.boxShadow = "0 2px 6px rgba(15,23,42,.18), inset 0 1px 0 rgba(255,255,255,.14)";
+        outlineBtn.style.fontWeight = "750";
+        headerActions.appendChild(outlineBtn);
+        headerActions.appendChild(
+          btn("Unclaim", {
+            variant: "danger",
+            fullWidth: false,
+            onClick: function() {
+              ws.claimed = false;
+              ws.claimedAt = "";
+              saveWorkspace(ws);
+              renderCard(ctx);
+            }
+          })
+        );
+        headerRow.appendChild(headerActions);
+      }
+    }
+    card.appendChild(headerRow);
+    if (!ws.claimed) {
+      card.appendChild(
+        btn("Claim this CR", {
+          variant: "primary",
+          onClick: function() {
+            ws.claimed = true;
+            ws.claimedAt = (/* @__PURE__ */ new Date()).toISOString();
+            var fresh = scrapeCoveragePageMeta();
+            ws.scraped = {
+              status: fresh.status,
+              priority: fresh.priority,
+              requestedBy: fresh.requestedBy,
+              estimatedCompletion: fresh.estimatedCompletion
+            };
+            if (!ws.requestNumber) ws.requestNumber = fresh.requestNumber;
+            if (!ws.title) ws.title = fresh.title;
+            saveWorkspace(ws);
+            renderCard(ctx);
+          }
+        })
+      );
+    } else if (coverageRequestIsComplete(ws) && !reopenedCompleteRequests[ctx.requestId]) {
+      var doneHint = document.createElement("div");
+      doneHint.style.cssText = "font-size:11px;color:#64748b;line-height:1.4;";
+      doneHint.textContent = "Coverage workflow checklist is complete.";
+      card.appendChild(doneHint);
+    } else {
+      let appendPrivateNotesEditor2 = function() {
+        card.appendChild(fieldLabel("Private notes"));
+        var notes = document.createElement("textarea");
+        notes.placeholder = "Only you see this \u2014 reminders, flow names, tracker row notes\u2026";
+        notes.value = ws.privateNotes || "";
+        notes.style.cssText = "width:100%;min-height:72px;box-sizing:border-box;border:1px solid #cbd5e1;border-radius:7px;padding:8px;font-size:12px;line-height:1.4;resize:none;overflow:hidden;font-family:inherit;margin-bottom:6px;";
+        function autosizePrivateNotes() {
+          notes.style.height = "auto";
+          notes.style.height = Math.max(72, notes.scrollHeight + 2) + "px";
+        }
+        notes.addEventListener("input", function() {
+          ws.privateNotes = notes.value;
+          saveWorkspace(ws);
+          autosizePrivateNotes();
+        });
+        card.appendChild(notes);
+        autosizePrivateNotes();
+        setTimeout(function() {
+          autosizePrivateNotes();
+        }, 0);
+        if (typeof requestAnimationFrame === "function") {
+          requestAnimationFrame(autosizePrivateNotes);
+        }
+      };
+      var appendPrivateNotesEditor = appendPrivateNotesEditor2;
+      var usingPlan = coverageUsesCoveragePlan(ws);
+      if (usingPlan) {
+        card.appendChild(coveragePlanSection(ctx, ws));
+      } else {
+        var checklistHead = document.createElement("div");
+        checklistHead.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:8px;margin:12px 0 5px;";
+        var checklistTitle = fieldLabel("Checklist");
+        checklistTitle.style.margin = "0";
+        checklistHead.appendChild(checklistTitle);
+        checklistHead.appendChild(
+          btn("Use Table Checklist Instead", {
+            variant: "secondary",
+            fullWidth: false,
+            onClick: function() {
+              ws.coveragePlanMode = "table";
+              syncTopLevelChecksFromReferenceFlows(ws);
+              saveWorkspace(ws);
+              renderCard(ctx);
+            }
+          })
+        );
+        card.appendChild(checklistHead);
+        var checksWrap = document.createElement("div");
+        checksWrap.style.cssText = "margin-bottom:6px;";
+        checksWrap.appendChild(
+          checkboxRow("addedToCoverageTracker", "Added Flows/Tests to Coverage Tracker", ws, function() {
+          })
+        );
+        checksWrap.appendChild(
+          checkboxRow("loomsRecorded", "Loom(s) recorded for reference flows", ws, function() {
+          })
+        );
+        checksWrap.appendChild(checkboxRow("attachedFlows", "Attached flows", ws, function() {
+        }));
+        card.appendChild(checksWrap);
+      }
+      card.appendChild(
+        markDoneSection(ws, function() {
+          renderCard(ctx);
+        })
+      );
+      if ((ws.privateNotes || "").trim()) {
+        appendPrivateNotesEditor2();
+      } else {
+        card.appendChild(
+          btn("Add notes", {
+            variant: "secondary",
+            fullWidth: false,
+            onClick: function() {
+              renderCard(ctx);
+              var fresh = document.querySelector("[data-qaw-coverage-helper]");
+              if (!fresh) return;
+              var existingAdd = Array.from(fresh.querySelectorAll("button")).filter(function(b) {
+                return (b.textContent || "") === "Add notes";
+              })[0];
+              if (existingAdd) existingAdd.style.display = "none";
+              var freshCard = fresh;
+              freshCard.appendChild(fieldLabel("Private notes"));
+              var notes = document.createElement("textarea");
+              notes.placeholder = "Only you see this \u2014 reminders, flow names, tracker row notes\u2026";
+              notes.style.cssText = "width:100%;min-height:72px;box-sizing:border-box;border:1px solid #cbd5e1;border-radius:7px;padding:8px;font-size:12px;line-height:1.4;resize:none;overflow:hidden;font-family:inherit;margin-bottom:6px;";
+              notes.addEventListener("input", function() {
+                ws.privateNotes = notes.value;
+                saveWorkspace(ws);
+                notes.style.height = "auto";
+                notes.style.height = Math.max(72, notes.scrollHeight) + "px";
+              });
+              freshCard.appendChild(notes);
+              notes.focus();
+            }
+          })
+        );
+      }
+    }
+    if (anchor.nextSibling) {
+      anchor.parentElement.insertBefore(card, anchor.nextSibling);
+    } else {
+      anchor.parentElement.appendChild(card);
+    }
+  }
+  function removeCard() {
+    document.querySelectorAll("[data-qaw-coverage-helper]").forEach(function(el) {
+      el.remove();
+    });
+    lastRenderedCoverageKey = "";
+  }
+  function syncCoverageHelper() {
+    var active = document.activeElement;
+    if (active && active.closest("[data-qaw-coverage-helper]")) return;
+    var ctx = parseCoverageRequestPage();
+    if (!ctx) {
+      if (document.querySelector("[data-qaw-coverage-helper]")) removeCard();
+      return;
+    }
+    var key = ctx.client + "/" + ctx.requestId;
+    if (lastRenderedCoverageKey === key && document.querySelector("[data-qaw-coverage-helper]")) return;
+    renderCard(ctx);
+  }
+  function initCoverageRequestHelper() {
+    if (!/app\.qawolf\.com$/i.test(location.hostname)) return;
+    syncCoverageHelper();
+    if (!mountObserver) {
+      mountObserver = new MutationObserver(function(mutations) {
+        for (var i = 0; i < mutations.length; i++) {
+          var target = mutations[i].target;
+          if (target && target.closest && target.closest("[data-qaw-coverage-helper]")) return;
+        }
+        if (syncTimer) return;
+        syncTimer = setTimeout(function() {
+          syncTimer = null;
+          syncCoverageHelper();
+        }, 350);
+      });
+      mountObserver.observe(document.body || document.documentElement, { childList: true, subtree: true });
+    }
+  }
+  var mountObserver, syncTimer, reopenedCompleteRequests, lastRenderedCoverageKey, COVERAGE_LOOM_LIBRARY_URL;
+  var init_coverage_requests = __esm({
+    "src/notes/53-coverage-requests.ts"() {
+      "use strict";
+      init_constants();
+      init_outline_generator();
+      mountObserver = null;
+      syncTimer = null;
+      reopenedCompleteRequests = {};
+      lastRenderedCoverageKey = "";
+      COVERAGE_LOOM_LIBRARY_URL = "https://www.loom.com/looms/videos";
     }
   });
 
@@ -7746,191 +10317,6 @@
       init_map_tab();
       init_bug_reval_report();
       init_reval_history();
-    }
-  });
-
-  // src/notes/41-floating-panel.ts
-  function ensureTray() {
-    if (trayEl && document.body.contains(trayEl)) return trayEl;
-    trayEl = document.createElement("div");
-    trayEl.setAttribute("data-qaw-floating-tray", "1");
-    trayEl.style.cssText = "position:fixed;right:16px;bottom:16px;z-index:" + (Z_INV_MODAL + 80) + ";display:flex;align-items:center;gap:6px;flex-wrap:wrap;max-width:50vw;font-family:monospace;pointer-events:none;";
-    document.body.appendChild(trayEl);
-    return trayEl;
-  }
-  function updateTrayVisibility() {
-    if (!trayEl) return;
-    trayEl.style.display = trayEl.children.length ? "flex" : "none";
-  }
-  function clampPanel(panel) {
-    var rect = panel.getBoundingClientRect();
-    var left = Math.max(8, Math.min(rect.left, window.innerWidth - Math.min(80, rect.width)));
-    var top = Math.max(8, Math.min(rect.top, window.innerHeight - Math.min(48, rect.height)));
-    panel.style.left = Math.round(left) + "px";
-    panel.style.top = Math.round(top) + "px";
-  }
-  function makeButton(label, title) {
-    var btn3 = document.createElement("button");
-    btn3.type = "button";
-    btn3.textContent = label;
-    btn3.title = title;
-    btn3.style.cssText = "font-size:11px;background:none;color:#94a3b8;border:1px solid #334155;border-radius:5px;padding:3px 8px;cursor:pointer;font-family:monospace;line-height:1.3;";
-    btn3.addEventListener("mouseenter", function() {
-      btn3.style.color = "#e2e8f0";
-      btn3.style.borderColor = "#64748b";
-      btn3.style.background = "#1e293b";
-    });
-    btn3.addEventListener("mouseleave", function() {
-      btn3.style.color = "#94a3b8";
-      btn3.style.borderColor = "#334155";
-      btn3.style.background = "none";
-    });
-    return btn3;
-  }
-  function restoreFloatingPanel(id) {
-    var panel = activePanels[id];
-    if (!panel) return false;
-    panel.restore();
-    return true;
-  }
-  function createFloatingPanel(opts) {
-    if (activePanels[opts.id]) {
-      activePanels[opts.id].restore();
-      return activePanels[opts.id];
-    }
-    var width = opts.width || 720;
-    var height = opts.height || 560;
-    var zIndex = opts.zIndex || Z_INV_MODAL + 50;
-    var root = document.createElement("div");
-    root.setAttribute("data-qaw-floating-panel-root", opts.id);
-    root.setAttribute("data-qaw-overlay", "1");
-    root.style.cssText = "position:fixed;inset:0;z-index:" + zIndex + ";pointer-events:none;";
-    var panel = document.createElement("div");
-    panel.setAttribute("data-qaw-floating-panel", opts.id);
-    panel.style.cssText = "position:fixed;left:" + Math.max(16, Math.round((window.innerWidth - width) / 2)) + "px;top:" + Math.max(16, Math.round((window.innerHeight - height) / 2)) + "px;width:min(" + width + "px,calc(100vw - 32px));height:min(" + height + "px,calc(100vh - 32px));min-width:" + (opts.minWidth || 320) + "px;min-height:" + (opts.minHeight || 220) + "px;background:#0f172a;border:1px solid #475569;border-radius:10px;color:#e2e8f0;box-shadow:0 18px 56px rgba(0,0,0,0.62);display:flex;flex-direction:column;overflow:hidden;resize:both;pointer-events:auto;font-family:monospace;";
-    var header = document.createElement("div");
-    header.setAttribute("data-qaw-floating-panel-header", "1");
-    header.style.cssText = "display:flex;align-items:center;gap:8px;padding:9px 12px;border-bottom:1px solid #334155;background:#1e293b;cursor:move;user-select:none;flex-shrink:0;";
-    var titleEl = document.createElement("div");
-    titleEl.textContent = opts.title;
-    titleEl.style.cssText = "flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;font-weight:700;color:#f8fafc;";
-    header.appendChild(titleEl);
-    var actions = document.createElement("div");
-    actions.style.cssText = "display:flex;align-items:center;gap:6px;flex-shrink:0;";
-    var minBtn = makeButton("\u2013", "Minimize");
-    var closeBtn = makeButton("\xD7", "Close");
-    actions.appendChild(minBtn);
-    actions.appendChild(closeBtn);
-    header.appendChild(actions);
-    var body = document.createElement("div");
-    body.setAttribute("data-qaw-floating-panel-body", "1");
-    body.style.cssText = "flex:1;min-height:0;display:flex;flex-direction:column;background:#0f172a;";
-    panel.appendChild(header);
-    panel.appendChild(body);
-    root.appendChild(panel);
-    document.body.appendChild(root);
-    var chip = null;
-    var handle;
-    function makeChip() {
-      var tray = ensureTray();
-      var c = document.createElement("button");
-      c.type = "button";
-      c.setAttribute("data-qaw-floating-chip", opts.id);
-      c.textContent = opts.title;
-      c.style.cssText = "pointer-events:auto;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;font-weight:700;color:#dbeafe;background:#1e3a8a;border:1px solid #3b82f6;border-radius:999px;padding:6px 10px;cursor:pointer;font-family:monospace;box-shadow:0 6px 20px rgba(0,0,0,0.45);";
-      c.addEventListener("click", function() {
-        handle.restore();
-      });
-      tray.appendChild(c);
-      updateTrayVisibility();
-      return c;
-    }
-    var closed = false;
-    function cleanupListeners() {
-      document.removeEventListener("mousemove", onMouseMove);
-      document.removeEventListener("mouseup", onMouseUp);
-      window.removeEventListener("resize", onResize);
-      window.removeEventListener("beforeunload", cleanupListeners);
-    }
-    function close() {
-      if (closed) return;
-      closed = true;
-      if (chip) {
-        chip.remove();
-        chip = null;
-        updateTrayVisibility();
-      }
-      cleanupListeners();
-      delete activePanels[opts.id];
-      root.remove();
-      if (opts.onClose) opts.onClose();
-    }
-    function minimize() {
-      root.style.display = "none";
-      if (!chip) chip = makeChip();
-    }
-    function restore() {
-      root.style.display = "";
-      if (chip) {
-        chip.remove();
-        chip = null;
-        updateTrayVisibility();
-      }
-      clampPanel(panel);
-      try {
-        panel.focus();
-      } catch (e) {
-      }
-    }
-    handle = { root, panel, header, titleEl, body, actions, close, minimize, restore };
-    activePanels[opts.id] = handle;
-    minBtn.addEventListener("click", function(e) {
-      e.stopPropagation();
-      minimize();
-    });
-    closeBtn.addEventListener("click", function(e) {
-      e.stopPropagation();
-      close();
-    });
-    var dragging = false;
-    var dragDx = 0;
-    var dragDy = 0;
-    function onMouseMove(e) {
-      if (!dragging) return;
-      panel.style.left = Math.round(e.clientX - dragDx) + "px";
-      panel.style.top = Math.round(e.clientY - dragDy) + "px";
-      panel.style.right = "auto";
-      panel.style.bottom = "auto";
-    }
-    function onMouseUp() {
-      if (!dragging) return;
-      dragging = false;
-      clampPanel(panel);
-    }
-    function onResize() {
-      clampPanel(panel);
-    }
-    header.addEventListener("mousedown", function(e) {
-      if (e.target.closest("button")) return;
-      dragging = true;
-      var rect = panel.getBoundingClientRect();
-      dragDx = e.clientX - rect.left;
-      dragDy = e.clientY - rect.top;
-      e.preventDefault();
-    });
-    document.addEventListener("mousemove", onMouseMove);
-    document.addEventListener("mouseup", onMouseUp);
-    window.addEventListener("resize", onResize);
-    window.addEventListener("beforeunload", cleanupListeners);
-    return handle;
-  }
-  var activePanels, trayEl;
-  var init_floating_panel = __esm({
-    "src/notes/41-floating-panel.ts"() {
-      "use strict";
-      init_constants();
-      activePanels = {};
-      trayEl = null;
     }
   });
 
@@ -13883,7 +16269,7 @@
         textCss = "";
       }
       var numEl = '<span style="' + numCss + 'cursor:pointer;user-select:none;margin-right:10px;" data-qaw-goto-line="' + ln + '">' + numStr + "</span>";
-      return '<span style="display:block;' + rowBg + '">' + numEl + '<span style="' + textCss + '">' + escHtml(entry.line) + "</span></span>";
+      return '<span style="display:block;' + rowBg + '">' + numEl + '<span style="' + textCss + '">' + escHtml2(entry.line) + "</span></span>";
     }).join("");
     pre.innerHTML = htmlRows;
     pre.querySelectorAll("[data-qaw-goto-line]").forEach(function(el) {
@@ -13927,7 +16313,7 @@
     lineContextOutsideHandler = closeOnOutside;
     document.addEventListener("mousedown", closeOnOutside, true);
   }
-  function escHtml(s) {
+  function escHtml2(s) {
     return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   }
   function openImageLightbox(gallery, startIndex) {
@@ -15288,7 +17674,7 @@
   });
 
   // src/notes/43-parser-gallery.ts
-  function escHtml2(s) {
+  function escHtml3(s) {
     var d = document.createElement("div");
     d.textContent = s;
     return d.innerHTML;
@@ -15481,7 +17867,7 @@
     var b = note2.bullets && note2.bullets[0] ? note2.bullets[0] : {};
     var meta = b.parserGallery || {};
     container.style.cssText = "min-width:0;border-right:1px solid #1e293b;background:#020617;color:#94a3b8;font:10px/1.45 monospace;padding:10px;box-sizing:border-box;overflow:auto;";
-    container.innerHTML = '<div style="font-size:12px;font-weight:700;color:#f8fafc;margin-bottom:6px;">' + escHtml2(meta.label || "Example") + '</div><pre style="white-space:pre-wrap;word-break:break-word;margin:0;color:#64748b;font:10px/1.4 monospace;">' + escHtml2(meta.raw || "") + "</pre>";
+    container.innerHTML = '<div style="font-size:12px;font-weight:700;color:#f8fafc;margin-bottom:6px;">' + escHtml3(meta.label || "Example") + '</div><pre style="white-space:pre-wrap;word-break:break-word;margin:0;color:#64748b;font:10px/1.4 monospace;">' + escHtml3(meta.raw || "") + "</pre>";
   }
   function renderPlaygroundRow(container, rowData, idx) {
     var row2 = document.createElement("div");
@@ -16236,6 +18622,34 @@
     heightWrap.appendChild(heightLbl);
     heightWrap.appendChild(heightInp);
     notesFields.appendChild(heightWrap);
+    var diagBtn = document.createElement("button");
+    diagBtn.type = "button";
+    diagBtn.textContent = "Copy diagnostics";
+    diagBtn.style.cssText = "align-self:flex-start;margin-top:4px;padding:6px 10px;font-size:11px;font-family:monospace;background:#1e293b;color:#93c5fd;border:1px solid #334155;border-radius:5px;cursor:pointer;";
+    var diagStatus = document.createElement("span");
+    diagStatus.style.cssText = "font-size:10px;color:#64748b;font-family:monospace;min-height:14px;";
+    diagBtn.addEventListener("click", function() {
+      diagStatus.textContent = "Copying\u2026";
+      diagStatus.style.color = "#64748b";
+      copyQawDiagnosticsToClipboard().then(function(ok) {
+        if (ok) {
+          diagStatus.textContent = "\u2713 Diagnostics copied";
+          diagStatus.style.color = "#4ade80";
+        } else {
+          diagStatus.textContent = "\u2717 Copy failed \u2014 check clipboard permission";
+          diagStatus.style.color = "#f87171";
+        }
+      });
+    });
+    var diagHint = document.createElement("div");
+    diagHint.style.cssText = "font-size:10px;color:#64748b;line-height:1.5;margin-top:4px;";
+    diagHint.textContent = "Paste diagnostics when reporting issues. Verbose logs: localStorage." + QAW_DEBUG_LS_KEY + " = '1' " + (isQawDebugEnabled() ? "(on)" : "(off)");
+    var diagWrap = document.createElement("div");
+    diagWrap.style.cssText = "display:flex;flex-direction:column;gap:6px;margin-top:8px;padding-top:8px;border-top:1px solid #1e293b;";
+    diagWrap.appendChild(row("Support", diagBtn));
+    diagWrap.appendChild(diagStatus);
+    diagWrap.appendChild(diagHint);
+    notesFields.appendChild(diagWrap);
     notesBlock.appendChild(notesFields);
     scrollHost.appendChild(notesBlock);
     function showSection(which) {
@@ -16342,6 +18756,8 @@
       init_constants();
       init_github_feedback();
       init_llm_models();
+      init_diagnostics();
+      init_constants();
       LLM_KEY_PLACEHOLDER = {
         gemini: "AIza...",
         claude: "sk-ant-...",
@@ -21131,9 +23547,12 @@ This won't delete the actual file.`)) return;
   });
 
   // src/notes/38-panel-bootstrap.ts
-  function panelBootstrapMode(ctx, fileName, hostname) {
+  function panelBootstrapMode(ctx, fileName, hostname, pathname) {
     if (ctx && fileName) return "ready";
     if (ctx && !fileName) return "waiting-file";
+    if (/app\.qawolf\.com$/i.test(hostname) && /^\/[^/]+\/coverage-requests\/[^/]+\/?$/i.test(pathname || "")) {
+      return "coverage-request";
+    }
     if (/app\.qawolf\.com$/i.test(hostname)) return "waiting-context";
     return "unsupported";
   }
@@ -21143,6 +23562,7 @@ This won't delete the actual file.`)) return;
   function panelBootstrapHeadline(mode) {
     if (mode === "waiting-file") return "Waiting for the active file\u2026";
     if (mode === "waiting-context") return "Loading workspace\u2026";
+    if (mode === "coverage-request") return "Coverage request open";
     return "Open a file tab to attach notes";
   }
   function panelBootstrapHint(mode) {
@@ -21152,11 +23572,210 @@ This won't delete the actual file.`)) return;
     if (mode === "waiting-context") {
       return "Open or switch to a file under /client/environments/id/ in the automate IDE.";
     }
+    if (mode === "coverage-request") {
+      return "Coverage requests use the QAW Coverage Helper on this page. Open a file tab when you want file-specific notes.";
+    }
     return "Open a file tab inside /client/environments/id/ to attach notes to a file.";
   }
   var init_panel_bootstrap = __esm({
     "src/notes/38-panel-bootstrap.ts"() {
       "use strict";
+    }
+  });
+
+  // src/notes/54-coverage-page-info.ts
+  function isCoverageRequestNotesPage() {
+    return panelBootstrapMode(null, null, location.hostname, location.pathname) === "coverage-request";
+  }
+  function flushCoverageClientNotesIfNeeded() {
+    var ctx = parseCoverageRequestPage();
+    if (ctx && coverageView === "client-notes") {
+      flushPendingClientNoteEdits(clientScopedNotesKey(ctx.client));
+    }
+  }
+  function clearCoveragePanelState() {
+    flushCoverageClientNotesIfNeeded();
+    coveragePanel = null;
+    coverageView = "main";
+  }
+  function closeCoveragePageInfoPanel() {
+    var panel = coveragePanel || getFloatingPanel(PANEL_ID);
+    if (!panel) {
+      clearCoveragePanelState();
+      return;
+    }
+    panel.close();
+  }
+  function miniActionBtn(label, muted) {
+    var b = document.createElement("button");
+    b.type = "button";
+    b.textContent = label;
+    b.style.cssText = "font-size:10px;padding:4px 10px;border-radius:6px;cursor:pointer;font-family:monospace;border:1px solid " + (muted ? "#1e293b" : "#475569") + ";background:" + (muted ? "#0f172a" : "#334155") + ";color:" + (muted ? "#64748b" : "#e2e8f0") + ";";
+    if (muted) b.style.cursor = "default";
+    return b;
+  }
+  function renderCoverageShortcuts(host, client) {
+    host.setAttribute("data-e2e", "coverage-page-info-shortcuts");
+    host.style.cssText = "display:flex;flex-wrap:wrap;gap:6px;margin-top:10px;";
+    var trackerUrl = getCoverageTrackerUrl(client);
+    var trackerBtn = miniActionBtn("Coverage Tracker", !trackerUrl);
+    trackerBtn.setAttribute("data-e2e", "coverage-page-info-tracker");
+    trackerBtn.title = trackerUrl ? "Open or edit coverage tracker" : "Set coverage tracker URL";
+    trackerBtn.addEventListener("click", function(e) {
+      e.preventDefault();
+      e.stopPropagation();
+      openCoverageTrackerModal(client, function() {
+        renderCoveragePageInfoBody();
+      });
+    });
+    host.appendChild(trackerBtn);
+    var loomBtn = miniActionBtn("Loom");
+    loomBtn.setAttribute("data-e2e", "coverage-page-info-loom");
+    loomBtn.title = "Open Loom library";
+    loomBtn.addEventListener("click", function(e) {
+      e.preventDefault();
+      e.stopPropagation();
+      openCoverageLoomLibrary();
+    });
+    host.appendChild(loomBtn);
+    var attachBtn = miniActionBtn("Related flows");
+    attachBtn.setAttribute("data-e2e", "coverage-page-info-related-flows");
+    attachBtn.title = "Scroll to related flows on this page";
+    attachBtn.addEventListener("click", function(e) {
+      e.preventDefault();
+      e.stopPropagation();
+      scrollCoveragePageToRelatedFlows();
+    });
+    host.appendChild(attachBtn);
+  }
+  function renderCoveragePageInfoBody() {
+    if (!coveragePanel) return;
+    var ctx = parseCoverageRequestPage();
+    if (!ctx) {
+      closeCoveragePageInfoPanel();
+      return;
+    }
+    applyStoreFromDiskMergedNotes();
+    ensureClientMetadata(ctx.client);
+    var kClient = clientScopedNotesKey(ctx.client);
+    getOrCreateNote(ctx.client, "__client_scope__", "__client_notes__");
+    var body = coveragePanel.body;
+    body.innerHTML = "";
+    body.style.cssText = "flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden;";
+    var scroll = document.createElement("div");
+    scroll.setAttribute("data-e2e", "coverage-page-info-scroll");
+    scroll.style.cssText = "flex:1;min-height:0;overflow:auto;padding:12px 14px 14px;";
+    if (coverageView === "client-notes") {
+      coveragePanel.titleEl.textContent = "Client notes";
+      var backBtn = document.createElement("button");
+      backBtn.type = "button";
+      backBtn.textContent = "\u2190 Back";
+      backBtn.setAttribute("data-e2e", "coverage-page-info-client-notes-back");
+      backBtn.style.cssText = "margin-bottom:10px;background:none;border:none;color:#93c5fd;cursor:pointer;font-size:11px;font-family:monospace;padding:0;text-decoration:underline;text-underline-offset:2px;";
+      backBtn.addEventListener("click", function(e) {
+        e.preventDefault();
+        flushPendingClientNoteEdits(kClient);
+        coverageView = "main";
+        renderCoveragePageInfoBody();
+      });
+      scroll.appendChild(backBtn);
+      var notesHost = document.createElement("div");
+      notesHost.setAttribute("data-qaw-client-notes-view", "1");
+      notesHost.style.cssText = "min-height:120px;";
+      var note2 = state.store.notes[kClient];
+      mountClientNotesView(notesHost, kClient, note2);
+      scroll.appendChild(notesHost);
+      body.appendChild(scroll);
+      return;
+    }
+    coveragePanel.titleEl.textContent = "Coverage page info";
+    var scraped = scrapeCoveragePageMeta();
+    var clientLabel = getClientDisplayName(ctx.client);
+    var reqLabel = scraped.requestNumber ? "#" + scraped.requestNumber : "Request";
+    var title = (scraped.title || "").trim();
+    var intro = document.createElement("div");
+    intro.setAttribute("data-e2e", "coverage-page-info-intro");
+    intro.innerHTML = '<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:8px;"><span style="display:inline-block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;font-weight:600;padding:5px 12px;border-radius:999px;border:1px solid #475569;background:#334155;color:#e2e8f0;">' + esc4(clientLabel) + '</span><span style="font-size:11px;color:#94a3b8;">' + esc4(reqLabel) + "</span></div>" + (title ? '<div style="font-size:12px;font-weight:600;color:#f1f5f9;line-height:1.35;margin-bottom:8px;">' + esc4(title) + "</div>" : "") + '<div style="font-size:11px;line-height:1.45;color:#94a3b8;">File-specific notes live on Automate file tabs. Use the Coverage Helper on this page for outlining.</div>';
+    scroll.appendChild(intro);
+    var shortcuts = document.createElement("div");
+    renderCoverageShortcuts(shortcuts, ctx.client);
+    scroll.appendChild(shortcuts);
+    var linksHost = document.createElement("div");
+    linksHost.setAttribute("data-qaw-quick-links-host", "1");
+    scroll.appendChild(linksHost);
+    body.appendChild(scroll);
+    populateQuickLinksInto(linksHost, null, {
+      clientNotesOpenLabel: "Open",
+      onClientNotesOpen: function() {
+        coverageView = "client-notes";
+        renderCoveragePageInfoBody();
+      }
+    });
+  }
+  function openCoveragePageInfoPanel() {
+    if (!isCoverageRequestNotesPage()) return;
+    if (coveragePanel && !coveragePanel.root.isConnected) coveragePanel = null;
+    var existing = coveragePanel || getFloatingPanel(PANEL_ID);
+    if (existing) {
+      coveragePanel = existing;
+      existing.restore();
+      renderCoveragePageInfoBody();
+      return;
+    }
+    coverageView = "main";
+    var shell = createFloatingPanel({
+      id: PANEL_ID,
+      title: "Coverage page info",
+      width: 400,
+      height: 480,
+      minWidth: 320,
+      minHeight: 280,
+      onClose: clearCoveragePanelState
+    });
+    coveragePanel = shell;
+    shell.panel.style.resize = "both";
+    shell.panel.style.maxHeight = "calc(100vh - 24px)";
+    renderCoveragePageInfoBody();
+  }
+  function toggleCoveragePageInfoPanel() {
+    if (coveragePanel && coveragePanel.root.isConnected) {
+      closeCoveragePageInfoPanel();
+      return;
+    }
+    openCoveragePageInfoPanel();
+  }
+  function applyCoveragePageSpeedDial(el) {
+    el.textContent = "\u2139";
+    el.title = "Coverage page info (click to toggle, drag to move)";
+    el.setAttribute("data-qaw-coverage-info-dial", "1");
+    el.style.background = "#1e3a8a";
+    el.style.borderColor = "#1e40af";
+    el.style.color = "#dbeafe";
+  }
+  function resetCoveragePageSpeedDial(el) {
+    el.textContent = "\u270D";
+    el.title = "Investigation notes (click to toggle, drag to move)";
+    el.removeAttribute("data-qaw-coverage-info-dial");
+    el.style.background = "#0f766e";
+    el.style.borderColor = "#115e59";
+    el.style.color = "#ecfdf5";
+  }
+  var PANEL_ID, coveragePanel, coverageView;
+  var init_coverage_page_info = __esm({
+    "src/notes/54-coverage-page-info.ts"() {
+      "use strict";
+      init_state();
+      init_store();
+      init_context();
+      init_quicklinks();
+      init_render_panel();
+      init_floating_panel();
+      init_client_notes_view();
+      init_panel_bootstrap();
+      init_coverage_requests();
+      PANEL_ID = "coverage-page-info";
+      coveragePanel = null;
+      coverageView = "main";
     }
   });
 
@@ -21171,6 +23790,7 @@ This won't delete the actual file.`)) return;
     openPanel: () => openPanel,
     tick: () => tick,
     toggleDialPanel: () => toggleDialPanel,
+    tryObserveFlowPassedPanel: () => tryObserveFlowPassedPanel,
     tryUpgradePanelFromBootstrap: () => tryUpgradePanelFromBootstrap,
     wireFlowPassedObserver: () => wireFlowPassedObserver
   });
@@ -21651,6 +24271,95 @@ This won't delete the actual file.`)) return;
     var e2 = body.querySelector("[data-qaw-export2]");
     if (e2) e2.addEventListener("click", openExportModal);
   }
+  function bootstrapEmptyState(title, hint) {
+    return '<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;color:#64748b;padding:28px 14px;min-height:180px;"><div style="font-size:12px;font-weight:700;color:#94a3b8;margin-bottom:5px;">' + esc4(title) + '</div><div style="font-size:11px;line-height:1.45;max-width:260px;">' + esc4(hint) + "</div></div>";
+  }
+  function renderBootstrapTabs(body, ctx) {
+    var tabsHost = body.querySelector("[data-qaw-bootstrap-tabs]");
+    if (!tabsHost) return;
+    var bootstrapEditKey = ctx ? noteKey(ctx.client, ctx.envId, "__bootstrap__") : "";
+    var tabs = [
+      { id: "notes", label: "Notes" },
+      { id: "history", label: "History" },
+      { id: "bugs", label: "Bugs" },
+      { id: "maintenance", label: "Maint" },
+      { id: "ai", label: "AI" },
+      { id: "cases", label: "Cases" },
+      { id: "work", label: "Work" },
+      { id: "map", label: "Helpers" },
+      { id: "cleaning", label: "Clean" },
+      { id: "settings", label: "Settings" }
+    ];
+    var TAB_BASE = "font-family:monospace;font-size:11px;font-weight:600;height:28px;min-width:32px;flex:1 0 auto;padding:4px 9px;background:none;border:none;border-bottom:2px solid transparent;color:#64748b;cursor:pointer;margin-bottom:-1px;display:inline-flex;align-items:center;justify-content:center;gap:6px;white-space:nowrap;";
+    var TAB_ACTIVE = TAB_BASE + "border-bottom-color:#38bdf8;color:#e2e8f0;";
+    var TAB_ICON_STYLE = "width:15px;height:15px;display:block;flex-shrink:0;";
+    var TAB_ICONS = {
+      notes: '<svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" style="' + TAB_ICON_STYLE + '" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3h7l4 4v14H7z"/><path d="M14 3v5h5"/><path d="M9 12h6M9 16h6"/></svg>',
+      history: '<svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" style="' + TAB_ICON_STYLE + '" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h4M4 12h10M4 18h16"/><circle cx="10" cy="6" r="2"/><circle cx="16" cy="12" r="2"/><circle cx="20" cy="18" r="2"/></svg>',
+      bugs: '<svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" style="' + TAB_ICON_STYLE + '" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20v-9"/><path d="M14 7a4 4 0 0 1 4 4v3a6 6 0 0 1-12 0v-3a4 4 0 0 1 4-4z"/><path d="M14.12 3.88 16 2"/><path d="M21 21a4 4 0 0 0-3.81-4"/><path d="M21 5a4 4 0 0 1-3.55 3.97"/><path d="M22 13h-4"/><path d="M3 21a4 4 0 0 1 3.81-4"/><path d="M3 5a4 4 0 0 0 3.55 3.97"/><path d="M6 13H2"/><path d="m8 2 1.88 1.88"/><path d="M9 7.13V6a3 3 0 1 1 6 0v1.13"/></svg>',
+      maintenance: '<svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" style="' + TAB_ICON_STYLE + '" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>',
+      ai: '<svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" style="' + TAB_ICON_STYLE + '" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/><path d="M19 16l.8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8z"/></svg>',
+      cases: '<svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" style="' + TAB_ICON_STYLE + '" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7h7l2 2h9v10H3z"/><path d="M3 7v12"/></svg>',
+      work: '<svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" style="' + TAB_ICON_STYLE + '" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2-6 4 12 2-6h6"/></svg>',
+      map: '<svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" style="' + TAB_ICON_STYLE + '" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 4 3 12l5 8"/><path d="m16 4 5 8-5 8"/><path d="m14 5-4 14"/></svg>',
+      cleaning: '<svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" style="' + TAB_ICON_STYLE + '" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 9h14"/><path d="M7 9l1 12h8l1-12"/><path d="M8 9V7a4 4 0 0 1 8 0v2"/><path d="M4 9V7h16v2"/><path d="M10 12v5M12 12v4M14 12v5"/></svg>',
+      settings: '<svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" style="' + TAB_ICON_STYLE + '" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.65 1.65 0 0 0 15 19.4a1.65 1.65 0 0 0-1 .6 1.65 1.65 0 0 0-.4 1.1V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 8.6 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-.6-1 1.65 1.65 0 0 0-1.1-.4H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 8.6a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-.6 1.65 1.65 0 0 0 .4-1.1V3a2 2 0 1 1 4 0v.09A1.65 1.65 0 0 0 15.4 4.6a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9c.2.32.4.66.6 1h1a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>'
+    };
+    tabsHost.innerHTML = '<div style="margin-top:12px;border-top:1px solid #334155;padding-top:12px;display:flex;flex-direction:column;gap:8px;flex:1;min-height:0;"><div style="border-bottom:1px solid #1e293b;flex-shrink:0;overflow-x:auto;scrollbar-width:none;-ms-overflow-style:none;"><div data-qaw-bootstrap-tabbar style="display:flex;align-items:center;gap:0;width:max-content;min-width:365px;"></div></div><div data-qaw-bootstrap-tab-content style="flex:1;min-height:0;display:flex;flex-direction:column;overflow-y:auto;"></div></div>';
+    var tabbar = tabsHost.querySelector("[data-qaw-bootstrap-tabbar]");
+    var content = tabsHost.querySelector("[data-qaw-bootstrap-tab-content]");
+    if (!tabbar || !content) return;
+    function setActive(tab) {
+      var btns = tabbar.querySelectorAll("[data-qaw-bootstrap-tab-btn]");
+      for (var i = 0; i < btns.length; i++) {
+        var b = btns[i];
+        var active = b.getAttribute("data-qaw-bootstrap-tab-btn") === tab;
+        b.style.cssText = active ? TAB_ACTIVE : TAB_BASE;
+        b.setAttribute("aria-selected", active ? "true" : "false");
+        var label = b.querySelector("[data-qaw-bootstrap-tab-label]");
+        if (label) label.style.display = active ? "inline" : "none";
+      }
+    }
+    function switchTab(tab) {
+      setActive(tab);
+      content.innerHTML = "";
+      content.style.padding = "0";
+      if (tab === "notes") {
+        content.innerHTML = BOOTSTRAP_EMPTY_ART_HTML;
+        return;
+      }
+      if (tab === "history") {
+        content.innerHTML = bootstrapEmptyState(
+          "No file history",
+          "Open a file tab to see status changes, bug links, timestamps, and run history for that file."
+        );
+        return;
+      }
+      if (tab === "cases" && bootstrapEditKey) mountCasesView(content, bootstrapEditKey);
+      else if (tab === "ai" && bootstrapEditKey) mountAiTabPromptCards(content, bootstrapEditKey);
+      else if (tab === "bugs") mountBugsView(content);
+      else if (tab === "maintenance") mountMaintenanceView(content);
+      else if (tab === "work") mountDailyWorkView(content);
+      else if (tab === "map") mountMapView(content);
+      else if (tab === "cleaning") mountHouseCleaningView(content);
+      else if (tab === "settings") mountSettingsView(content);
+    }
+    tabs.forEach(function(tab) {
+      var btn3 = document.createElement("button");
+      btn3.type = "button";
+      btn3.setAttribute("data-qaw-bootstrap-tab-btn", tab.id);
+      btn3.setAttribute("title", tab.label);
+      btn3.setAttribute("aria-label", tab.label);
+      btn3.setAttribute("aria-selected", tab.id === "notes" ? "true" : "false");
+      btn3.style.cssText = tab.id === "notes" ? TAB_ACTIVE : TAB_BASE;
+      btn3.innerHTML = TAB_ICONS[tab.id] + '<span data-qaw-bootstrap-tab-label style="display:' + (tab.id === "notes" ? "inline" : "none") + ';">' + esc4(tab.label) + "</span>";
+      btn3.addEventListener("click", function() {
+        switchTab(tab.id);
+      });
+      tabbar.appendChild(btn3);
+    });
+    switchTab("notes");
+  }
   function renderPanelBootstrap(mode, ctx) {
     if (!state.panelEl) return;
     state.panelEl.removeAttribute("data-qaw-edit-key");
@@ -21669,10 +24378,11 @@ This won't delete the actual file.`)) return;
       ctxHeadBlock = '<div data-e2e="investigation-panel-bootstrap-context" style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:9px;"><span style="display:inline-block;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:monospace;font-size:11px;font-weight:600;padding:5px 12px;border-radius:999px;border:1px solid #475569;background:#334155;color:#e2e8f0;vertical-align:middle;">' + clientLabel + '</span><span style="display:inline-block;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:monospace;font-size:11px;font-weight:600;padding:5px 12px;border-radius:999px;border:1px solid #475569;background:#334155;color:#e2e8f0;vertical-align:middle;">' + envLabel + "</span></div>";
     }
     head.innerHTML = '<style>@keyframes qaw-bootstrap-pulse{0%,100%{opacity:.35;transform:scale(.9)}50%{opacity:1;transform:scale(1)}}</style><div data-e2e="investigation-no-context-message" style="color:' + headlineColor + ';font-size:13px;font-weight:600;line-height:1.4;">' + pulse + esc4(panelBootstrapHeadline(mode)) + '</div><div data-e2e="investigation-no-context-hint" style="color:#94a3b8;font-size:11px;line-height:1.45;margin-top:8px;">' + esc4(panelBootstrapHint(mode)) + "</div>" + ctxHeadBlock;
-    body.innerHTML = '<div style="display:flex;align-items:center;gap:8px;margin-top:2px;"><span data-e2e="investigation-status" style="font-family:monospace;font-size:12px;font-weight:600;padding:6px 14px;border-radius:999px;border:1px solid #475569;background:#334155;color:#e2e8f0;">Empty</span><button type="button" data-qaw-search2 data-e2e="investigation-no-context-discover" style="' + BOOTSTRAP_BTN_STYLE + '">Discover</button><button type="button" data-qaw-export2 data-e2e="investigation-no-context-export" style="' + BOOTSTRAP_BTN_STYLE + '">Export\u2026</button><button type="button" data-qaw-extras-toggle data-e2e="investigation-extras-toggle" style="margin-left:auto;background:none;border:1px solid #334155;border-radius:4px;color:#64748b;cursor:pointer;font-size:11px;padding:4px 8px;font-family:monospace;line-height:1;">\u25BE</button></div><div data-qaw-extras-section style="margin-top:10px;display:flex;flex-direction:column;flex:1;min-height:0;"><div data-qaw-quick-links-host></div><div data-e2e="investigation-no-file-divider" style="height:1px;background:#334155;margin:14px 0 0;"></div><div data-e2e="investigation-no-file-empty-art" style="display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;color:#64748b;padding:18px 12px 6px;flex:1;min-height:160px;"><svg aria-hidden="true" viewBox="0 0 160 96" width="132" height="80" style="display:block;margin-bottom:10px;opacity:.72;"><rect x="40" y="16" width="74" height="58" rx="8" fill="#0f172a" stroke="#334155" stroke-width="3"/><path d="M92 16v18h22" fill="none" stroke="#334155" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><rect x="52" y="44" width="42" height="4" rx="2" fill="#334155"/><rect x="52" y="56" width="30" height="4" rx="2" fill="#334155"/><path d="M103 60l18 8-9 4 7 12-7 4-7-12-8 7 6-23z" fill="#1e293b" stroke="#64748b" stroke-width="3" stroke-linejoin="round"/></svg><div style="font-size:12px;font-weight:600;color:#94a3b8;margin-bottom:4px;">No file selected</div><div style="font-size:11px;line-height:1.45;max-width:260px;">Open a file tab to start file-specific notes.</div></div></div>';
+    body.innerHTML = '<div style="display:flex;align-items:center;gap:8px;margin-top:2px;"><span data-e2e="investigation-status" style="font-family:monospace;font-size:12px;font-weight:600;padding:6px 14px;border-radius:999px;border:1px solid #475569;background:#334155;color:#e2e8f0;">Empty</span><button type="button" data-qaw-search2 data-e2e="investigation-no-context-discover" style="' + BOOTSTRAP_BTN_STYLE + '">Discover</button><button type="button" data-qaw-export2 data-e2e="investigation-no-context-export" style="' + BOOTSTRAP_BTN_STYLE + '">Export\u2026</button><button type="button" data-qaw-extras-toggle data-e2e="investigation-extras-toggle" style="margin-left:auto;background:none;border:1px solid #334155;border-radius:4px;color:#64748b;cursor:pointer;font-size:11px;padding:4px 8px;font-family:monospace;line-height:1;">\u25BE</button></div><div data-qaw-extras-section style="margin-top:10px;display:flex;flex-direction:column;flex:1;min-height:0;"><div data-qaw-quick-links-host></div><div data-qaw-bootstrap-tabs style="display:flex;flex-direction:column;flex:1;min-height:0;"></div></div>';
     wireBootstrapPanelActions(body);
     var linksHost = body.querySelector("[data-qaw-quick-links-host]");
     if (linksHost) populateQuickLinksInto(linksHost, null);
+    renderBootstrapTabs(body, ctx);
     var extrasToggleBtn = body.querySelector("[data-qaw-extras-toggle]");
     var extrasSection = body.querySelector("[data-qaw-extras-section]");
     var extrasOpen = true;
@@ -21700,6 +24410,10 @@ This won't delete the actual file.`)) return;
     renderPanelForKey(k);
   }
   function toggleDialPanel() {
+    if (isCoverageRequestNotesPage()) {
+      toggleCoveragePageInfoPanel();
+      return;
+    }
     if (state.panelEl) {
       closePanel();
       return;
@@ -21710,8 +24424,14 @@ This won't delete the actual file.`)) return;
     applyStoreFromDiskMergedNotes();
     var ctx = parseContext();
     var fileName = getActiveFileName();
-    var mode = panelBootstrapMode(ctx, fileName, location.hostname);
+    var mode = panelBootstrapMode(ctx, fileName, location.hostname, location.pathname);
+    if (mode === "coverage-request") {
+      closePanel();
+      openCoveragePageInfoPanel();
+      return;
+    }
     closePanel();
+    closeCoveragePageInfoPanel();
     mountNotesPanelShell();
     if (mode !== "ready") {
       renderPanelBootstrap(mode, ctx);
@@ -21723,8 +24443,18 @@ This won't delete the actual file.`)) return;
     getOrCreateNote(ctx.client, ctx.envId, fileName);
     renderPanelForKey(k);
   }
+  function refreshSpeedDialForCurrentPage(el) {
+    if (isCoverageRequestNotesPage()) {
+      applyCoveragePageSpeedDial(el);
+    } else {
+      resetCoveragePageSpeedDial(el);
+    }
+  }
   function injectSpeedDial() {
-    if (state.speedDialEl && document.body.contains(state.speedDialEl)) return;
+    if (state.speedDialEl && document.body.contains(state.speedDialEl)) {
+      refreshSpeedDialForCurrentPage(state.speedDialEl);
+      return;
+    }
     state.speedDialEl = document.createElement("button");
     state.speedDialEl.type = "button";
     state.speedDialEl.setAttribute("data-qaw-overlay", "1");
@@ -21753,6 +24483,7 @@ This won't delete the actual file.`)) return;
     ].join(";");
     applyStoreFromDiskMergedNotes();
     applyDialPosition(state.speedDialEl);
+    refreshSpeedDialForCurrentPage(state.speedDialEl);
     var el = state.speedDialEl;
     el.addEventListener("click", function(e) {
       if (state.dialSuppressNextClick) {
@@ -21799,6 +24530,9 @@ This won't delete the actual file.`)) return;
           state.store.dialPos = { left: r2.left, top: r2.top };
           saveStoreImmediate();
           state.dialSuppressNextClick = true;
+          setTimeout(function() {
+            state.dialSuppressNextClick = false;
+          }, 350);
         }
         state.dragState = null;
       }
@@ -21873,7 +24607,17 @@ This won't delete the actual file.`)) return;
       var chip = state.panelEl && state.panelEl.querySelector("[data-qaw-status-chip]");
       if (chip) applyStatusChipVisual(chip, "passing");
     });
-    state.flowPassedObserver.observe(document.documentElement, { childList: true, subtree: true, characterData: true });
+    tryObserveFlowPassedPanel();
+  }
+  function tryObserveFlowPassedPanel() {
+    if (!state.flowPassedObserver) return;
+    var panel = document.getElementById("gitwolf-file-editor-panel");
+    if (!panel) return;
+    try {
+      state.flowPassedObserver.disconnect();
+      state.flowPassedObserver.observe(panel, { childList: true, subtree: true });
+    } catch (_e) {
+    }
   }
   function onStorage(e) {
     if (!state.panelEl) return;
@@ -21905,6 +24649,7 @@ This won't delete the actual file.`)) return;
     if (panelEk && state.store.notes[panelEk]) renderPanelForKey(panelEk);
   }
   function tick() {
+    tryObserveFlowPassedPanel();
     resumeBugsCollectJobIfNeeded();
     injectSpeedDial();
     ensureGutterMenuListener();
@@ -22013,7 +24758,7 @@ This won't delete the actual file.`)) return;
     } catch (e) {
     }
   }
-  var ALL_TAGS, TAG_LABELS2, CONTEXT_KINDS, CONTEXT_LABELS, BOOTSTRAP_BTN_STYLE, _dialResizeWired;
+  var ALL_TAGS, TAG_LABELS2, CONTEXT_KINDS, CONTEXT_LABELS, BOOTSTRAP_BTN_STYLE, BOOTSTRAP_EMPTY_ART_HTML, _dialResizeWired;
   var init_open_export = __esm({
     "src/notes/12-open-export.ts"() {
       "use strict";
@@ -22029,8 +24774,17 @@ This won't delete the actual file.`)) return;
       init_quicklinks();
       init_panel_shell();
       init_render_panel();
+      init_settings();
+      init_map_tab();
+      init_bugs_tab();
+      init_ai_prompts();
+      init_housecleaning_tab();
+      init_maintenance_tab();
+      init_cases_tab();
       init_discover();
+      init_daily_work();
       init_panel_bootstrap();
+      init_coverage_page_info();
       init_editor_protection();
       init_client_notes_view();
       init_bug_logic();
@@ -22045,6 +24799,7 @@ This won't delete the actual file.`)) return;
       CONTEXT_KINDS = ["investigation", "creation", "bugreval", ""];
       CONTEXT_LABELS = { investigation: "IN (Investigation)", creation: "CR (Creation)", bugreval: "BR (Bug reval)", "": "No context" };
       BOOTSTRAP_BTN_STYLE = "background:#334155;color:#e2e8f0;border:none;border-radius:4px;padding:5px 10px;cursor:pointer;font-family:monospace;font-size:11px;white-space:nowrap;";
+      BOOTSTRAP_EMPTY_ART_HTML = '<div data-e2e="investigation-no-file-empty-art" style="display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;color:#64748b;padding:18px 12px 6px;flex:1;min-height:180px;"><svg aria-hidden="true" viewBox="0 0 160 96" width="132" height="80" style="display:block;margin-bottom:10px;opacity:.72;"><rect x="40" y="16" width="74" height="58" rx="8" fill="#0f172a" stroke="#334155" stroke-width="3"/><path d="M92 16v18h22" fill="none" stroke="#334155" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><rect x="52" y="44" width="42" height="4" rx="2" fill="#334155"/><rect x="52" y="56" width="30" height="4" rx="2" fill="#334155"/><path d="M103 60l18 8-9 4 7 12-7 4-7-12-8 7 6-23z" fill="#1e293b" stroke="#64748b" stroke-width="3" stroke-linejoin="round"/></svg><div style="font-size:12px;font-weight:600;color:#94a3b8;margin-bottom:4px;">No file selected</div><div style="font-size:11px;line-height:1.45;max-width:260px;">Open a file tab to start file-specific notes.</div></div>';
       _dialResizeWired = false;
     }
   });
@@ -22693,6 +25448,8 @@ This won't delete the actual file.`)) return;
   function getDrawerContextClientSlug() {
     var ctx = parseContext();
     if (ctx && ctx.client) return ctx.client;
+    var cov = parseCoverageRequestPage();
+    if (cov && cov.client) return cov.client;
     if (!state.panelEl) return "";
     var ek = state.panelEl.getAttribute("data-qaw-edit-key");
     if (!ek) return "";
@@ -22861,7 +25618,7 @@ This won't delete the actual file.`)) return;
       handler(e);
     }, true);
   }
-  function populateQuickLinksInto(host, panelEditKey) {
+  function populateQuickLinksInto(host, panelEditKey, opts) {
     if (!host) return;
     var wasHidden = host.style.display === "none";
     host.innerHTML = "";
@@ -22994,7 +25751,8 @@ This won't delete the actual file.`)) return;
     addLinkRow("Client notes", null, function(row2) {
       var note2 = kClient ? state.store.notes[kClient] : null;
       var count = clientSlug && note2 && Array.isArray(note2.clientNotes) ? note2.clientNotes.length : clientSlug && note2 && clientNotePlainForNote(note2).trim() ? 1 : 0;
-      var cn = miniBtn(onClientNotes ? "Back to file" : "Open", !!clientSlug);
+      var openLabel = opts && opts.clientNotesOpenLabel ? opts.clientNotesOpenLabel : onClientNotes ? "Back to file" : "Open";
+      var cn = miniBtn(openLabel, !!clientSlug);
       cn.setAttribute("data-e2e", "investigation-quicklink-client-notes");
       if (count > 0) {
         cn.style.position = "relative";
@@ -23005,9 +25763,15 @@ This won't delete the actual file.`)) return;
         badge.style.cssText = "position:absolute;top:-5px;right:-10px;display:inline-flex;align-items:center;justify-content:center;min-width:12px;height:12px;padding:0 3px;border-radius:999px;background:#1e293b;border:1px solid #334155;color:#64748b;font-size:8px;line-height:1;font-family:monospace;pointer-events:none;";
         cn.appendChild(badge);
       }
-      if (clientSlug) bindDrawerButton2(cn, function() {
-        toggleClientNotesFromDrawer(ek || "");
-      });
+      if (clientSlug) {
+        if (opts && opts.onClientNotesOpen) {
+          bindDrawerButton2(cn, opts.onClientNotesOpen);
+        } else {
+          bindDrawerButton2(cn, function() {
+            toggleClientNotesFromDrawer(ek || "");
+          });
+        }
+      }
       row2.appendChild(cn);
     });
   }
@@ -23156,7 +25920,7 @@ This won't delete the actual file.`)) return;
       var lastDur = formatDurationMs(noteData.lastRunDurationMs);
       if (lastDur !== "\u2014") {
         var lastRow = document.createElement("div");
-        lastRow.innerHTML = 'Last finished: <strong style="color:#f1f5f9;">' + escHtml3(lastDur) + "</strong>";
+        lastRow.innerHTML = 'Last finished: <strong style="color:#f1f5f9;">' + escHtml4(lastDur) + "</strong>";
         col.appendChild(lastRow);
       } else if (!liveRow && (noteData.lastRunEndedAt == null || !Number.isFinite(noteData.lastRunEndedAt))) {
         var waitRow = document.createElement("div");
@@ -23188,7 +25952,7 @@ This won't delete the actual file.`)) return;
     refreshThrowBadge();
     state.throwTrackerInterval = setInterval(refreshThrowBadge, 4e3);
   }
-  function escHtml3(s) {
+  function escHtml4(s) {
     var d = document.createElement("div");
     d.textContent = s;
     return d.innerHTML;
@@ -23208,6 +25972,7 @@ This won't delete the actual file.`)) return;
       init_store();
       init_shift();
       init_context();
+      init_coverage_requests();
       init_client_notes_view();
       init_client_note_refs();
       init_chime_ingest();
@@ -23300,7 +26065,7 @@ This won't delete the actual file.`)) return;
       } catch (e) {
       }
       try {
-        if ("1.600") return "1.600";
+        if ("1.620") return "1.620";
       } catch (e2) {
       }
       return "unknown";
@@ -24651,6 +27416,7 @@ This won't delete the actual file.`)) return;
   var _ftFocusStart = null;
   var _ftStoredAccum = 0;
   var _ftAccumResetTime = null;
+  var _ftInterval = null;
   var _ftGraceTimer = null;
   var _ftInSession = false;
   var _ftLastEarnedBlock = -1;
@@ -24796,7 +27562,14 @@ This won't delete the actual file.`)) return;
       _ftWinFocused = false;
       _ftUpdateFocusState();
     });
-    setInterval(_ftTick, 1e3);
+    if (_ftInterval) return;
+    _ftInterval = setInterval(_ftTick, 1e3);
+  }
+  function stopFlowTouch() {
+    if (_ftInterval) {
+      clearInterval(_ftInterval);
+      _ftInterval = null;
+    }
   }
 
   // src/notes/19-file-tree-badges.ts
@@ -24812,8 +27585,15 @@ This won't delete the actual file.`)) return;
     stampAllBadges();
     tryAttachObserver();
   }
-  function tickFileTreeBadges() {
-    stampAllBadges();
+  function stopFileTreeBadges() {
+    if (_treeObserver) {
+      _treeObserver.disconnect();
+      _treeObserver = null;
+    }
+    if (_observerRetryTimer) {
+      clearTimeout(_observerRetryTimer);
+      _observerRetryTimer = null;
+    }
   }
   function scheduleStamp() {
     if (_stampScheduled) return;
@@ -26125,16 +28905,29 @@ This won't delete the actual file.`)) return;
     foot.appendChild(storage);
     brRefreshStorageUsageIndicator(foot);
   }
+  function brOnStorageRefresh() {
+    brRefreshStorageUsageIndicator(state.panelEl || document);
+  }
+  function stopBugReport() {
+    if (state.bugReportFooterMo) {
+      state.bugReportFooterMo.disconnect();
+      state.bugReportFooterMo = null;
+    }
+    if (state.bugReportStoragePoll) {
+      clearInterval(state.bugReportStoragePoll);
+      state.bugReportStoragePoll = null;
+    }
+  }
   function initBugReport() {
+    if (state.bugReportFooterMo || state.bugReportStoragePoll) return;
     brInjectIntoFooter();
-    var mo = new MutationObserver(brInjectIntoFooter);
-    mo.observe(document.body, { childList: true, subtree: true });
-    window.addEventListener("storage", function() {
+    state.bugReportFooterMo = new MutationObserver(brInjectIntoFooter);
+    state.bugReportFooterMo.observe(document.body, { childList: true, subtree: true });
+    window.addEventListener("storage", brOnStorageRefresh);
+    state.bugReportStoragePoll = window.setInterval(function() {
+      if (document.hidden) return;
       brRefreshStorageUsageIndicator(state.panelEl || document);
-    });
-    window.setInterval(function() {
-      brRefreshStorageUsageIndicator(state.panelEl || document);
-    }, 1e4);
+    }, 3e4);
   }
 
   // src/notes/31-run-log-actions.ts
@@ -26306,7 +29099,7 @@ This won't delete the actual file.`)) return;
     } catch (_) {
     }
     try {
-      if ("1.600") return "1.600";
+      if ("1.620") return "1.620";
     } catch (_) {
     }
     return "unknown";
@@ -26660,7 +29453,7 @@ This won't delete the actual file.`)) return;
     col.appendChild(host);
     return host;
   }
-  function btn(label, opts) {
+  function btn2(label, opts) {
     var variant = opts.variant || "secondary";
     var styles = {
       primary: { bg: "#16a34a", border: "#15803d", color: "#fff" },
@@ -26819,7 +29612,7 @@ This won't delete the actual file.`)) return;
     var actions = document.createElement("div");
     actions.style.cssText = "display:flex;gap:6px;flex-wrap:wrap;";
     actions.appendChild(
-      btn("Edit shift", {
+      btn2("Edit shift", {
         variant: "secondary",
         onClick: function() {
           setUiMode(host, "edit");
@@ -26828,7 +29621,7 @@ This won't delete the actual file.`)) return;
       })
     );
     actions.appendChild(
-      btn("End shift", {
+      btn2("End shift", {
         variant: "danger",
         onClick: function() {
           setUiMode(host, "confirm-end");
@@ -26852,9 +29645,9 @@ This won't delete the actual file.`)) return;
     host.appendChild(box);
     var actions = document.createElement("div");
     actions.style.cssText = "display:flex;gap:6px;flex-wrap:wrap;";
-    actions.appendChild(btn("End shift now", { variant: "danger", onClick: commitEnd }));
+    actions.appendChild(btn2("End shift now", { variant: "danger", onClick: commitEnd }));
     actions.appendChild(
-      btn("Keep shift", {
+      btn2("Keep shift", {
         variant: "secondary",
         onClick: function() {
           setUiMode(host, "summary");
@@ -26880,7 +29673,7 @@ This won't delete the actual file.`)) return;
     var actions = document.createElement("div");
     actions.style.cssText = "display:flex;flex-wrap:wrap;gap:6px;margin-top:4px;";
     actions.appendChild(
-      btn("Start shift", {
+      btn2("Start shift", {
         variant: "primary",
         onClick: function() {
           commitStart(host, startInp, endInp);
@@ -26888,7 +29681,7 @@ This won't delete the actual file.`)) return;
       })
     );
     actions.appendChild(
-      btn("Cancel", {
+      btn2("Cancel", {
         variant: "secondary",
         onClick: function() {
           setUiMode(host, "idle");
@@ -26913,7 +29706,7 @@ This won't delete the actual file.`)) return;
     var actions = document.createElement("div");
     actions.style.cssText = "display:flex;flex-wrap:wrap;gap:6px;margin-top:4px;";
     actions.appendChild(
-      btn("Save changes", {
+      btn2("Save changes", {
         variant: "primary",
         onClick: function() {
           commitEdit(host, startInp, endInp);
@@ -26921,7 +29714,7 @@ This won't delete the actual file.`)) return;
       })
     );
     actions.appendChild(
-      btn("Cancel", {
+      btn2("Cancel", {
         variant: "secondary",
         onClick: function() {
           setUiMode(host, "summary");
@@ -26938,7 +29731,7 @@ This won't delete the actual file.`)) return;
     var actions = document.createElement("div");
     actions.style.cssText = "display:flex;gap:6px;flex-wrap:wrap;margin-top:4px;";
     actions.appendChild(
-      btn("Start investigation shift", {
+      btn2("Start investigation shift", {
         variant: "primary",
         onClick: function() {
           setUiMode(host, "compose-start");
@@ -27028,1482 +29821,9 @@ This won't delete the actual file.`)) return;
     }
   }
 
-  // src/notes/53-coverage-requests.ts
-  init_constants();
-
-  // src/notes/42-outline-generator.ts
-  init_constants();
-  init_floating_panel();
-  var OUTLINE_MAX_STEP_ROWS = 20;
-  var OUTLINE_GENERATOR_PANEL_ID = "outline-generator-panel";
-  function newOutlineRowId() {
-    return "or-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8);
-  }
-  function defaultOutlineGeneratorDraft() {
-    return { v: 1, headersText: "", rows: [], selectedIds: [], inputMode: "paste" };
-  }
-  function loadOutlineGeneratorDraft() {
-    var d = defaultOutlineGeneratorDraft();
-    if (typeof GM_getValue !== "function") return d;
-    try {
-      var raw = GM_getValue(OUTLINE_GENERATOR_GM_KEY, "");
-      if (!raw) return d;
-      var p = JSON.parse(raw);
-      return {
-        v: 1,
-        headersText: p.headersText != null ? String(p.headersText) : d.headersText,
-        rows: Array.isArray(p.rows) ? p.rows.map(function(r) {
-          return {
-            id: String(r.id || newOutlineRowId()),
-            rowNumber: typeof r.rowNumber === "number" ? r.rowNumber : r.rowNumber == null ? null : parseInt(String(r.rowNumber), 10) || null,
-            cells: Array.isArray(r.cells) ? r.cells.map(String) : [],
-            importedAt: String(r.importedAt || "")
-          };
-        }) : [],
-        selectedIds: Array.isArray(p.selectedIds) ? p.selectedIds.map(String) : [],
-        inputMode: p.inputMode === "file" ? "file" : "paste"
-      };
-    } catch (_e) {
-      return d;
-    }
-  }
-  function saveOutlineGeneratorDraft(draft) {
-    if (typeof GM_setValue !== "function") return;
-    try {
-      GM_setValue(OUTLINE_GENERATOR_GM_KEY, JSON.stringify(draft));
-    } catch (_e) {
-    }
-  }
-  function parseSpreadsheetPaste(text) {
-    var s = String(text || "").replace(/^\uFEFF/, "").trim();
-    if (!s) return [];
-    var lines = s.split(/\r?\n/).filter(function(line) {
-      return line.length > 0;
-    });
-    if (!lines.length) return [];
-    var tabLines = lines.filter(function(line) {
-      return line.indexOf("	") !== -1;
-    });
-    if (tabLines.length >= Math.max(1, Math.ceil(lines.length * 0.5))) {
-      return lines.map(function(line) {
-        return line.split("	").map(function(c) {
-          return c.replace(/\r$/, "");
-        });
-      });
-    }
-    return parseCsv(s);
-  }
-  function tableToCsvLine(cells) {
-    return cells.map(function(c) {
-      var v = String(c == null ? "" : c);
-      if (/[",\n\r]/.test(v)) return '"' + v.replace(/"/g, '""') + '"';
-      return v;
-    }).join(",");
-  }
-  function composeOutlineCsvText(headersText, dataRows) {
-    var parts = [];
-    var h = String(headersText || "").trim();
-    if (h) {
-      var headerTable = parseSpreadsheetPaste(h);
-      if (headerTable.length) {
-        parts.push(tableToCsvLine(headerTable[0]));
-      } else {
-        parts.push(h);
-      }
-    }
-    for (var i = 0; i < dataRows.length; i++) {
-      parts.push(tableToCsvLine(dataRows[i]));
-    }
-    return parts.join("\n");
-  }
-  function assignTrackerRowNumbers(startRow, count) {
-    var out = [];
-    if (startRow == null || !isFinite(startRow) || startRow < 1) {
-      for (var i = 0; i < count; i++) out.push(null);
-      return out;
-    }
-    var n = Math.floor(startRow);
-    for (var j = 0; j < count; j++) out.push(n + j);
-    return out;
-  }
-  function parsePastedDataRows(text) {
-    var table = parseSpreadsheetPaste(text);
-    if (!table.length) return { ok: false, error: "No rows found in paste." };
-    var data = table.slice();
-    if (data.length === 1 && data[0].every(function(c) {
-      return !String(c || "").trim();
-    })) {
-      return { ok: false, error: "Paste is empty." };
-    }
-    return { ok: true, rows: data };
-  }
-  function importRowsIntoDraft(draft, pastedText, startRowNumber) {
-    var parsed = parsePastedDataRows(pastedText);
-    if (!parsed.ok) return parsed;
-    var numbers = assignTrackerRowNumbers(startRowNumber, parsed.rows.length);
-    var now = (/* @__PURE__ */ new Date()).toISOString();
-    for (var i = 0; i < parsed.rows.length; i++) {
-      draft.rows.push({
-        id: newOutlineRowId(),
-        rowNumber: numbers[i],
-        cells: parsed.rows[i],
-        importedAt: now
-      });
-    }
-    return { ok: true, added: parsed.rows.length };
-  }
-  function deleteOutlineRows(draft, ids) {
-    var set = {};
-    for (var i = 0; i < ids.length; i++) set[ids[i]] = true;
-    draft.rows = draft.rows.filter(function(r) {
-      return !set[r.id];
-    });
-    draft.selectedIds = draft.selectedIds.filter(function(id) {
-      return !set[id];
-    });
-  }
-  function generateOutlineMarkdownFromDraft(draft, maxRows, flowBrowserOrOptions) {
-    if (!String(draft.headersText || "").trim()) {
-      return { ok: false, error: "Paste tracker headers first (Group, Workflow, Test Step)." };
-    }
-    var selected = draft.rows.filter(function(r) {
-      return draft.selectedIds.indexOf(r.id) !== -1;
-    });
-    if (!selected.length) return { ok: false, error: "Select at least one saved row." };
-    var dataRows = selected.map(function(r) {
-      return r.cells;
-    });
-    var csv = composeOutlineCsvText(draft.headersText, dataRows);
-    return generateOutlineMarkdownFromCsv(csv, maxRows, flowBrowserOrOptions);
-  }
-  function parseCsv(text) {
-    var s = String(text || "").replace(/^\uFEFF/, "");
-    var rows = [];
-    var row2 = [];
-    var field = "";
-    var i = 0;
-    var inQuotes = false;
-    function pushField() {
-      row2.push(field);
-      field = "";
-    }
-    function pushRow() {
-      pushField();
-      if (row2.length > 1 || row2[0] !== "" || rows.length === 0) rows.push(row2);
-      row2 = [];
-    }
-    while (i < s.length) {
-      var ch = s.charAt(i);
-      if (inQuotes) {
-        if (ch === '"') {
-          if (s.charAt(i + 1) === '"') {
-            field += '"';
-            i += 2;
-            continue;
-          }
-          inQuotes = false;
-          i++;
-          continue;
-        }
-        field += ch;
-        i++;
-        continue;
-      }
-      if (ch === '"') {
-        inQuotes = true;
-        i++;
-        continue;
-      }
-      if (ch === ",") {
-        pushField();
-        i++;
-        continue;
-      }
-      if (ch === "\r") {
-        i++;
-        continue;
-      }
-      if (ch === "\n") {
-        pushRow();
-        i++;
-        continue;
-      }
-      field += ch;
-      i++;
-    }
-    pushRow();
-    return rows;
-  }
-  function normalizeHeader(h) {
-    return String(h || "").trim().toLowerCase().replace(/\s+/g, " ");
-  }
-  function findColumnIndex(headers, candidates) {
-    for (var i = 0; i < headers.length; i++) {
-      var h = normalizeHeader(headers[i]);
-      for (var j = 0; j < candidates.length; j++) {
-        if (h === candidates[j]) return i;
-      }
-    }
-    return -1;
-  }
-  function parseOutlineCsvRows(text) {
-    var table = parseCsv(text);
-    if (!table.length) return { ok: false, error: "CSV is empty." };
-    var headers = table[0].map(function(c) {
-      return String(c || "").trim();
-    });
-    var groupIdx = findColumnIndex(headers, ["group"]);
-    var workflowIdx = findColumnIndex(headers, ["workflow"]);
-    var stepIdx = findColumnIndex(headers, ["test step", "teststep", "step"]);
-    if (groupIdx < 0) return { ok: false, error: "Missing required column: Group" };
-    if (workflowIdx < 0) return { ok: false, error: "Missing required column: Workflow" };
-    if (stepIdx < 0) return { ok: false, error: "Missing required column: Test Step" };
-    var rows = [];
-    for (var r = 1; r < table.length; r++) {
-      var line = table[r];
-      if (!line || !line.length) continue;
-      var group = groupIdx < line.length ? String(line[groupIdx] || "").trim() : "";
-      var workflow = workflowIdx < line.length ? String(line[workflowIdx] || "").trim() : "";
-      var testStep = stepIdx < line.length ? String(line[stepIdx] || "").trim() : "";
-      if (!group && !workflow && !testStep) continue;
-      rows.push({ group, workflow, testStep });
-    }
-    if (!rows.length) return { ok: false, error: "No data rows found after the header." };
-    return { ok: true, rows };
-  }
-  function forwardFillOutlineWorkflows(rows) {
-    var lastGroup = "";
-    var last = "";
-    for (var i = 0; i < rows.length; i++) {
-      var g = String(rows[i].group || "").trim();
-      if (g) lastGroup = g;
-      else rows[i].group = lastGroup;
-      var w = String(rows[i].workflow || "").trim();
-      if (w) last = w;
-      else rows[i].workflow = last;
-    }
-  }
-  function countOutlineStepRows(rows) {
-    var n = 0;
-    for (var i = 0; i < rows.length; i++) {
-      if (String(rows[i].testStep || "").trim()) n++;
-    }
-    return n;
-  }
-  function slugifyOutlineWorkflow(text) {
-    var s = String(text || "").toLowerCase();
-    s = s.replace(/[^a-z0-9\s-]/g, "");
-    s = s.replace(/[\s-]+/g, "-");
-    return s.replace(/^-+|-+$/g, "");
-  }
-  function slugNeedsWarning(text, slug) {
-    var original = String(text || "").trim();
-    if (!original) return false;
-    var spacingOnlySlug = original.toLowerCase().replace(/[\s-]+/g, "-").replace(/^-+|-+$/g, "");
-    return !slug || slug !== spacingOnlySlug;
-  }
-  function groupRowsByWorkflow(rows) {
-    var map = {};
-    var order = [];
-    for (var i = 0; i < rows.length; i++) {
-      var group = String(rows[i].group || "").trim();
-      var workflow = String(rows[i].workflow || "").trim();
-      var step = String(rows[i].testStep || "").trim();
-      if (!group || !workflow || !step) continue;
-      var key = group + "" + workflow;
-      if (!map[key]) {
-        map[key] = { group, workflow, steps: [] };
-        order.push(key);
-      }
-      map[key].steps.push(step);
-    }
-    return order.map(function(key2) {
-      return map[key2];
-    });
-  }
-  function buildFlowCode(workflow, steps, flowBrowser) {
-    var browser = flowBrowser || "Web - Chrome";
-    var code = 'import { flow, expect } from "@qawolf/flows/web";\n\n';
-    code += "export default flow(\n  " + JSON.stringify(workflow) + ",\n  " + JSON.stringify(browser) + ",\n";
-    code += "  async ({ test, ...testContext }) => {\n";
-    for (var i = 0; i < steps.length; i++) {
-      var step = steps[i];
-      var isLast = i === steps.length - 1;
-      code += "    await test(" + JSON.stringify(step) + ", async () => {\n";
-      code += "      //--------------------------------\n";
-      code += "      // Arrange:\n";
-      code += "      //--------------------------------\n\n";
-      code += "      // None\n\n";
-      code += "      //--------------------------------\n";
-      code += "      // Act:\n";
-      code += "      //--------------------------------\n\n\n";
-      code += "      //--------------------------------\n";
-      code += "      // Assert:\n";
-      code += "      //--------------------------------\n\n\n";
-      if (isLast) {
-        code += "      //--------------------------------\n";
-        code += "      // Clean up:\n";
-        code += "      //--------------------------------\n\n";
-        code += "      // No clean up required\n\n";
-      }
-      code += "    });\n\n";
-    }
-    code = code.replace(/\n+$/, "") + "\n  },\n);\n";
-    return code;
-  }
-  function normalizeOutlineTargetRoot(root) {
-    var r = String(root || "").trim() || "src/flows/";
-    r = r.replace(/\\/g, "/").replace(/^\/+/, "");
-    if (r && r.charAt(r.length - 1) !== "/") r += "/";
-    return r || "src/flows/";
-  }
-  function normalizeOutlineFileExtension(ext) {
-    return String(ext || "").trim().toLowerCase() === "js" ? "js" : "ts";
-  }
-  function normalizeOutlineOptions(flowBrowserOrOptions) {
-    if (typeof flowBrowserOrOptions === "string") {
-      return {
-        flowBrowser: flowBrowserOrOptions || "Web - Chrome",
-        targetRoot: "src/flows/",
-        fileExtension: "ts"
-      };
-    }
-    var opts = flowBrowserOrOptions || {};
-    return {
-      flowBrowser: String(opts.flowBrowser || "").trim() || "Web - Chrome",
-      targetRoot: normalizeOutlineTargetRoot(opts.targetRoot),
-      fileExtension: normalizeOutlineFileExtension(opts.fileExtension)
-    };
-  }
-  function generateOutlineMarkdownFromCsv(text, maxRows, flowBrowserOrOptions) {
-    var limit = maxRows != null && maxRows > 0 ? maxRows : OUTLINE_MAX_STEP_ROWS;
-    var opts = normalizeOutlineOptions(flowBrowserOrOptions);
-    var parsed = parseOutlineCsvRows(text);
-    if (!parsed.ok) return { ok: false, error: parsed.error };
-    var rows = parsed.rows.slice();
-    forwardFillOutlineWorkflows(rows);
-    var missingGroup = rows.some(function(r) {
-      return String(r.testStep || "").trim() && !String(r.group || "").trim();
-    });
-    if (missingGroup) {
-      return { ok: false, error: "Some rows have a Test Step but no Group (even after forward-fill)." };
-    }
-    var missingWorkflow = rows.some(function(r) {
-      return String(r.testStep || "").trim() && !String(r.workflow || "").trim();
-    });
-    if (missingWorkflow) {
-      return { ok: false, error: "Some rows have a Test Step but no Workflow (even after forward-fill)." };
-    }
-    var totalStepCount = countOutlineStepRows(rows);
-    if (!totalStepCount) return { ok: false, error: "No non-empty Test Step rows found." };
-    var allGroups = groupRowsByWorkflow(rows);
-    var groups = [];
-    var stepCount = 0;
-    for (var gi = 0; gi < allGroups.length; gi++) {
-      var candidate = allGroups[gi];
-      if (candidate.steps.length > limit && groups.length === 0) {
-        return {
-          ok: false,
-          error: "The first workflow has " + candidate.steps.length + " test steps. Max " + limit + " per batch. Split that workflow before generating."
-        };
-      }
-      if (stepCount + candidate.steps.length > limit) break;
-      groups.push(candidate);
-      stepCount += candidate.steps.length;
-    }
-    if (!groups.length) return { ok: false, error: "No workflow groups with test steps found." };
-    var omittedStepCount = totalStepCount - stepCount;
-    var omittedWorkflowNames = allGroups.slice(groups.length).map(function(g2) {
-      return g2.workflow;
-    });
-    var slugWarningNames = [];
-    var md = "# AI Task: Test Outline Generation\n\nPlease use your file-writing tools to create the following test files at the specified paths. Write the provided code blocks exactly as shown without modifications.\n\n---\n\n";
-    for (var g = 0; g < groups.length; g++) {
-      var group = groups[g];
-      var groupSlug = slugifyOutlineWorkflow(group.group) || "group";
-      var slug = slugifyOutlineWorkflow(group.workflow) || "workflow";
-      if (slugNeedsWarning(group.group, groupSlug) && slugWarningNames.indexOf(group.group) < 0) slugWarningNames.push(group.group);
-      if (slugNeedsWarning(group.workflow, slug) && slugWarningNames.indexOf(group.workflow) < 0) slugWarningNames.push(group.workflow);
-      var filename = opts.targetRoot + groupSlug + "/" + slug + ".flow." + opts.fileExtension;
-      var code = buildFlowCode(group.workflow, group.steps, opts.flowBrowser);
-      md += "## Task: Create `" + filename + "`\n";
-      md += "**Target Path:** `" + filename + "`\n\n";
-      md += "```" + (opts.fileExtension === "ts" ? "typescript" : "javascript") + "\n" + code + "```\n\n---\n\n";
-    }
-    return {
-      ok: true,
-      markdown: md,
-      stepCount,
-      totalStepCount,
-      workflowCount: groups.length,
-      omittedStepCount,
-      omittedWorkflowNames,
-      slugWarningNames
-    };
-  }
-  function escHtml4(s) {
-    var d = document.createElement("div");
-    d.textContent = s;
-    return d.innerHTML;
-  }
-  function btnStyle(kind) {
-    if (kind === "primary") {
-      return "padding:6px 12px;border-radius:8px;border:1px solid #38bdf8;background:#0ea5e9;color:#0f172a;font-weight:700;cursor:pointer;font-size:11px;";
-    }
-    return "padding:6px 12px;border-radius:8px;border:1px solid #475569;background:#1e293b;color:#e2e8f0;cursor:pointer;font-size:11px;";
-  }
-  function mountOutlineGeneratorContent(container, mountOpts) {
-    var draft = loadOutlineGeneratorDraft();
-    if (mountOpts && mountOpts.defaultMode) draft.inputMode = mountOpts.defaultMode;
-    var lastMarkdown = "";
-    var lastCsvText = "";
-    var flowBrowser = "Web - Chrome";
-    var targetRoot = "src/flows/";
-    var fileExtension = "ts";
-    var wrap = document.createElement("div");
-    wrap.setAttribute("data-qaw-outline-generator", "1");
-    wrap.style.cssText = "border:1px solid #334155;border-radius:10px;background:#0f172a;padding:12px;display:flex;flex-direction:column;gap:10px;color:#e2e8f0;font-family:monospace;font-size:11px;min-height:100%;box-sizing:border-box;overflow:hidden;";
-    var hint = document.createElement("div");
-    hint.style.cssText = "color:#94a3b8;line-height:1.45;font-size:10px;";
-    hint.textContent = "Paste tracker headers and rows, or upload CSV. Select rows to generate ai_generation_instructions.md (max " + OUTLINE_MAX_STEP_ROWS + " test steps per batch).";
-    wrap.appendChild(hint);
-    var inputStep = document.createElement("div");
-    inputStep.style.cssText = "display:flex;flex-direction:column;gap:10px;min-height:0;flex:1;";
-    var outputStep = document.createElement("div");
-    outputStep.style.cssText = "display:none;flex-direction:column;gap:10px;min-height:0;flex:1;";
-    var backBtn = document.createElement("button");
-    backBtn.type = "button";
-    backBtn.textContent = "Back to rows";
-    backBtn.style.cssText = btnStyle("ghost");
-    backBtn.addEventListener("click", function() {
-      outputStep.style.display = "none";
-      inputStep.style.display = "flex";
-    });
-    outputStep.appendChild(backBtn);
-    var pastePanel = document.createElement("div");
-    pastePanel.setAttribute("data-qaw-outline-paste-panel", "1");
-    pastePanel.style.cssText = "display:flex;flex-direction:column;gap:8px;min-height:0;";
-    function openPasteModal(titleText, initialValue, placeholder, onSave) {
-      var shade = document.createElement("div");
-      shade.style.cssText = "position:fixed;inset:0;z-index:2147483647;background:rgba(2,6,23,0.72);display:flex;align-items:center;justify-content:center;padding:24px;";
-      var modal = document.createElement("div");
-      modal.style.cssText = "width:min(780px,calc(100vw - 48px));max-height:calc(100vh - 64px);border:1px solid #334155;border-radius:12px;background:#0f172a;color:#e2e8f0;box-shadow:0 18px 55px rgba(0,0,0,.45);padding:14px;display:flex;flex-direction:column;gap:10px;";
-      var titleEl = document.createElement("div");
-      titleEl.textContent = titleText;
-      titleEl.style.cssText = "font-size:13px;font-weight:700;color:#f8fafc;";
-      var ta = document.createElement("textarea");
-      ta.value = initialValue;
-      ta.placeholder = placeholder;
-      ta.style.cssText = "width:100%;min-height:220px;box-sizing:border-box;resize:vertical;border:1px solid #475569;border-radius:8px;background:#020617;color:#cbd5e1;padding:8px;font-family:monospace;font-size:11px;line-height:1.4;";
-      var actions2 = document.createElement("div");
-      actions2.style.cssText = "display:flex;justify-content:flex-end;gap:8px;";
-      var cancel = document.createElement("button");
-      cancel.type = "button";
-      cancel.textContent = "Cancel";
-      cancel.style.cssText = btnStyle("ghost");
-      var save = document.createElement("button");
-      save.type = "button";
-      save.textContent = "Save";
-      save.style.cssText = btnStyle("primary");
-      function close() {
-        shade.remove();
-      }
-      cancel.addEventListener("click", close);
-      save.addEventListener("click", function() {
-        onSave(ta.value);
-        close();
-      });
-      shade.addEventListener("click", function(e) {
-        if (e.target === shade) close();
-      });
-      actions2.appendChild(cancel);
-      actions2.appendChild(save);
-      modal.appendChild(titleEl);
-      modal.appendChild(ta);
-      modal.appendChild(actions2);
-      shade.appendChild(modal);
-      document.body.appendChild(shade);
-      ta.focus();
-      ta.select();
-    }
-    var headerControlRow = document.createElement("div");
-    headerControlRow.style.cssText = "display:flex;align-items:center;gap:8px;flex-wrap:wrap;";
-    var editHeadersBtn = document.createElement("button");
-    editHeadersBtn.type = "button";
-    editHeadersBtn.textContent = "Edit headers";
-    editHeadersBtn.style.cssText = btnStyle("ghost");
-    var pasteRowsBtn = document.createElement("button");
-    pasteRowsBtn.type = "button";
-    pasteRowsBtn.textContent = "Paste rows";
-    pasteRowsBtn.style.cssText = btnStyle("ghost");
-    var uploadCsvBtn = document.createElement("button");
-    uploadCsvBtn.type = "button";
-    uploadCsvBtn.textContent = "Upload CSV";
-    uploadCsvBtn.style.cssText = btnStyle("ghost");
-    var headerSummary = document.createElement("span");
-    headerSummary.style.cssText = "color:#94a3b8;font-size:10px;";
-    var rowsSummary = document.createElement("span");
-    rowsSummary.style.cssText = "color:#94a3b8;font-size:10px;";
-    headerControlRow.appendChild(editHeadersBtn);
-    headerControlRow.appendChild(pasteRowsBtn);
-    headerControlRow.appendChild(uploadCsvBtn);
-    headerControlRow.appendChild(headerSummary);
-    headerControlRow.appendChild(rowsSummary);
-    pastePanel.appendChild(headerControlRow);
-    var headersTa = document.createElement("textarea");
-    headersTa.value = draft.headersText;
-    headersTa.placeholder = "Group	Workflow	Test Step";
-    function updateHeaderSummary() {
-      var cells = headerCellsForGrid();
-      headerSummary.textContent = cells.length ? cells.length + " headers saved" : "No headers saved";
-    }
-    editHeadersBtn.addEventListener("click", function() {
-      openPasteModal("Edit tracker headers", draft.headersText, "Group	Workflow	Test Step", function(value) {
-        draft.headersText = value;
-        headersTa.value = value;
-        saveOutlineGeneratorDraft(draft);
-        updateHeaderSummary();
-        renderSavedRowList();
-      });
-    });
-    pasteRowsBtn.addEventListener("click", function() {
-      openPasteModal("Paste tracker rows", "", "Paste rows copied from the tracker sheet", function(value) {
-        var before = draft.rows.length;
-        var imp = importRowsIntoDraft(draft, value, null);
-        if (!imp.ok) {
-          setStatus(imp.error, "err");
-          return;
-        }
-        var addedRows = draft.rows.slice(before);
-        for (var i = 0; i < addedRows.length; i++) {
-          if (draft.selectedIds.indexOf(addedRows[i].id) < 0) draft.selectedIds.push(addedRows[i].id);
-        }
-        saveOutlineGeneratorDraft(draft);
-        renderSavedRowList();
-        setStatus("Added " + imp.added + " row" + (imp.added === 1 ? "" : "s") + ".", "ok");
-      });
-    });
-    var rowToolbar = document.createElement("div");
-    rowToolbar.style.cssText = "display:flex;gap:6px;flex-wrap:wrap;align-items:center;";
-    var deleteSelBtn = document.createElement("button");
-    var genPasteBtn = document.createElement("button");
-    deleteSelBtn.type = "button";
-    genPasteBtn.type = "button";
-    deleteSelBtn.textContent = "Delete selected";
-    genPasteBtn.textContent = "Generate";
-    deleteSelBtn.style.cssText = btnStyle("ghost");
-    genPasteBtn.style.cssText = btnStyle("primary");
-    var selCount = document.createElement("span");
-    selCount.style.cssText = "color:#64748b;font-size:10px;margin-left:4px;";
-    rowToolbar.appendChild(deleteSelBtn);
-    rowToolbar.appendChild(genPasteBtn);
-    rowToolbar.appendChild(selCount);
-    pastePanel.appendChild(rowToolbar);
-    var rowList = document.createElement("div");
-    rowList.style.cssText = "max-height:260px;overflow:auto;border:1px solid #334155;border-radius:8px;background:#020617;padding:4px;";
-    pastePanel.appendChild(rowList);
-    var status = document.createElement("div");
-    status.style.cssText = "font-size:10px;line-height:1.4;min-height:14px;";
-    var preview = document.createElement("textarea");
-    preview.readOnly = true;
-    preview.placeholder = "Generated Markdown preview will appear here\u2026";
-    preview.style.cssText = "width:100%;flex:1;min-height:260px;resize:none;box-sizing:border-box;border:1px solid #334155;border-radius:8px;background:#020617;color:#cbd5e1;padding:8px;font-family:monospace;font-size:10px;line-height:1.35;";
-    var copyBtn = document.createElement("button");
-    var downloadBtn = document.createElement("button");
-    copyBtn.type = "button";
-    downloadBtn.type = "button";
-    copyBtn.textContent = "Copy Markdown";
-    downloadBtn.textContent = "Download .md";
-    copyBtn.style.cssText = btnStyle("primary");
-    downloadBtn.style.cssText = btnStyle("ghost");
-    copyBtn.disabled = true;
-    downloadBtn.disabled = true;
-    function setStatus(text, tone) {
-      var color = tone === "ok" ? "#4ade80" : tone === "err" ? "#f87171" : "#94a3b8";
-      status.style.color = color;
-      status.textContent = text;
-    }
-    function setOutput(md, meta) {
-      lastMarkdown = md;
-      preview.value = md;
-      copyBtn.disabled = !md;
-      downloadBtn.disabled = !md;
-      setStatus(meta, "ok");
-      inputStep.style.display = "none";
-      outputStep.style.display = "flex";
-    }
-    function setOutputWithOmitted(md, prefix, omitted, suffix) {
-      lastMarkdown = md;
-      preview.value = md;
-      copyBtn.disabled = !md;
-      downloadBtn.disabled = !md;
-      status.style.color = "#4ade80";
-      status.innerHTML = escHtml4(prefix) + '<span style="color:#f87171;">' + escHtml4(omitted) + "</span>" + escHtml4(suffix);
-      inputStep.style.display = "none";
-      outputStep.style.display = "flex";
-    }
-    function clearOutput(err) {
-      lastMarkdown = "";
-      preview.value = "";
-      copyBtn.disabled = true;
-      downloadBtn.disabled = true;
-      outputStep.style.display = "none";
-      inputStep.style.display = "flex";
-      if (err) setStatus(err, "err");
-      else setStatus("", "muted");
-    }
-    function applyGenerateResult(result) {
-      if (!result.ok) {
-        clearOutput(result.error);
-        return;
-      }
-      var metaPrefix = "Ready: " + result.stepCount + " of " + result.totalStepCount + " test step" + (result.totalStepCount === 1 ? "" : "s") + " across " + result.workflowCount + " complete workflow" + (result.workflowCount === 1 ? "" : "s");
-      var omittedMeta = result.omittedStepCount ? ". Omitted " + result.omittedStepCount + " step" + (result.omittedStepCount === 1 ? "" : "s") + "." : ".";
-      var suffixMeta = "";
-      if (result.slugWarningNames.length) {
-        suffixMeta += " Warning: filename slug changed for: " + result.slugWarningNames.join(", ") + ".";
-      }
-      if (result.omittedStepCount) {
-        setOutputWithOmitted(result.markdown, metaPrefix, omittedMeta, suffixMeta);
-      } else {
-        setOutput(result.markdown, metaPrefix + omittedMeta + suffixMeta);
-      }
-    }
-    function regenerateFromLastCsv() {
-      if (!lastCsvText) return;
-      applyGenerateResult(
-        generateOutlineMarkdownFromCsv(lastCsvText, void 0, {
-          flowBrowser,
-          targetRoot,
-          fileExtension
-        })
-      );
-    }
-    function regenerateFromPaste() {
-      applyGenerateResult(
-        generateOutlineMarkdownFromDraft(draft, void 0, {
-          flowBrowser,
-          targetRoot,
-          fileExtension
-        })
-      );
-    }
-    function regenerateActive() {
-      if (lastCsvText) regenerateFromLastCsv();
-      else if (draft.selectedIds.length) regenerateFromPaste();
-    }
-    function headerCellsForGrid() {
-      var headerTable = parseSpreadsheetPaste(draft.headersText || headersTa.value || "");
-      return headerTable.length ? headerTable[0] : [];
-    }
-    function renderGridTable(container2, rows, opts) {
-      container2.innerHTML = "";
-      if (!rows.length) {
-        var empty = document.createElement("div");
-        empty.style.cssText = "color:#64748b;font-size:10px;padding:6px;";
-        empty.textContent = opts.emptyText;
-        container2.appendChild(empty);
-        return;
-      }
-      var headers = headerCellsForGrid();
-      var maxCols = Math.max(headers.length, rows.reduce(function(max, r) {
-        return Math.max(max, r.length);
-      }, 0));
-      function firstMatchingIndex(candidates) {
-        for (var ci = 0; ci < candidates.length; ci++) {
-          for (var hi = 0; hi < headers.length; hi++) {
-            if (normalizeHeader(headers[hi]) === candidates[ci]) return hi;
-          }
-        }
-        return -1;
-      }
-      var displayIndexes = [];
-      [
-        ["#", "row #", "row number", "row"],
-        ["group"],
-        ["workflow"],
-        ["test step", "teststep", "step"]
-      ].forEach(function(candidates) {
-        var idx = firstMatchingIndex(candidates);
-        if (idx >= 0 && displayIndexes.indexOf(idx) < 0) displayIndexes.push(idx);
-      });
-      if (!displayIndexes.length) {
-        for (var fallback = 0; fallback < Math.min(4, maxCols); fallback++) displayIndexes.push(fallback);
-      }
-      var table = document.createElement("table");
-      table.style.cssText = "width:100%;border-collapse:collapse;font-size:10px;table-layout:auto;";
-      var thead = document.createElement("thead");
-      var headTr = document.createElement("tr");
-      var thFixed = document.createElement("th");
-      thFixed.style.cssText = "position:sticky;top:0;background:#020617;color:#64748b;text-align:left;padding:4px;border-bottom:1px solid #334155;width:24px;";
-      if (opts.onToggleAll) {
-        var allCb = document.createElement("input");
-        allCb.type = "checkbox";
-        allCb.checked = rows.length > 0 && rows.every(function(_row, idx) {
-          return opts.checkedForIndex(idx);
-        });
-        allCb.style.cssText = "accent-color:#38bdf8;";
-        allCb.addEventListener("change", function() {
-          opts.onToggleAll(allCb.checked);
-        });
-        thFixed.appendChild(allCb);
-      }
-      headTr.appendChild(thFixed);
-      for (var di = 0; di < displayIndexes.length; di++) {
-        var h = displayIndexes[di];
-        var th = document.createElement("th");
-        var normalizedHeader = normalizeHeader(headers[h] || "");
-        th.textContent = headers[h] || "Col " + (h + 1);
-        th.style.cssText = "position:sticky;top:0;background:#020617;color:#94a3b8;text-align:left;padding:4px;border-bottom:1px solid #334155;" + (normalizedHeader === "#" || normalizedHeader === "row #" || normalizedHeader === "row number" || normalizedHeader === "row" ? "width:64px;max-width:64px;" : normalizedHeader === "group" ? "width:180px;" : "min-width:220px;");
-        headTr.appendChild(th);
-      }
-      thead.appendChild(headTr);
-      table.appendChild(thead);
-      var tbody = document.createElement("tbody");
-      for (var rIdx = 0; rIdx < rows.length; rIdx++) {
-        (function(idx) {
-          var tr = document.createElement("tr");
-          tr.style.cssText = "border-bottom:1px solid #1e293b;";
-          var cbTd = document.createElement("td");
-          cbTd.style.cssText = "padding:4px;vertical-align:top;";
-          var cb = document.createElement("input");
-          cb.type = "checkbox";
-          cb.checked = opts.checkedForIndex(idx);
-          cb.style.cssText = "accent-color:#38bdf8;";
-          cb.addEventListener("change", function() {
-            opts.onCheck(idx, cb.checked);
-          });
-          cbTd.appendChild(cb);
-          tr.appendChild(cbTd);
-          for (var cIdx = 0; cIdx < displayIndexes.length; cIdx++) {
-            var c = displayIndexes[cIdx];
-            var normalizedCellHeader = normalizeHeader(headers[c] || "");
-            var td = document.createElement("td");
-            td.textContent = rows[idx][c] || "";
-            td.title = rows[idx][c] || "";
-            td.style.cssText = "padding:4px;color:#cbd5e1;vertical-align:top;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" + (normalizedCellHeader === "#" || normalizedCellHeader === "row #" || normalizedCellHeader === "row number" || normalizedCellHeader === "row" ? "width:64px;max-width:64px;" : "");
-            tr.appendChild(td);
-          }
-          tbody.appendChild(tr);
-        })(rIdx);
-      }
-      table.appendChild(tbody);
-      container2.appendChild(table);
-    }
-    function updateSelCount() {
-      rowsSummary.textContent = draft.rows.length ? draft.rows.length + " saved row" + (draft.rows.length === 1 ? "" : "s") : "No rows saved";
-      selCount.textContent = draft.rows.length ? draft.selectedIds.length + " / " + draft.rows.length + " selected" : "0 rows saved";
-    }
-    function renderSavedRowList() {
-      renderGridTable(rowList, draft.rows.map(function(r) {
-        return r.cells;
-      }), {
-        emptyText: "No saved rows yet. Paste rows above and import checked rows.",
-        checkedForIndex: function(idx) {
-          return draft.selectedIds.indexOf(draft.rows[idx].id) !== -1;
-        },
-        onCheck: function(idx, checked) {
-          var id = draft.rows[idx].id;
-          if (checked) {
-            if (draft.selectedIds.indexOf(id) < 0) draft.selectedIds.push(id);
-          } else {
-            draft.selectedIds = draft.selectedIds.filter(function(selectedId) {
-              return selectedId !== id;
-            });
-          }
-          saveOutlineGeneratorDraft(draft);
-          updateSelCount();
-        },
-        onToggleAll: function(checked) {
-          draft.selectedIds = checked ? draft.rows.map(function(r) {
-            return r.id;
-          }) : [];
-          saveOutlineGeneratorDraft(draft);
-          renderSavedRowList();
-        }
-      });
-      updateSelCount();
-    }
-    deleteSelBtn.addEventListener("click", function() {
-      if (!draft.selectedIds.length) {
-        setStatus("Select rows to delete.", "err");
-        return;
-      }
-      deleteOutlineRows(draft, draft.selectedIds.slice());
-      saveOutlineGeneratorDraft(draft);
-      renderSavedRowList();
-      clearOutput("");
-      setStatus("Deleted selected rows.", "ok");
-    });
-    genPasteBtn.addEventListener("click", regenerateFromPaste);
-    inputStep.appendChild(pastePanel);
-    updateHeaderSummary();
-    renderSavedRowList();
-    var optsRow = document.createElement("div");
-    optsRow.style.cssText = "display:flex;align-items:center;gap:6px;flex-wrap:wrap;";
-    var chipStyle = "font-size:10px;font-family:monospace;padding:3px 8px;border-radius:999px;border:1px solid #475569;background:#1e293b;color:#cbd5e1;cursor:pointer;";
-    var inputChipStyle = "max-width:260px;min-width:130px;box-sizing:border-box;background:#020617;color:#e2e8f0;border:1px solid #38bdf8;border-radius:999px;padding:3px 8px;font-family:monospace;font-size:10px;";
-    function makeEditableOptionChip(label, getValue, setValue) {
-      var wrapChip = document.createElement("span");
-      wrapChip.style.cssText = "display:inline-flex;align-items:center;max-width:100%;";
-      var chip = document.createElement("button");
-      chip.type = "button";
-      chip.style.cssText = chipStyle;
-      function refresh() {
-        chip.textContent = label + ": " + getValue();
-      }
-      refresh();
-      chip.addEventListener("click", function(e) {
-        e.stopPropagation();
-        if (wrapChip.querySelector("input")) return;
-        var startVal = getValue();
-        chip.style.display = "none";
-        var inp = document.createElement("input");
-        inp.type = "text";
-        inp.value = startVal;
-        inp.style.cssText = inputChipStyle;
-        wrapChip.insertBefore(inp, chip);
-        inp.focus();
-        inp.select();
-        function finish(save) {
-          if (!inp.parentNode) return;
-          if (save) setValue(inp.value);
-          refresh();
-          chip.style.display = "";
-          inp.remove();
-          regenerateActive();
-        }
-        inp.addEventListener("blur", function() {
-          finish(true);
-        });
-        inp.addEventListener("keydown", function(ev) {
-          if (ev.key === "Enter") {
-            ev.preventDefault();
-            inp.blur();
-          }
-          if (ev.key === "Escape") {
-            ev.preventDefault();
-            finish(false);
-          }
-        });
-      });
-      wrapChip.appendChild(chip);
-      return wrapChip;
-    }
-    var envChip = makeEditableOptionChip("Env", function() {
-      return flowBrowser;
-    }, function(v) {
-      flowBrowser = v.trim() || "Web - Chrome";
-    });
-    var rootChip = makeEditableOptionChip("Root", function() {
-      return targetRoot;
-    }, function(v) {
-      targetRoot = normalizeOutlineTargetRoot(v);
-    });
-    var extToggle = document.createElement("span");
-    extToggle.setAttribute("role", "button");
-    extToggle.tabIndex = 0;
-    extToggle.style.cssText = "display:inline-flex;align-items:center;overflow:hidden;border-radius:999px;border:1px solid #475569;background:#0f172a;font-family:monospace;font-size:10px;cursor:pointer;";
-    var jsSeg = document.createElement("span");
-    var tsSeg = document.createElement("span");
-    extToggle.appendChild(jsSeg);
-    extToggle.appendChild(tsSeg);
-    function syncOptionChips() {
-      jsSeg.textContent = "js";
-      tsSeg.textContent = "ts";
-      jsSeg.style.cssText = fileExtension === "js" ? "padding:3px 7px;border-radius:999px;background:#1e293b;color:#bae6fd;font-weight:700;" : "padding:3px 6px;color:#64748b;";
-      tsSeg.style.cssText = fileExtension === "ts" ? "padding:3px 7px;border-radius:999px;background:#1e293b;color:#bae6fd;font-weight:700;" : "padding:3px 6px;color:#64748b;";
-    }
-    syncOptionChips();
-    optsRow.appendChild(envChip);
-    optsRow.appendChild(rootChip);
-    optsRow.appendChild(extToggle);
-    var fileInput = document.createElement("input");
-    fileInput.type = "file";
-    fileInput.accept = ".csv,text/csv";
-    fileInput.style.cssText = "display:none;";
-    inputStep.appendChild(fileInput);
-    uploadCsvBtn.addEventListener("click", function() {
-      fileInput.click();
-    });
-    var actions = document.createElement("div");
-    actions.style.cssText = "display:flex;gap:8px;flex-wrap:wrap;";
-    actions.appendChild(copyBtn);
-    actions.appendChild(downloadBtn);
-    outputStep.appendChild(optsRow);
-    wrap.appendChild(inputStep);
-    wrap.appendChild(status);
-    outputStep.appendChild(preview);
-    outputStep.appendChild(actions);
-    wrap.appendChild(outputStep);
-    function toggleFileExtension() {
-      fileExtension = fileExtension === "ts" ? "js" : "ts";
-      syncOptionChips();
-      regenerateActive();
-    }
-    extToggle.addEventListener("click", function() {
-      toggleFileExtension();
-    });
-    extToggle.addEventListener("keydown", function(ev) {
-      if (ev.key === "Enter" || ev.key === " ") {
-        ev.preventDefault();
-        toggleFileExtension();
-      }
-    });
-    fileInput.addEventListener("change", function() {
-      var file = fileInput.files && fileInput.files[0];
-      if (!file) {
-        lastCsvText = "";
-        clearOutput("");
-        setStatus("", "muted");
-        return;
-      }
-      var reader = new FileReader();
-      reader.onload = function() {
-        lastCsvText = String(reader.result || "");
-        regenerateFromLastCsv();
-      };
-      reader.onerror = function() {
-        clearOutput("Could not read the CSV file.");
-      };
-      reader.readAsText(file);
-    });
-    copyBtn.addEventListener("click", function() {
-      if (!lastMarkdown) return;
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(lastMarkdown).then(function() {
-          setStatus("Copied Markdown to clipboard.", "ok");
-        }).catch(function() {
-          setStatus("Copy failed \u2014 try Download .md instead.", "err");
-        });
-        return;
-      }
-      setStatus("Clipboard unavailable in this browser.", "err");
-    });
-    downloadBtn.addEventListener("click", function() {
-      if (!lastMarkdown) return;
-      var blob = new Blob([lastMarkdown], { type: "text/markdown;charset=utf-8" });
-      var link = document.createElement("a");
-      link.href = URL.createObjectURL(blob);
-      link.download = "ai_generation_instructions.md";
-      link.click();
-      URL.revokeObjectURL(link.href);
-      setStatus("Downloaded ai_generation_instructions.md", "ok");
-    });
-    container.appendChild(wrap);
-  }
-  function openOutlineGeneratorPanel(mountOpts) {
-    if (restoreFloatingPanel(OUTLINE_GENERATOR_PANEL_ID)) return;
-    var shell = createFloatingPanel({
-      id: OUTLINE_GENERATOR_PANEL_ID,
-      title: "Test Outline Generator",
-      width: 840,
-      height: 720,
-      minWidth: 460,
-      minHeight: 400
-    });
-    shell.body.style.padding = "12px";
-    shell.body.style.overflow = "hidden";
-    shell.body.style.display = "flex";
-    shell.body.style.flexDirection = "column";
-    mountOutlineGeneratorContent(shell.body, mountOpts);
-  }
-
-  // src/notes/53-coverage-requests.ts
-  var mountObserver = null;
-  var syncTimer = null;
-  var reopenedCompleteRequests = {};
-  function defaultChecks() {
-    return {
-      addedToCoverageTracker: false,
-      loomsRecorded: false,
-      attachedFlows: false,
-      markDoneInTaskWolf: false
-    };
-  }
-  function parseCoverageRequestPage() {
-    var m = (window.location.pathname || "").match(/^\/([^/]+)\/coverage-requests\/([^/]+)\/?$/i);
-    if (!m || !m[1] || !m[2]) return null;
-    return { client: decodeURIComponent(m[1]), requestId: decodeURIComponent(m[2]) };
-  }
-  function loadCoverageData() {
-    var empty = { v: 1, trackerByClient: {}, requests: {} };
-    if (typeof GM_getValue !== "function") return empty;
-    try {
-      var raw = GM_getValue(COVERAGE_GM_KEY, "");
-      if (!raw) return empty;
-      var p = JSON.parse(raw);
-      return {
-        v: 1,
-        trackerByClient: p.trackerByClient && typeof p.trackerByClient === "object" ? p.trackerByClient : {},
-        requests: p.requests && typeof p.requests === "object" ? p.requests : {}
-      };
-    } catch (_e) {
-      return empty;
-    }
-  }
-  function saveCoverageData(data) {
-    if (typeof GM_setValue !== "function") return;
-    try {
-      GM_setValue(COVERAGE_GM_KEY, JSON.stringify(data));
-    } catch (_e) {
-    }
-  }
-  function scrapeCoveragePageMeta() {
-    var out = {
-      requestNumber: "",
-      title: "",
-      status: "",
-      priority: "",
-      requestedBy: "",
-      estimatedCompletion: ""
-    };
-    var crumb = document.querySelector('[class*="breadcrumb"], nav[aria-label*="breadcrumb" i]');
-    var crumbText = crumb ? crumb.textContent || "" : "";
-    var numMatch = crumbText.match(/#\s*(\d+)/);
-    if (!numMatch) {
-      var headings = Array.from(document.querySelectorAll("h1, h2, h3"));
-      for (var hi = 0; hi < headings.length; hi++) {
-        var hm = (headings[hi].textContent || "").match(/#\s*(\d+)/);
-        if (hm) {
-          numMatch = hm;
-          break;
-        }
-      }
-    }
-    if (numMatch) out.requestNumber = numMatch[1];
-    var h1 = document.querySelector("h1");
-    if (h1) out.title = (h1.textContent || "").trim();
-    function cleanFieldValue(label, value) {
-      var outValue = String(value || "").replace(/\s+/g, " ").trim();
-      if (outValue.indexOf(label) === 0) outValue = outValue.slice(label.length).trim();
-      if (outValue.length % 2 === 0) {
-        var half = outValue.slice(0, outValue.length / 2);
-        if (half && half === outValue.slice(outValue.length / 2)) outValue = half;
-      }
-      return outValue;
-    }
-    function fieldAfterLabel(label) {
-      var nodes = Array.from(document.querySelectorAll("h6, h5, h4, label, span, p, div"));
-      for (var i = 0; i < nodes.length; i++) {
-        if ((nodes[i].textContent || "").trim() !== label) continue;
-        var sib = nodes[i].nextElementSibling;
-        if (sib) {
-          var sibText = cleanFieldValue(label, sib.textContent || "");
-          if (sibText) return sibText;
-        }
-        var row2 = nodes[i].parentElement;
-        if (!row2) continue;
-        var chips = row2.querySelectorAll("span, div, p");
-        for (var j = 0; j < chips.length; j++) {
-          var t = cleanFieldValue(label, chips[j].textContent || "");
-          if (t && t !== label) return t;
-        }
-      }
-      return "";
-    }
-    out.status = fieldAfterLabel("Status");
-    out.priority = fieldAfterLabel("Priority");
-    out.requestedBy = fieldAfterLabel("Requested by");
-    out.estimatedCompletion = fieldAfterLabel("Estimated completion date");
-    return out;
-  }
-  function getOrCreateWorkspace(ctx) {
-    var data = loadCoverageData();
-    var existing = data.requests[ctx.requestId];
-    if (existing && existing.client === ctx.client) {
-      if (!existing.checks) existing.checks = defaultChecks();
-      if (existing.checks.addedToCoverageTracker == null) {
-        existing.checks.addedToCoverageTracker = !!existing.checks.trackerUpdated;
-      }
-      if (existing.checks.attachedFlows == null) {
-        existing.checks.attachedFlows = !!existing.checks.flowOutlinesExist;
-      }
-      if (existing.checks.markDoneInTaskWolf == null) {
-        existing.checks.markDoneInTaskWolf = false;
-      }
-      return existing;
-    }
-    var scraped = scrapeCoveragePageMeta();
-    var ws = {
-      client: ctx.client,
-      requestId: ctx.requestId,
-      requestNumber: scraped.requestNumber,
-      title: scraped.title,
-      pageUrl: window.location.href,
-      claimed: false,
-      claimedAt: "",
-      checks: defaultChecks(),
-      privateNotes: "",
-      scraped: {
-        status: scraped.status,
-        priority: scraped.priority,
-        requestedBy: scraped.requestedBy,
-        estimatedCompletion: scraped.estimatedCompletion
-      }
-    };
-    data.requests[ctx.requestId] = ws;
-    saveCoverageData(data);
-    return ws;
-  }
-  function saveWorkspace(ws) {
-    var data = loadCoverageData();
-    data.requests[ws.requestId] = ws;
-    saveCoverageData(data);
-  }
-  function getTrackerUrl(client) {
-    return (loadCoverageData().trackerByClient[client] || "").trim();
-  }
-  function setTrackerUrl(client, url) {
-    var data = loadCoverageData();
-    data.trackerByClient[client] = String(url || "").trim();
-    saveCoverageData(data);
-  }
-  function findSidebarAnchor() {
-    var labels = Array.from(document.querySelectorAll("h6, h5, h4, label, span, p, div"));
-    var relatedEl = null;
-    for (var i = 0; i < labels.length; i++) {
-      if ((labels[i].textContent || "").trim() === "Related flows") {
-        relatedEl = labels[i];
-        break;
-      }
-    }
-    if (relatedEl) {
-      var block = relatedEl.closest("div");
-      if (block && block.parentElement) {
-        var parent = block.parentElement;
-        var next = block.nextElementSibling;
-        if (next && next.tagName === "HR") return next;
-        return block;
-      }
-    }
-    var asides = Array.from(document.querySelectorAll("aside"));
-    if (asides.length) return asides[asides.length - 1];
-    return null;
-  }
-  function btn2(label, opts) {
-    var variant = opts.variant || "secondary";
-    var styles = {
-      primary: { bg: "#2563eb", border: "#1d4ed8", color: "#fff" },
-      secondary: { bg: "#fff", border: "#cbd5e1", color: "#334155" },
-      danger: { bg: "#fff", border: "#fecaca", color: "#b91c1c" },
-      link: { bg: "transparent", border: "transparent", color: "#2563eb" }
-    };
-    var s = styles[variant] || styles.secondary;
-    var b = document.createElement("button");
-    b.type = "button";
-    b.textContent = label;
-    b.style.cssText = "display:" + (opts.fullWidth === false ? "inline-block" : "block") + ";width:" + (opts.fullWidth === false ? "auto" : "100%") + ";border:1px solid " + s.border + ";background:" + s.bg + ";color:" + s.color + ";border-radius:7px;padding:7px 10px;font-size:12px;font-weight:650;cursor:pointer;line-height:1.3;text-align:" + (opts.fullWidth === false ? "center" : "left") + ";";
-    if (variant === "link") {
-      b.style.textDecoration = "underline";
-      b.style.padding = "2px 0";
-    }
-    if (opts.onClick) {
-      b.addEventListener("click", function(e) {
-        e.preventDefault();
-        e.stopPropagation();
-        opts.onClick();
-      });
-    }
-    return b;
-  }
-  function fieldLabel(text) {
-    var el = document.createElement("div");
-    el.style.cssText = "font-size:11px;font-weight:650;color:#64748b;margin:12px 0 5px;";
-    el.textContent = text;
-    return el;
-  }
-  function checkboxRow(key, label, ws, onChange) {
-    var wrap = document.createElement("div");
-    wrap.style.cssText = "display:block;margin:6px 0;";
-    var row2 = document.createElement("label");
-    row2.style.cssText = "display:inline-flex;align-items:flex-start;gap:8px;font-size:12px;color:#334155;cursor:pointer;line-height:1.35;";
-    var inp = document.createElement("input");
-    inp.type = "checkbox";
-    inp.checked = !!ws.checks[key];
-    inp.style.cssText = "margin-top:2px;accent-color:#2563eb;";
-    inp.addEventListener("change", function() {
-      ws.checks[key] = inp.checked;
-      saveWorkspace(ws);
-      onChange();
-    });
-    var span = document.createElement("span");
-    span.textContent = label;
-    row2.appendChild(inp);
-    row2.appendChild(span);
-    wrap.appendChild(row2);
-    return wrap;
-  }
-  function promptTrackerUrl(client, onDone) {
-    var current = getTrackerUrl(client);
-    var url = window.prompt("Coverage tracker sheet URL for " + client + ":", current || "https://");
-    if (url === null) return;
-    setTrackerUrl(client, url.trim());
-    onDone();
-  }
-  function coverageRequestIsComplete(ws) {
-    return !!(ws.claimed && ws.checks && ws.checks.addedToCoverageTracker && ws.checks.loomsRecorded && ws.checks.attachedFlows && ws.checks.markDoneInTaskWolf);
-  }
-  function completePill(ctx) {
-    var wrap = document.createElement("span");
-    wrap.style.cssText = "position:relative;display:inline-flex;align-items:center;min-width:72px;min-height:24px;";
-    var complete = document.createElement("span");
-    complete.textContent = "Complete";
-    complete.style.cssText = "border:1px solid #bbf7d0;background:#ecfdf5;color:#166534;border-radius:999px;padding:4px 9px;font-size:11px;font-weight:700;line-height:1.2;transition:opacity .12s;";
-    var reopen = document.createElement("button");
-    reopen.type = "button";
-    reopen.textContent = "Reopen";
-    reopen.title = "Reopen helper";
-    reopen.style.cssText = "position:absolute;right:0;top:0;opacity:0;border:1px solid #cbd5e1;background:#fff;color:#334155;border-radius:999px;padding:4px 9px;font-size:11px;font-weight:700;cursor:pointer;line-height:1.2;transition:opacity .12s;";
-    function showReopen() {
-      complete.style.opacity = "0";
-      reopen.style.opacity = "1";
-    }
-    function showComplete() {
-      complete.style.opacity = "1";
-      reopen.style.opacity = "0";
-    }
-    wrap.addEventListener("mouseenter", showReopen);
-    wrap.addEventListener("mouseleave", showComplete);
-    wrap.addEventListener("focusin", showReopen);
-    wrap.addEventListener("focusout", showComplete);
-    reopen.addEventListener("click", function(e) {
-      e.preventDefault();
-      e.stopPropagation();
-      reopenedCompleteRequests[ctx.requestId] = true;
-      renderCard(ctx);
-    });
-    wrap.appendChild(complete);
-    wrap.appendChild(reopen);
-    return wrap;
-  }
-  function cardHeader(_ws) {
-    var title = document.createElement("div");
-    title.style.cssText = "font-size:13px;font-weight:750;color:#0f172a;margin-bottom:4px;";
-    title.textContent = "QAW Coverage Helper";
-    return title;
-  }
-  function renderCard(ctx) {
-    var anchor = findSidebarAnchor();
-    if (!anchor || !anchor.parentElement) return;
-    var ws = getOrCreateWorkspace(ctx);
-    var trackerUrl = getTrackerUrl(ctx.client);
-    var existing = document.querySelector("[data-qaw-coverage-helper]");
-    if (existing) existing.remove();
-    var card = document.createElement("div");
-    card.setAttribute("data-qaw-coverage-helper", "1");
-    card.style.cssText = "margin-top:8px;padding-bottom:4px;font-family:system-ui,-apple-system,sans-serif;color:#0f172a;";
-    var headerRow = document.createElement("div");
-    headerRow.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px;";
-    headerRow.appendChild(cardHeader(ws));
-    if (ws.claimed) {
-      if (coverageRequestIsComplete(ws) && !reopenedCompleteRequests[ctx.requestId]) {
-        headerRow.appendChild(completePill(ctx));
-      } else {
-        headerRow.appendChild(
-          btn2("Unclaim", {
-            variant: "danger",
-            fullWidth: false,
-            onClick: function() {
-              ws.claimed = false;
-              ws.claimedAt = "";
-              saveWorkspace(ws);
-              renderCard(ctx);
-            }
-          })
-        );
-      }
-    }
-    card.appendChild(headerRow);
-    if (!ws.claimed) {
-      card.appendChild(
-        btn2("Claim this CR", {
-          variant: "primary",
-          onClick: function() {
-            ws.claimed = true;
-            ws.claimedAt = (/* @__PURE__ */ new Date()).toISOString();
-            var fresh = scrapeCoveragePageMeta();
-            ws.scraped = {
-              status: fresh.status,
-              priority: fresh.priority,
-              requestedBy: fresh.requestedBy,
-              estimatedCompletion: fresh.estimatedCompletion
-            };
-            if (!ws.requestNumber) ws.requestNumber = fresh.requestNumber;
-            if (!ws.title) ws.title = fresh.title;
-            saveWorkspace(ws);
-            renderCard(ctx);
-          }
-        })
-      );
-    } else if (coverageRequestIsComplete(ws) && !reopenedCompleteRequests[ctx.requestId]) {
-      var doneHint = document.createElement("div");
-      doneHint.style.cssText = "font-size:11px;color:#64748b;line-height:1.4;";
-      doneHint.textContent = "Coverage workflow checklist is complete.";
-      card.appendChild(doneHint);
-    } else {
-      let appendPrivateNotesEditor2 = function() {
-        card.appendChild(fieldLabel("Private notes"));
-        var notes = document.createElement("textarea");
-        notes.placeholder = "Only you see this \u2014 reminders, flow names, tracker row notes\u2026";
-        notes.value = ws.privateNotes || "";
-        notes.style.cssText = "width:100%;min-height:72px;box-sizing:border-box;border:1px solid #cbd5e1;border-radius:7px;padding:8px;font-size:12px;line-height:1.4;resize:none;overflow:hidden;font-family:inherit;margin-bottom:6px;";
-        function autosizePrivateNotes() {
-          notes.style.height = "auto";
-          notes.style.height = Math.max(72, notes.scrollHeight + 2) + "px";
-        }
-        notes.addEventListener("input", function() {
-          ws.privateNotes = notes.value;
-          saveWorkspace(ws);
-          autosizePrivateNotes();
-        });
-        card.appendChild(notes);
-        autosizePrivateNotes();
-        setTimeout(function() {
-          autosizePrivateNotes();
-          notes.focus();
-        }, 0);
-        if (typeof requestAnimationFrame === "function") {
-          requestAnimationFrame(autosizePrivateNotes);
-        }
-      };
-      var appendPrivateNotesEditor = appendPrivateNotesEditor2;
-      var trackerRow = document.createElement("div");
-      trackerRow.style.cssText = "display:flex;align-items:center;gap:8px;margin:2px 0 10px;flex-wrap:wrap;";
-      var trackerLabel = document.createElement("span");
-      trackerLabel.style.cssText = "font-size:11px;font-weight:650;color:#64748b;";
-      trackerLabel.textContent = "Coverage Tracker";
-      trackerRow.appendChild(trackerLabel);
-      if (trackerUrl) {
-        trackerRow.appendChild(
-          btn2("Open", {
-            variant: "link",
-            fullWidth: false,
-            onClick: function() {
-              window.open(trackerUrl, "_blank", "noopener,noreferrer");
-            }
-          })
-        );
-        trackerRow.appendChild(
-          btn2("Edit", {
-            variant: "link",
-            fullWidth: false,
-            onClick: function() {
-              promptTrackerUrl(ctx.client, function() {
-                renderCard(ctx);
-              });
-            }
-          })
-        );
-      } else {
-        trackerRow.appendChild(
-          btn2("Add tracker", {
-            variant: "link",
-            fullWidth: false,
-            onClick: function() {
-              promptTrackerUrl(ctx.client, function() {
-                renderCard(ctx);
-              });
-            }
-          })
-        );
-      }
-      card.appendChild(trackerRow);
-      card.appendChild(
-        btn2("Outline Generator", {
-          variant: "secondary",
-          fullWidth: false,
-          onClick: function() {
-            openOutlineGeneratorPanel({ defaultMode: "paste" });
-          }
-        })
-      );
-      card.appendChild(fieldLabel("Checklist"));
-      var checksWrap = document.createElement("div");
-      checksWrap.style.cssText = "margin-bottom:14px;";
-      checksWrap.appendChild(checkboxRow("addedToCoverageTracker", "Added to Coverage Tracker", ws, function() {
-      }));
-      checksWrap.appendChild(checkboxRow("loomsRecorded", "Loom(s) recorded", ws, function() {
-      }));
-      checksWrap.appendChild(checkboxRow("attachedFlows", "Attached flows", ws, function() {
-      }));
-      checksWrap.appendChild(checkboxRow("markDoneInTaskWolf", "Mark as Done in Task Wolf", ws, function() {
-      }));
-      card.appendChild(checksWrap);
-      if ((ws.privateNotes || "").trim()) {
-        appendPrivateNotesEditor2();
-      } else {
-        card.appendChild(
-          btn2("Add notes", {
-            variant: "secondary",
-            fullWidth: false,
-            onClick: function() {
-              renderCard(ctx);
-              var fresh = document.querySelector("[data-qaw-coverage-helper]");
-              if (!fresh) return;
-              var existingAdd = Array.from(fresh.querySelectorAll("button")).filter(function(b) {
-                return (b.textContent || "") === "Add notes";
-              })[0];
-              if (existingAdd) existingAdd.style.display = "none";
-              var freshCard = fresh;
-              freshCard.appendChild(fieldLabel("Private notes"));
-              var notes = document.createElement("textarea");
-              notes.placeholder = "Only you see this \u2014 reminders, flow names, tracker row notes\u2026";
-              notes.style.cssText = "width:100%;min-height:72px;box-sizing:border-box;border:1px solid #cbd5e1;border-radius:7px;padding:8px;font-size:12px;line-height:1.4;resize:none;overflow:hidden;font-family:inherit;margin-bottom:6px;";
-              notes.addEventListener("input", function() {
-                ws.privateNotes = notes.value;
-                saveWorkspace(ws);
-                notes.style.height = "auto";
-                notes.style.height = Math.max(72, notes.scrollHeight) + "px";
-              });
-              freshCard.appendChild(notes);
-              notes.focus();
-            }
-          })
-        );
-      }
-    }
-    if (anchor.nextSibling) {
-      anchor.parentElement.insertBefore(card, anchor.nextSibling);
-    } else {
-      anchor.parentElement.appendChild(card);
-    }
-  }
-  function removeCard() {
-    document.querySelectorAll("[data-qaw-coverage-helper]").forEach(function(el) {
-      el.remove();
-    });
-  }
-  function syncCoverageHelper() {
-    var active = document.activeElement;
-    if (active && active.closest("[data-qaw-coverage-helper]")) return;
-    var ctx = parseCoverageRequestPage();
-    if (!ctx) {
-      removeCard();
-      return;
-    }
-    renderCard(ctx);
-  }
-  function initCoverageRequestHelper() {
-    if (!/app\.qawolf\.com$/i.test(location.hostname)) return;
-    syncCoverageHelper();
-    if (!mountObserver) {
-      mountObserver = new MutationObserver(function(mutations) {
-        for (var i = 0; i < mutations.length; i++) {
-          var target = mutations[i].target;
-          if (target && target.closest && target.closest("[data-qaw-coverage-helper]")) return;
-        }
-        if (syncTimer) return;
-        syncTimer = setTimeout(function() {
-          syncTimer = null;
-          syncCoverageHelper();
-        }, 350);
-      });
-      mountObserver.observe(document.body || document.documentElement, { childList: true, subtree: true });
-    }
-  }
-
   // src/notes/13-init.ts
+  init_coverage_requests();
+  init_coverage_page_info();
   function isGlobalSafeModeEnabled() {
     try {
       return localStorage.getItem(GLOBAL_SAFE_MODE_KEY) === "1";
@@ -28518,7 +29838,19 @@ This won't delete the actual file.`)) return;
       return false;
     }
   }
+  function shouldRunNotesOnThisPage() {
+    if (window.top !== window) return false;
+    if (isReportScrapeWindow()) return false;
+    if (/task-wolf\.com$/i.test(location.hostname) && /^\/hq\/?$/i.test(location.pathname || "/")) {
+      initTaskWolfShiftControls();
+      return false;
+    }
+    if (/task-wolf\.com$/i.test(location.hostname)) return false;
+    return true;
+  }
   function stopNotesForGlobalSafeMode() {
+    if (!state.notesRunning) return;
+    state.notesRunning = false;
     if (state.pollTimer) {
       clearInterval(state.pollTimer);
       state.pollTimer = null;
@@ -28543,27 +29875,17 @@ This won't delete the actual file.`)) return;
       state.speedDialEl.remove();
       state.speedDialEl = null;
     }
+    stopFlowTouch();
+    stopFileTreeBadges();
+    stopBugReport();
     closePanel();
+    closeCoveragePageInfoPanel();
   }
-  function init() {
-    if (window.top !== window) return;
-    if (isReportScrapeWindow()) return;
-    if (/task-wolf\.com$/i.test(location.hostname) && /^\/hq\/?$/i.test(location.pathname || "/")) {
-      initTaskWolfShiftControls();
-      return;
-    }
-    if (/task-wolf\.com$/i.test(location.hostname)) return;
+  function startNotes() {
+    if (state.notesRunning) return;
+    if (!shouldRunNotesOnThisPage()) return;
     if (isGlobalSafeModeEnabled()) return;
-    var onSafeMode = function(e) {
-      var ce = e;
-      if (ce.detail && ce.detail.enabled === false) return;
-      if (ce.detail && ce.detail.enabled !== true && !isGlobalSafeModeEnabled()) return;
-      stopNotesForGlobalSafeMode();
-    };
-    window.addEventListener(GLOBAL_SAFE_MODE_EVENT, onSafeMode);
-    window.addEventListener("storage", function(e) {
-      if (e.key === GLOBAL_SAFE_MODE_KEY && e.newValue === "1") stopNotesForGlobalSafeMode();
-    });
+    state.notesRunning = true;
     state.store = loadStore();
     var initialCtx = parseContext();
     var handlingEnvVerification = initPendingEnvVerificationWatcher();
@@ -28578,30 +29900,15 @@ This won't delete the actual file.`)) return;
     initGutterMenu();
     window.addEventListener("storage", onStorage);
     window.addEventListener("storage", onWatchLineTriggerStorage);
-    window.addEventListener("resize", function() {
-      if (state.panelEl) applyDrawerWidth2(state.panelEl);
-      repositionInvTooltipIfOpen();
-    });
+    window.addEventListener("resize", onNotesResize);
     if (typeof GM_addValueChangeListener === "function") {
       try {
-        GM_addValueChangeListener(SHIFT_BRIDGE_GM_KEY, function() {
-          if (!syncShiftBridgeIntoStore()) return;
-          if (state.panelEl) {
-            refreshInvestigationShiftBar();
-            refreshHeadContextChip();
-            refreshDrawerFooter();
-            if (!hasActiveCardEdit()) {
-              var ek = state.panelEl.getAttribute("data-qaw-edit-key");
-              if (ek && state.store.notes[ek]) renderPanelForKey(ek);
-            }
-          }
-        });
+        GM_addValueChangeListener(SHIFT_BRIDGE_GM_KEY, onShiftBridgeGmChange);
       } catch (e) {
       }
     }
     state.pollTimer = setInterval(function() {
       tick();
-      tickFileTreeBadges();
     }, POLL_MS);
     wireFlowPassedObserver();
     initFlowTouch();
@@ -28616,12 +29923,59 @@ This won't delete the actual file.`)) return;
     processPendingDiscoverOpen();
     processPendingHelperFnJump();
     ingestChimeMetricsIntoStore(readRunChimeMetrics());
-    window.addEventListener("qaw-run-chime-metrics", function(e) {
-      var m = e.detail ? e.detail : readRunChimeMetrics();
-      ingestChimeMetricsIntoStore(m);
-      if (state.panelEl) refreshDrawerFooter();
-    });
+    window.addEventListener("qaw-run-chime-metrics", onRunChimeMetrics);
     initCoverageRequestHelper();
+  }
+  function onNotesResize() {
+    if (state.panelEl) applyDrawerWidth2(state.panelEl);
+    repositionInvTooltipIfOpen();
+  }
+  function onShiftBridgeGmChange() {
+    if (!syncShiftBridgeIntoStore()) return;
+    if (state.panelEl) {
+      refreshInvestigationShiftBar();
+      refreshHeadContextChip();
+      refreshDrawerFooter();
+      if (!hasActiveCardEdit()) {
+        var ek = state.panelEl.getAttribute("data-qaw-edit-key");
+        if (ek && state.store.notes[ek]) renderPanelForKey(ek);
+      }
+    }
+  }
+  function onRunChimeMetrics(e) {
+    var m = e.detail ? e.detail : readRunChimeMetrics();
+    ingestChimeMetricsIntoStore(m);
+    if (state.panelEl) refreshDrawerFooter();
+  }
+  function onGlobalSafeModeEvent(e) {
+    var ce = e;
+    if (ce.detail && ce.detail.enabled === false) {
+      startNotes();
+      return;
+    }
+    if (ce.detail && ce.detail.enabled === true) {
+      stopNotesForGlobalSafeMode();
+      return;
+    }
+    if (isGlobalSafeModeEnabled()) stopNotesForGlobalSafeMode();
+    else startNotes();
+  }
+  function onGlobalSafeModeStorage(e) {
+    if (e.key !== GLOBAL_SAFE_MODE_KEY) return;
+    if (e.newValue === "1") stopNotesForGlobalSafeMode();
+    else startNotes();
+  }
+  function wireGlobalSafeModeListeners() {
+    if (state.safeModeListenersWired) return;
+    state.safeModeListenersWired = true;
+    window.addEventListener(GLOBAL_SAFE_MODE_EVENT, onGlobalSafeModeEvent);
+    window.addEventListener("storage", onGlobalSafeModeStorage);
+  }
+  function init() {
+    if (!shouldRunNotesOnThisPage()) return;
+    wireGlobalSafeModeListeners();
+    if (isGlobalSafeModeEnabled()) return;
+    startNotes();
   }
   init();
 })();

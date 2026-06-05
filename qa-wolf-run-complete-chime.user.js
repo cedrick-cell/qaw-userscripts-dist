@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         QA Wolf — run finished chime
 // @namespace    http://tampermonkey.net/
-// @version      1.28
+// @version      1.29
 // @description  Short sound when a code run finishes. Records last run duration, current run start time (for live elapsed in investigation notes). Click the page once if the browser blocks audio until gesture.
 // @match        https://app.qawolf.com/*
 // @grant        none
@@ -60,7 +60,8 @@
   var runSegmentStart = null;
   var runSegmentFile = null;
   var pollTimer = null;
-  var mo = null;
+  var chimeRunning = false;
+  var safeModeListenersWired = false;
   function getActiveFlowFileName() {
     var tabs = document.querySelectorAll('[class*="styles_tab__"]');
     var active = null;
@@ -75,7 +76,7 @@
     var clone = active.cloneNode(true);
     var cbs = clone.querySelectorAll('[class*="styles_closeButton__"]');
     for (var j = 0; j < cbs.length; j++) cbs[j].remove();
-    var text = (clone.innerText || clone.textContent || "").trim().replace(/\s+/g, " ");
+    var text = (clone.textContent || "").trim().replace(/\s+/g, " ");
     if (!text) return null;
     var parts = text.split(/[/\\]/);
     var name = parts[parts.length - 1].trim();
@@ -198,13 +199,11 @@
     }
   }
   function stopChimeForGlobalSafeMode() {
+    if (!chimeRunning) return;
+    chimeRunning = false;
     if (pollTimer) {
       clearInterval(pollTimer);
       pollTimer = null;
-    }
-    if (mo) {
-      mo.disconnect();
-      mo = null;
     }
     if (settleTimer) {
       clearTimeout(settleTimer);
@@ -259,8 +258,11 @@
     }, SETTLE_MS);
   }
   function startChime() {
+    if (window.top !== window) return;
     if (isReportScrapeWindow()) return;
     if (isGlobalSafeModeEnabled()) return;
+    if (chimeRunning) return;
+    chimeRunning = true;
     document.addEventListener("click", unlockAudioOnce, true);
     document.addEventListener("keydown", unlockAudioOnce, true);
     wasRunning = stopVisible();
@@ -272,24 +274,31 @@
       }
     }
     pollTimer = setInterval(onPoll, POLL_MS);
-    mo = new MutationObserver(function() {
-      onPoll();
-    });
-    mo.observe(document.documentElement, {
-      childList: true,
-      subtree: true,
-      attributes: true,
-      attributeFilter: ["style", "class", "disabled", "hidden"]
-    });
   }
-  window.addEventListener(GLOBAL_SAFE_MODE_EVENT, function(e) {
+  function onGlobalSafeModeEvent(e) {
     var ce = e;
-    if (ce.detail && ce.detail.enabled === false) return;
-    if (ce.detail && ce.detail.enabled !== true && !isGlobalSafeModeEnabled()) return;
-    stopChimeForGlobalSafeMode();
-  });
-  window.addEventListener("storage", function(e) {
-    if (e.key === GLOBAL_SAFE_MODE_KEY && e.newValue === "1") stopChimeForGlobalSafeMode();
-  });
-  startChime();
+    if (ce.detail && ce.detail.enabled === false) {
+      startChime();
+      return;
+    }
+    if (ce.detail && ce.detail.enabled === true) {
+      stopChimeForGlobalSafeMode();
+      return;
+    }
+    if (isGlobalSafeModeEnabled()) stopChimeForGlobalSafeMode();
+    else startChime();
+  }
+  function onGlobalSafeModeStorage(e) {
+    if (e.key !== GLOBAL_SAFE_MODE_KEY) return;
+    if (e.newValue === "1") stopChimeForGlobalSafeMode();
+    else startChime();
+  }
+  function wireGlobalSafeModeListeners() {
+    if (safeModeListenersWired) return;
+    safeModeListenersWired = true;
+    window.addEventListener(GLOBAL_SAFE_MODE_EVENT, onGlobalSafeModeEvent);
+    window.addEventListener("storage", onGlobalSafeModeStorage);
+  }
+  wireGlobalSafeModeListeners();
+  if (!isGlobalSafeModeEnabled()) startChime();
 })();

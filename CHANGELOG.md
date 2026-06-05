@@ -1,31 +1,37 @@
 # Changelog
 
-Public release notes and "things to try" for QA Wolf userscript updates.
+Notable changes for the QA Wolf userscripts install channel.
 
-## Upcoming: Notes v1.461 / Shortcuts v4.143
+## Investigation Notes v1.620
 
-### What's changing
+- Coverage plan table: row checkboxes, bulk column toggles, inline flow names, tracker/Loom/attach header actions, simple vs table checklist modes, and Mark as Done gated on all rows.
+- Coverage request pages: compact Coverage page info floating panel (channels, storage, client notes, tracker/Loom/related flows) instead of the full notes drawer.
+- No-file / waiting-for-file panel: icon tab bar matches the normal drawer; only Notes and History show file-specific empty states; other tabs work normally.
+- Speed dial: coverage-page info icon, drag-without-stuck-click, and reliable reopen after closing the floating panel.
 
-- Protects active note editors from background refreshes, including storage events, run-complete chime metrics, and follow-tab switches.
-- Adds Daily Work tracking for client-level activity in 15-minute local-time blocks.
-- Adds a Notes panel Work tab with client totals, readable time ranges, and copyable end-of-day text.
-- Removes the old Shortcuts `Current` overlay beside the run button.
-- Adds just-in-case backup instructions before reinstalling the Investigation Notes script.
+## Investigation Notes v1.604
 
-### Things to try
+- Coverage request helper: added optional custom checks for request-specific todos, including a one-click "Reach out to client for clarification" check.
+- Fixed coverage helper private notes stealing focus from the QA Wolf coverage request editor during re-renders.
 
-- **Chime while editing**: open a note card in edit mode with unsaved draft text; let a run complete. Confirm the card stays in edit mode and draft text is unchanged.
-- **Cross-tab storage**: with the panel open and a note in edit mode, change note metadata from another tab or trigger a storage refresh. Confirm edit mode persists, then confirm the panel catches up after blur/save.
-- **Follow tab while editing**: enable follow-tab, edit a note, then switch files in Monaco. Confirm follow-tab does not yank you out of edit mode mid-draft.
-- **Daily Work tracking**: open `app.qawolf.com` on one client, keep the tab visible/focused, then open Notes -> Work. Confirm the current client appears for the current 15-minute block with a 15m total.
-- **Daily Work ranges**: after crossing another 15-minute boundary, confirm contiguous blocks collapse into readable ranges and totals are `blocks * 15m`.
-- **Overlap allowed**: focus QA Wolf tabs for two different clients during the same 15-minute block. Confirm both clients show that block in Work.
-- **Copy report text**: click Work -> Copy and paste somewhere. Confirm it contains client names, total time, and listed ranges.
-- **Current button cleanup**: open a QA Wolf IDE page near the run button and confirm the old `Current` shortcut overlay no longer appears.
-- **Backup before reinstall**: if reinstalling, run the README backup snippet first and confirm it downloads a `qaw-notes-backup-*.json` file.
+## Investigation Notes v1.603
 
-### Verification
+- Coverage request checklist: renamed top-level tracker item, optional per-reference-flow subchecklists (tracker + Loom per flow), and completion logic that respects both simple and per-flow modes.
 
-- `npm test` passes with 94 tests.
-- `node build.mjs` passes.
-- Editor protection was manually smoke-tested on QA Wolf before release.
+## Investigation Notes v1.602
+
+- Prevented stale cross-tab shift bridge state from resurrecting an ended investigation shift, which could make the Creation/Investigation chip bounce after a quick start/end.
+- Added regression coverage for stale GM shift bridge state losing to newer local shift metadata.
+
+## Investigation Notes v1.601
+
+- Added CI checks for tests, TypeScript checking, and builds.
+- Changed public install publishing so normal releases wait until midnight Eastern Time; merged PRs with the `hotfix` label publish immediately.
+- Added safe-mode pause/resume behavior for Notes and Chime without requiring a reload.
+- Reduced runtime work from broad observers and polling on busy QA Wolf pages.
+- Added debug-gated diagnostics and a Copy diagnostics action in Notes settings.
+- Added focused regression tests for URLs, facets, LLM models, shift normalization, chime formatting, run-log parsing, and storage loading.
+
+## Earlier History
+
+Older feature history is tracked in `ideas.md` in the private source repo.
