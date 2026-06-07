@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         QA Wolf Shortcuts
 // @namespace    http://tampermonkey.net/
-// @version      4.176
+// @version      4.181
 // @description  Keyboard shortcut hints for app.qawolf.com. Header nav shortcuts live in JSON key __global__ (editable). File tabs: Shift+right-click = Close other tabs. Violet badges = Meta chord. task-wolf.com: Select All button for Bug Revalidation Tasks.
 // @author       You
 // @match        https://app.qawolf.com/*
@@ -78,6 +78,12 @@
   var healthRestoreFocus = null;
   var healthRestoreBlur = null;
   var healthDragCleanup = null;
+  var healthHighlightMode = false;
+  var healthHighlightTimer = null;
+  var healthHighlightStopAt = 0;
+  var healthHighlightQueue = /* @__PURE__ */ new Set();
+  var healthHighlightRaf = 0;
+  var healthLastHighlightLogAt = 0;
   var safeModeChip = null;
   var safeModeStyle = null;
   var lastOverlaySig = "";
@@ -386,14 +392,249 @@
       dropdowns: document.querySelectorAll("[data-qaw-ref-drop], [data-qaw-client-note-ref-drop], .qaw-note-kebab-menu.open").length
     };
   }
+  function healthIsOwnUi(el) {
+    return !!(el && el.closest && el.closest("[data-qaw-health-hud], [data-qaw-health-flash]"));
+  }
+  function healthIsQawOwned(el) {
+    if (el.closest && el.closest('.qaw-note-dot, [data-qaw-watched="1"], [data-qaw-dot-listener]')) return true;
+    var cur = el;
+    while (cur && cur !== document.body && cur !== document.documentElement) {
+      if (cur.getAttribute) {
+        if (cur.getAttribute("data-qaw-overlay")) return true;
+        var e2e = cur.getAttribute("data-e2e") || "";
+        if (/^investigation-/i.test(e2e)) return true;
+        if (cur.attributes) {
+          for (var i = 0; i < cur.attributes.length; i++) {
+            if (/^data-qaw-/i.test(cur.attributes[i].name)) return true;
+          }
+        }
+      }
+      cur = cur.parentElement;
+    }
+    return false;
+  }
+  function healthHighlightLabel(el, owned) {
+    if (el.closest && el.closest(".qaw-note-dot")) return "dot";
+    if (el.closest && el.closest(".monaco-editor .margin-view-overlays .line-numbers")) return owned ? "gutter" : "margin";
+    return owned ? "qaw" : "page";
+  }
+  function healthHighlightTarget(el) {
+    if (!el || healthIsOwnUi(el)) return null;
+    var dot = el.closest && el.closest(".qaw-note-dot");
+    if (dot && !healthIsOwnUi(dot)) return dot;
+    var lineNum = el.closest && el.closest(".monaco-editor .margin-view-overlays .line-numbers");
+    if (lineNum && !healthIsOwnUi(lineNum)) return lineNum;
+    var marginRow = el.closest && el.closest(".monaco-editor .margin-view-overlays > div");
+    if (marginRow && !healthIsOwnUi(marginRow)) return marginRow;
+    var qaw = el.closest && el.closest('[data-qaw-overlay], [data-qaw-inv-notes], [data-e2e^="investigation-"]');
+    if (qaw && !healthIsOwnUi(qaw)) return qaw;
+    var page = el.closest && el.closest('[data-e2e], [role="dialog"], [role="menu"], [role="listbox"], button, input, textarea, select');
+    if (page && !healthIsOwnUi(page)) {
+      if (page.getAttribute && page.getAttribute("data-e2e") === "Editor") {
+        if (el !== page) {
+          var r = el.getBoundingClientRect();
+          if (r.width > 2 && r.height > 2 && r.width < window.innerWidth * 0.5 && r.height < window.innerHeight * 0.5) {
+            return el;
+          }
+        }
+        return null;
+      }
+      return page;
+    }
+    return el;
+  }
+  function healthElementFromNode(node) {
+    if (!node) return null;
+    var el = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+    if (!el || el === document.body || el === document.documentElement) return null;
+    if (healthIsOwnUi(el)) return null;
+    return el;
+  }
+  function healthStableTargetForMutation(record) {
+    var el = healthElementFromNode(record.target);
+    if (!el) return null;
+    return healthHighlightTarget(el);
+  }
+  function healthFlashElement(el, owned) {
+    if (!el || !document.body || !document.documentElement.contains(el)) return;
+    if (healthIsOwnUi(el)) return;
+    var rect = el.getBoundingClientRect();
+    if (!rect || rect.width < 2 || rect.height < 2) return;
+    if (rect.width > window.innerWidth * 0.95 && rect.height > window.innerHeight * 0.95) return;
+    var flash = document.createElement("div");
+    flash.setAttribute("data-qaw-health-flash", "1");
+    var color = owned ? "#22d3ee" : "#f59e0b";
+    var bg = owned ? "rgba(34,211,238,0.11)" : "rgba(245,158,11,0.10)";
+    flash.style.cssText = [
+      "position:fixed",
+      "left:" + Math.round(rect.left) + "px",
+      "top:" + Math.round(rect.top) + "px",
+      "width:" + Math.max(1, Math.round(rect.width)) + "px",
+      "height:" + Math.max(1, Math.round(rect.height)) + "px",
+      "box-sizing:border-box",
+      "border:2px solid " + color,
+      "background:" + bg,
+      "border-radius:4px",
+      "z-index:2147483646",
+      "pointer-events:none",
+      "opacity:0.95",
+      "transition:opacity 520ms ease"
+    ].join(";");
+    var label = document.createElement("div");
+    label.textContent = healthHighlightLabel(el, owned);
+    label.style.cssText = [
+      "position:absolute",
+      "left:0",
+      "top:-18px",
+      "background:" + color,
+      "color:#020617",
+      "font:10px ui-monospace,SFMono-Regular,Menlo,monospace",
+      "font-weight:700",
+      "line-height:1",
+      "padding:3px 5px",
+      "border-radius:4px",
+      "white-space:nowrap"
+    ].join(";");
+    flash.appendChild(label);
+    document.body.appendChild(flash);
+    setTimeout(function() {
+      flash.style.opacity = "0";
+    }, 60);
+    setTimeout(function() {
+      if (flash.parentNode) flash.remove();
+    }, 760);
+  }
+  function healthFlushHighlights() {
+    healthHighlightRaf = 0;
+    if (!healthHighlightMode || !healthHighlightQueue.size) {
+      healthHighlightQueue.clear();
+      return;
+    }
+    var shown = 0;
+    var qawShown = 0;
+    var pageShown = 0;
+    var sample = null;
+    healthHighlightQueue.forEach(function(el) {
+      if (shown >= 12) return;
+      shown++;
+      var owned = healthIsQawOwned(el);
+      if (owned) qawShown++;
+      else pageShown++;
+      if (!sample) sample = el;
+      healthFlashElement(el, owned);
+    });
+    healthHighlightQueue.clear();
+    var now = Date.now();
+    if (shown && sample && now - healthLastHighlightLogAt > 900) {
+      healthLastHighlightLogAt = now;
+      healthAddLog("highlight qaw=" + qawShown + " page=" + pageShown + " sample=" + describeEl(sample));
+    }
+  }
+  function healthQueueHighlights(records) {
+    if (!healthHighlightMode) return;
+    for (var i = 0; i < records.length; i++) {
+      if (healthHighlightQueue.size >= 40) break;
+      var rec = records[i];
+      var target = healthStableTargetForMutation(rec);
+      if (target) healthHighlightQueue.add(target);
+      for (var a = 0; rec.addedNodes && a < rec.addedNodes.length && healthHighlightQueue.size < 40; a++) {
+        var added = healthElementFromNode(rec.addedNodes[a]);
+        if (!added) continue;
+        var addedTarget = healthHighlightTarget(added);
+        if (addedTarget) healthHighlightQueue.add(addedTarget);
+      }
+    }
+    if (!healthHighlightRaf) healthHighlightRaf = requestAnimationFrame(healthFlushHighlights);
+  }
+  function refreshHealthObserver() {
+    if (!healthMutationObserver) return;
+    healthMutationObserver.disconnect();
+    healthMutationObserver.observe(document.documentElement, healthHighlightMode ? {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      characterData: true,
+      attributeFilter: ["class", "style", "hidden", "aria-hidden", "aria-expanded", "data-state", "data-open", "data-selected"]
+    } : {
+      childList: true,
+      subtree: true
+    });
+  }
+  function applyHealthHudMode() {
+    if (!healthHud) return;
+    var content = healthHud.querySelector("[data-qaw-health-content]");
+    if (healthHighlightMode) {
+      healthHud.style.width = "260px";
+      healthHud.style.maxHeight = "none";
+      if (content) content.style.display = "none";
+    } else {
+      healthHud.style.width = "420px";
+      healthHud.style.maxHeight = "55vh";
+      if (content) content.style.display = "";
+    }
+  }
+  function stopHealthHighlight() {
+    if (!healthHighlightMode) return;
+    healthHighlightMode = false;
+    healthHighlightStopAt = 0;
+    healthLastHighlightLogAt = 0;
+    if (healthHighlightTimer) {
+      clearTimeout(healthHighlightTimer);
+      healthHighlightTimer = null;
+    }
+    if (healthHighlightRaf) {
+      cancelAnimationFrame(healthHighlightRaf);
+      healthHighlightRaf = 0;
+    }
+    healthHighlightQueue.clear();
+    document.querySelectorAll("[data-qaw-health-flash]").forEach(function(el) {
+      el.remove();
+    });
+    healthAddLog("highlight updates stopped");
+    applyHealthHudMode();
+    refreshHealthObserver();
+    renderHealthHud();
+  }
+  function startHealthHighlight() {
+    if (!healthHud) return;
+    if (healthHighlightMode) {
+      stopHealthHighlight();
+      return;
+    }
+    healthHighlightMode = true;
+    healthHighlightStopAt = Date.now() + 3e4;
+    healthAddLog("highlight updates started for 30s");
+    applyHealthHudMode();
+    refreshHealthObserver();
+    renderHealthHud();
+    healthHighlightTimer = setTimeout(function() {
+      if (!healthHighlightMode) return;
+      healthAddLog("highlight updates auto-stop");
+      stopHealthHighlight();
+    }, 3e4);
+  }
   function renderHealthHud() {
     if (!healthHud) return;
     var counts = healthCounts();
     var activeEl = document.activeElement;
     var activeGone = !!(activeEl && activeEl !== document.body && !document.documentElement.contains(activeEl));
-    var body = healthHud.querySelector("[data-qaw-health-body]");
-    if (!body) return;
-    body.textContent = "active: " + describeEl(activeEl) + (activeGone ? " (REMOVED)" : "") + "\nmutations/s: " + healthMutationCount + "\noverlays: " + counts.overlays + "  badges: " + counts.shortcutBadges + "\nnotes: " + counts.notePanels + "  note editors: " + counts.noteEditors + "\ndropdowns: " + counts.dropdowns + "\nsafe mode: " + (isSafeModeEnabled() ? "ON" : "off") + "\n\n" + healthLog.slice(Math.max(0, healthLog.length - 14)).join("\n");
+    var title = healthHud.querySelector("[data-qaw-health-title]");
+    if (title) {
+      if (healthHighlightMode) {
+        var sec = Math.max(0, Math.ceil((healthHighlightStopAt - Date.now()) / 1e3));
+        title.textContent = "QAW highlight \xB7 " + sec + "s";
+      } else {
+        title.textContent = "QAW health";
+      }
+    }
+    var metrics = healthHud.querySelector("[data-qaw-health-metrics]");
+    var logs = healthHud.querySelector("[data-qaw-health-logs]");
+    var highlightBtn = healthHud.querySelector("[data-qaw-health-highlight]");
+    if (highlightBtn) {
+      highlightBtn.textContent = healthHighlightMode ? "Stop highlighting" : "Highlight updates 30s";
+    }
+    if (metrics) metrics.textContent = "active: " + describeEl(activeEl) + (activeGone ? " (REMOVED)" : "") + "\nmutations/s: " + healthMutationCount + "\noverlays: " + counts.overlays + "  badges: " + counts.shortcutBadges + "\nnotes: " + counts.notePanels + "  note editors: " + counts.noteEditors + "\ndropdowns: " + counts.dropdowns + "\nsafe mode: " + (isSafeModeEnabled() ? "ON" : "off");
+    if (logs) logs.textContent = healthLog.slice(Math.max(0, healthLog.length - 14)).join("\n");
     healthMutationCount = 0;
   }
   function clampHealthHud() {
@@ -473,6 +714,7 @@
     var head = document.createElement("div");
     head.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 10px;background:#0f172a;border-bottom:1px solid #1e293b;cursor:move;user-select:none;";
     var title = document.createElement("strong");
+    title.setAttribute("data-qaw-health-title", "1");
     title.textContent = "QAW health";
     title.style.cssText = "color:#7dd3fc;font-size:12px;";
     var actions = document.createElement("div");
@@ -488,32 +730,53 @@
       });
       return b;
     }
-    actions.appendChild(tinyBtn("copy", function() {
-      fallbackCopy(healthLog.join("\n"));
-    }));
-    actions.appendChild(tinyBtn("safe", function() {
-      enableSafeMode();
-    }));
-    actions.appendChild(tinyBtn("stop", stopHealthHud));
+    var closeBtn = tinyBtn("\xD7", stopHealthHud);
+    closeBtn.title = "Close health HUD";
+    closeBtn.style.fontSize = "14px";
+    closeBtn.style.lineHeight = "1";
+    actions.appendChild(closeBtn);
     head.appendChild(title);
     head.appendChild(actions);
-    var pre = document.createElement("pre");
-    pre.setAttribute("data-qaw-health-body", "1");
-    pre.style.cssText = "margin:0;padding:9px 10px;white-space:pre-wrap;overflow:auto;max-height:calc(55vh - 38px);line-height:1.35;";
+    var content = document.createElement("div");
+    content.setAttribute("data-qaw-health-content", "1");
+    content.style.cssText = "padding:9px 10px;overflow:auto;max-height:calc(55vh - 38px);line-height:1.35;";
+    var metrics = document.createElement("pre");
+    metrics.setAttribute("data-qaw-health-metrics", "1");
+    metrics.style.cssText = "margin:0;white-space:pre-wrap;";
+    var controls = document.createElement("div");
+    controls.style.cssText = "display:flex;justify-content:flex-end;gap:6px;margin:8px 0 10px;";
+    controls.appendChild(tinyBtn("Highlight updates 30s", startHealthHighlight)).setAttribute("data-qaw-health-highlight", "1");
+    var logsHead = document.createElement("div");
+    logsHead.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:8px;margin:8px 0 5px;padding-top:8px;border-top:1px solid #1e293b;color:#94a3b8;";
+    var logsTitle = document.createElement("strong");
+    logsTitle.textContent = "Recent events";
+    logsTitle.style.cssText = "font-size:11px;color:#94a3b8;";
+    logsHead.appendChild(logsTitle);
+    logsHead.appendChild(tinyBtn("Copy logs", function() {
+      fallbackCopy(healthLog.join("\n"));
+    }));
+    var logs = document.createElement("pre");
+    logs.setAttribute("data-qaw-health-logs", "1");
+    logs.style.cssText = "margin:0;white-space:pre-wrap;color:#cbd5e1;";
+    content.appendChild(metrics);
+    content.appendChild(controls);
+    content.appendChild(logsHead);
+    content.appendChild(logs);
     healthHud.appendChild(head);
-    healthHud.appendChild(pre);
+    healthHud.appendChild(content);
     document.body.appendChild(healthHud);
     healthDragCleanup = makeHealthHudDraggable(head);
     document.addEventListener("focusin", onHealthFocusIn, true);
     document.addEventListener("focusout", onHealthFocusOut, true);
     healthMutationObserver = new MutationObserver(function(records) {
       healthMutationCount += records.length;
+      healthQueueHighlights(records);
       var ae = document.activeElement;
       if (ae && ae !== document.body && !document.documentElement.contains(ae)) {
         healthAddLog("active element removed: " + describeEl(ae));
       }
     });
-    healthMutationObserver.observe(document.documentElement, { childList: true, subtree: true });
+    refreshHealthObserver();
     var proto = HTMLElement.prototype;
     var oldFocus = proto.focus;
     var oldBlur = proto.blur;
@@ -548,6 +811,7 @@
     healthAddLog("focusout " + describeEl(e.target) + related);
   }
   function stopHealthHud() {
+    stopHealthHighlight();
     document.removeEventListener("focusin", onHealthFocusIn, true);
     document.removeEventListener("focusout", onHealthFocusOut, true);
     if (healthMutationObserver) {
@@ -2492,6 +2756,10 @@
       if (!_isPartialRun) _clearStaleProgressGlyphs();
     }
   }, true);
+  function _setStyleIfChanged(el, prop, value) {
+    if (!el || el.style[prop] === value) return;
+    el.style[prop] = value;
+  }
   function _updateLineChip() {
     if (!_lineChip) return;
     var ed = getMonacoEditor();
@@ -2499,13 +2767,13 @@
     var jumpPart = _lineChip.querySelector("[data-qaw-jump]");
     var menuPart = _lineChip.querySelector("[data-qaw-menu]");
     if (jumpPart) {
-      jumpPart.style.opacity = hasGlyph ? "1" : "0.4";
-      jumpPart.style.cursor = hasGlyph ? "pointer" : "default";
-      jumpPart.style.pointerEvents = hasGlyph ? "" : "none";
+      _setStyleIfChanged(jumpPart, "opacity", hasGlyph ? "1" : "0.4");
+      _setStyleIfChanged(jumpPart, "cursor", hasGlyph ? "pointer" : "default");
+      _setStyleIfChanged(jumpPart, "pointerEvents", hasGlyph ? "" : "none");
     }
     if (menuPart) {
-      menuPart.style.color = "#94a3b8";
-      menuPart.title = "Line navigation";
+      _setStyleIfChanged(menuPart, "color", "#94a3b8");
+      if (menuPart.title !== "Line navigation") menuPart.title = "Line navigation";
     }
   }
   function startPolling() {
