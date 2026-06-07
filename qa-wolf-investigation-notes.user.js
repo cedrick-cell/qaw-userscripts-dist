@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         QA Wolf Investigation Notes
 // @namespace    http://tampermonkey.net/
-// @version      1.634
+// @version      1.635
 // @description  Per-file investigation notes: quick links (new-tab opens, PoC textarea, client-wide notes), client/env chips, instant tooltips, run timing, shift sync, work mode, export, search. data-e2e investigation-* hooks.
 // @author       You
 // @match        https://app.qawolf.com/*
@@ -24017,14 +24017,22 @@ This won't delete the actual file.`)) return;
     nextBtn.type = "button";
     nextBtn.textContent = "\u203A";
     nextBtn.style.cssText = prevBtn.style.cssText;
-    var pickerWrap = document.createElement("label");
+    var pickerWrap = document.createElement("button");
+    pickerWrap.type = "button";
     pickerWrap.title = "Jump to date";
-    pickerWrap.style.cssText = "position:relative;width:28px;height:24px;border-radius:4px;border:1px solid #334155;background:none;color:#475569;display:inline-flex;align-items:center;justify-content:center;cursor:pointer;overflow:hidden;flex-shrink:0;";
+    pickerWrap.style.cssText = "width:28px;height:24px;border-radius:4px;border:1px solid #334155;background:none;color:#475569;display:inline-flex;align-items:center;justify-content:center;cursor:pointer;flex-shrink:0;padding:0;";
     pickerWrap.innerHTML = '<svg aria-hidden="true" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"></rect><path d="M16 2v4M8 2v4M3 10h18"></path></svg>';
     var dateInput = document.createElement("input");
     dateInput.type = "date";
-    dateInput.style.cssText = "position:absolute;inset:0;opacity:0;cursor:pointer;width:100%;height:100%;";
+    dateInput.style.cssText = "position:absolute;opacity:0;pointer-events:none;width:0;height:0;";
     pickerWrap.appendChild(dateInput);
+    pickerWrap.addEventListener("click", function() {
+      try {
+        dateInput.showPicker();
+      } catch (_) {
+        dateInput.click();
+      }
+    });
     dateRow.appendChild(prevBtn);
     dateRow.appendChild(dateText);
     dateRow.appendChild(nextBtn);
@@ -26717,7 +26725,7 @@ This won't delete the actual file.`)) return;
       } catch (e) {
       }
       try {
-        if ("1.634") return "1.634";
+        if ("1.635") return "1.635";
       } catch (e2) {
       }
       return "unknown";
@@ -29751,7 +29759,7 @@ This won't delete the actual file.`)) return;
     } catch (_) {
     }
     try {
-      if ("1.634") return "1.634";
+      if ("1.635") return "1.635";
     } catch (_) {
     }
     return "unknown";

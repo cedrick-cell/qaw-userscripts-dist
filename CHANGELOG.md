@@ -2,6 +2,24 @@
 
 Notable changes for the QA Wolf userscripts install channel.
 
+## Investigation Notes v1.635
+
+- Fixed calendar picker in the Work tab opening unreliably; the entire button now opens the date picker on the first click.
+
+## Investigation Notes v1.634
+
+![Daily Work timeline showing client swimlanes, combined heat row, and investigation shift markers](./assets/daily-work-swimlane.png)
+
+- **Daily Work tab rebuilt as a swimlane timeline.** Each client gets a horizontal track; activity windows are shown as colored segments. A combined heat row at the bottom shows overlap intensity across clients.
+- **Smart gap handling.** Sessions separated by more than 1 hour split into independent segments with a gap label. Short gaps ≤ 10 minutes within a session are bridged visually so fragmented activity reads as one continuous block.
+- **Investigation shift markers.** Green/red vertical lines mark shift start and end, drawn from shift history so past days show markers too.
+- **Responsive and scrollable.** Track width adapts to panel width; client names stay pinned while the chart body scrolls on narrow panels. Hover crosshair shows a time label that escapes panel clipping.
+- Bug fix: case modal notes no longer disappear when closing with Escape or clicking the backdrop.
+- Bug fix: investigation shift chip now shows a depleting fill bar — starts full green, drains as time passes, turns orange/red near the end.
+- Bug fix: `expect(locator).toBeHidden() failed` log rows now parse correctly instead of producing `<<hidden|expected>>`.
+- Bug fix: clipboard always gets raw log text when using Copy on a run log row; parsed text is inserted into the note on click.
+- Bug fix: helper files now appear in the Discover tab under a "Helper" filter.
+
 ## Investigation Notes v1.620
 
 - Coverage plan table: row checkboxes, bulk column toggles, inline flow names, tracker/Loom/attach header actions, simple vs table checklist modes, and Mark as Done gated on all rows.
