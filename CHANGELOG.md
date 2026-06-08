@@ -2,6 +2,10 @@
 
 Notable changes for the QA Wolf userscripts install channel.
 
+## Investigation Notes v1.657
+
+- Various improvements and bug fixes.
+
 ## Investigation Notes v1.635
 
 - Fixed calendar picker in the Work tab opening unreliably; the entire button now opens the date picker on the first click.

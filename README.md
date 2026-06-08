@@ -33,4 +33,4 @@ Tampermonkey checks for userscript updates automatically. To check manually:
 - If Investigation Notes is open, use **Settings → Notes → Copy diagnostics** and send the copied text with your bug report.
 - Source, issues, and pull requests live in the private `qaw-userscripts` repo.
 
-**Release schedule:** dist updates publish around **midnight Eastern Time** after merges to `main`. Add the **`hotfix`** label to a PR before merge for immediate publish after merge.
+**Release schedule:** dist updates publish nightly around 06:00 UTC. Add the **`hotfix`** label to a PR before merge for an immediate publish after merge.
