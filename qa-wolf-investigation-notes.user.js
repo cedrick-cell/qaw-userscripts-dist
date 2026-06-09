@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         QA Wolf Investigation Notes
 // @namespace    http://tampermonkey.net/
-// @version      1.657
+// @version      1.659
 // @description  Per-file investigation notes: quick links (new-tab opens, PoC textarea, client-wide notes), client/env chips, instant tooltips, run timing, shift sync, work mode, export, search. data-e2e investigation-* hooks.
 // @author       You
 // @match        https://app.qawolf.com/*
@@ -25089,6 +25089,10 @@ This won't delete the actual file.`)) return;
   }
   function renderSwimlane(parent, summaries, invStart, invEnd, availW) {
     ensureSwimlaneScrollCss();
+    if (_swimlaneTimeLbl) {
+      _swimlaneTimeLbl.remove();
+      _swimlaneTimeLbl = null;
+    }
     parent.innerHTML = "";
     parent.style.display = "flex";
     parent.style.alignItems = "flex-start";
@@ -25237,13 +25241,7 @@ This won't delete the actual file.`)) return;
       crosshair.style.display = "none";
       timeLbl.style.display = "none";
     });
-    var timeLblCleanupObserver = new MutationObserver(function() {
-      if (!document.body.contains(tracksArea)) {
-        timeLbl.remove();
-        timeLblCleanupObserver.disconnect();
-      }
-    });
-    timeLblCleanupObserver.observe(document.body, { childList: true, subtree: true });
+    _swimlaneTimeLbl = timeLbl;
     scrollWrap.appendChild(tracksArea);
     parent.appendChild(scrollWrap);
   }
@@ -25310,6 +25308,10 @@ This won't delete the actual file.`)) return;
       nextBtn.disabled = selectedDay >= todayKey;
       nextBtn.style.opacity = selectedDay >= todayKey ? "0.3" : "1";
       var rows = summariesForDay(selectedDay);
+      if (_swimlaneTimeLbl) {
+        _swimlaneTimeLbl.remove();
+        _swimlaneTimeLbl = null;
+      }
       tlSection.innerHTML = "";
       bkList.innerHTML = "";
       if (!rows.length) {
@@ -25402,7 +25404,7 @@ This won't delete the actual file.`)) return;
     }
     renderSelectedDay();
   }
-  var DAILY_WORK_RETENTION_DAYS, DAILY_WORK_POLL_MS, DAILY_WORK_BLOCK_MINUTES, LEGACY_DAILY_WORK_BLOCK_MINUTES, DAILY_WORK_BLOCK_MINUTES_KEY, SWIMLANE_COLORS, SWIMLANE_HEAT, SWIMLANE_GAP_THRESH, SWIMLANE_BRIDGE_THRESH, SWIMLANE_MIN_PPB, SWIMLANE_MAX_PPB, SWIMLANE_NAME_W, SWIMLANE_ROW_H, SWIMLANE_ROW_GAP, SWIMLANE_GAP_COL_W, SWIMLANE_TIME_H;
+  var DAILY_WORK_RETENTION_DAYS, DAILY_WORK_POLL_MS, DAILY_WORK_BLOCK_MINUTES, LEGACY_DAILY_WORK_BLOCK_MINUTES, DAILY_WORK_BLOCK_MINUTES_KEY, _swimlaneTimeLbl, SWIMLANE_COLORS, SWIMLANE_HEAT, SWIMLANE_GAP_THRESH, SWIMLANE_BRIDGE_THRESH, SWIMLANE_MIN_PPB, SWIMLANE_MAX_PPB, SWIMLANE_NAME_W, SWIMLANE_ROW_H, SWIMLANE_ROW_GAP, SWIMLANE_GAP_COL_W, SWIMLANE_TIME_H;
   var init_daily_work = __esm({
     "src/notes/40-daily-work.ts"() {
       "use strict";
@@ -25414,6 +25416,7 @@ This won't delete the actual file.`)) return;
       DAILY_WORK_BLOCK_MINUTES = 5;
       LEGACY_DAILY_WORK_BLOCK_MINUTES = 15;
       DAILY_WORK_BLOCK_MINUTES_KEY = DAILY_CLIENT_WORK_KEY + "_blockMinutes";
+      _swimlaneTimeLbl = null;
       SWIMLANE_COLORS = [
         "#3b82f6",
         "#a855f7",
@@ -27983,7 +27986,7 @@ This won't delete the actual file.`)) return;
       } catch (e) {
       }
       try {
-        if ("1.657") return "1.657";
+        if ("1.659") return "1.659";
       } catch (e2) {
       }
       return "unknown";
@@ -29661,6 +29664,19 @@ This won't delete the actual file.`)) return;
   // src/notes/20-publish-intercept.ts
   init_context();
   init_history();
+
+  // src/notes/perf-stats.ts
+  var PERF_KEY = "_qawNotesPerfStats";
+  function incObsStat(name) {
+    try {
+      var w = window;
+      if (!w[PERF_KEY]) w[PERF_KEY] = {};
+      w[PERF_KEY][name] = (w[PERF_KEY][name] || 0) + 1;
+    } catch (_) {
+    }
+  }
+
+  // src/notes/20-publish-intercept.ts
   var LOG = "[QAW Publish]";
   function lp(...parts) {
     console.info(LOG, ...parts);
@@ -29855,6 +29871,7 @@ This won't delete the actual file.`)) return;
     var existing = document.querySelector(PUBLISH_BTN_SEL);
     if (existing) wirePublishBtn(existing);
     var mo = new MutationObserver(function() {
+      incObsStat("publishInterceptObserver");
       var btn3 = document.querySelector(PUBLISH_BTN_SEL);
       if (btn3 && !btn3.getAttribute("data-qaw-publish-wired")) wirePublishBtn(btn3);
     });
@@ -30593,6 +30610,7 @@ This won't delete the actual file.`)) return;
   function initCommitContext() {
     ccxInjectButtons();
     var mo = new MutationObserver(function() {
+      incObsStat("commitCtxObserver");
       var hasPub = !!document.querySelector(CCX_PUBLISH_BTN_SEL);
       var hasGen = !!document.querySelector("[" + CCX_GEN_BTN_ATTR + "]");
       if (hasPub && !hasGen) ccxInjectButtons();
@@ -30913,7 +30931,10 @@ This won't delete the actual file.`)) return;
   function initBugReport() {
     if (state.bugReportFooterMo || state.bugReportStoragePoll) return;
     brInjectIntoFooter();
-    state.bugReportFooterMo = new MutationObserver(brInjectIntoFooter);
+    state.bugReportFooterMo = new MutationObserver(function() {
+      incObsStat("bugReportObserver");
+      brInjectIntoFooter();
+    });
     state.bugReportFooterMo.observe(document.body, { childList: true, subtree: true });
     window.addEventListener("storage", brOnStorageRefresh);
     state.bugReportStoragePoll = window.setInterval(function() {
@@ -31091,7 +31112,7 @@ This won't delete the actual file.`)) return;
     } catch (_) {
     }
     try {
-      if ("1.657") return "1.657";
+      if ("1.659") return "1.659";
     } catch (_) {
     }
     return "unknown";
@@ -31324,7 +31345,10 @@ This won't delete the actual file.`)) return;
     ensureCss2();
     scheduleScan();
     if (!logObserver) {
-      logObserver = new MutationObserver(scheduleScan);
+      logObserver = new MutationObserver(function() {
+        incObsStat("logObserver");
+        scheduleScan();
+      });
       logObserver.observe(document.body, { childList: true, subtree: true });
     }
     document.addEventListener("click", onDocumentClick, true);

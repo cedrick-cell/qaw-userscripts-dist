@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         QA Wolf Shortcuts
 // @namespace    http://tampermonkey.net/
-// @version      4.181
+// @version      4.183
 // @description  Keyboard shortcut hints for app.qawolf.com. Header nav shortcuts live in JSON key __global__ (editable). File tabs: Shift+right-click = Close other tabs. Violet badges = Meta chord. task-wolf.com: Select All button for Bug Revalidation Tasks.
 // @author       You
 // @match        https://app.qawolf.com/*
@@ -633,8 +633,25 @@
     if (highlightBtn) {
       highlightBtn.textContent = healthHighlightMode ? "Stop highlighting" : "Highlight updates 30s";
     }
-    if (metrics) metrics.textContent = "active: " + describeEl(activeEl) + (activeGone ? " (REMOVED)" : "") + "\nmutations/s: " + healthMutationCount + "\noverlays: " + counts.overlays + "  badges: " + counts.shortcutBadges + "\nnotes: " + counts.notePanels + "  note editors: " + counts.noteEditors + "\ndropdowns: " + counts.dropdowns + "\nsafe mode: " + (isSafeModeEnabled() ? "ON" : "off");
-    if (logs) logs.textContent = healthLog.slice(Math.max(0, healthLog.length - 14)).join("\n");
+    var ps = window._qawNotesPerfStats || {};
+    var obsLog = ps.logObserver || 0;
+    var obsBug = ps.bugReportObserver || 0;
+    var obsCommit = ps.commitCtxObserver || 0;
+    var obsPublish = ps.publishInterceptObserver || 0;
+    try {
+      window._qawNotesPerfStats = {};
+    } catch (_) {
+    }
+    function esc(s) {
+      return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+    }
+    function row(label, val, dim) {
+      return '<span style="color:#64748b;">' + label + '</span><span style="color:' + (dim ? "#475569" : "#e2e8f0") + ';text-align:right;">' + val + "</span>";
+    }
+    var CARD = "background:#0f172a;border-radius:6px;padding:6px 8px;display:grid;gap:2px 12px;";
+    if (metrics) metrics.innerHTML = // active element
+    '<div style="color:#475569;font-size:10px;line-height:1.35;">active: <span style="color:#94a3b8;">' + esc(describeEl(activeEl) + (activeGone ? " (REMOVED)" : "")) + '</span></div><div style="' + CARD + 'grid-template-columns:1fr auto;">' + row("mutations/s", healthMutationCount) + '<span style="grid-column:1/-1;border-top:1px solid #1e293b;margin:3px 0;"></span><span style="color:#64748b;">notes obs/s</span><span></span>' + row("  log", obsLog, obsLog === 0) + row("  bug-rpt", obsBug, obsBug === 0) + row("  commit", obsCommit, obsCommit === 0) + row("  publish", obsPublish, obsPublish === 0) + '</div><div style="' + CARD + 'grid-template-columns:1fr auto 1fr auto;">' + row("overlays", counts.overlays) + row("badges", counts.shortcutBadges) + row("panels", counts.notePanels) + row("editors", counts.noteEditors) + row("dropdowns", counts.dropdowns) + '<span></span></div><div style="color:#475569;">safe mode: <span style="color:' + (isSafeModeEnabled() ? "#f87171" : "#475569") + ';">' + (isSafeModeEnabled() ? "ON" : "off") + "</span></div>";
+    if (logs) logs.textContent = healthLog.slice(Math.max(0, healthLog.length - 8)).join("\n");
     healthMutationCount = 0;
   }
   function clampHealthHud() {
@@ -740,9 +757,9 @@
     var content = document.createElement("div");
     content.setAttribute("data-qaw-health-content", "1");
     content.style.cssText = "padding:9px 10px;overflow:auto;max-height:calc(55vh - 38px);line-height:1.35;";
-    var metrics = document.createElement("pre");
+    var metrics = document.createElement("div");
     metrics.setAttribute("data-qaw-health-metrics", "1");
-    metrics.style.cssText = "margin:0;white-space:pre-wrap;";
+    metrics.style.cssText = "display:flex;flex-direction:column;gap:6px;";
     var controls = document.createElement("div");
     controls.style.cssText = "display:flex;justify-content:flex-end;gap:6px;margin:8px 0 10px;";
     controls.appendChild(tinyBtn("Highlight updates 30s", startHealthHighlight)).setAttribute("data-qaw-health-highlight", "1");
@@ -757,7 +774,7 @@
     }));
     var logs = document.createElement("pre");
     logs.setAttribute("data-qaw-health-logs", "1");
-    logs.style.cssText = "margin:0;white-space:pre-wrap;color:#cbd5e1;";
+    logs.style.cssText = "margin:0;white-space:pre-wrap;color:#cbd5e1;max-height:90px;overflow-y:auto;";
     content.appendChild(metrics);
     content.appendChild(controls);
     content.appendChild(logsHead);
