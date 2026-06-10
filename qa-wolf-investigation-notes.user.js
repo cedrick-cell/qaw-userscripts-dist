@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         QA Wolf Investigation Notes
 // @namespace    http://tampermonkey.net/
-// @version      1.659
+// @version      1.663
 // @description  Per-file investigation notes: quick links (new-tab opens, PoC textarea, client-wide notes), client/env chips, instant tooltips, run timing, shift sync, work mode, export, search. data-e2e investigation-* hooks.
 // @author       You
 // @match        https://app.qawolf.com/*
@@ -15097,6 +15097,29 @@
         } : void 0);
       });
       chipsRow1.appendChild(timeChip);
+      (function() {
+        var slackUrls = collectSlackMessageUrls(String(b.text || ""));
+        if (!slackUrls.length) return;
+        var slackChip = document.createElement("button");
+        slackChip.type = "button";
+        var slackChipLabel = slackUrls.length === 1 ? "View Slack message" : "View " + slackUrls.length + " Slack messages";
+        slackChip.title = slackChipLabel;
+        slackChip.setAttribute("aria-label", slackChipLabel);
+        slackChip.style.cssText = "display:inline-flex;align-items:center;padding:2px 5px;border-radius:999px;border:1px solid #334155;background:#0f172a;color:#f472b6;cursor:pointer;flex-shrink:0;transition:border-color .1s;";
+        slackChip.innerHTML = '<svg viewBox="0 0 24 24" width="11" height="11" fill="currentColor" aria-hidden="true"><path d="M5.042 15.165a2.528 2.528 0 0 1-2.52 2.523A2.528 2.528 0 0 1 0 15.165a2.527 2.527 0 0 1 2.522-2.52h2.52v2.52zM6.313 15.165a2.527 2.527 0 0 1 2.521-2.52 2.527 2.527 0 0 1 2.521 2.52v6.313A2.528 2.528 0 0 1 8.834 24a2.528 2.528 0 0 1-2.521-2.522v-6.313zM8.834 5.042a2.528 2.528 0 0 1-2.521-2.52A2.528 2.528 0 0 1 8.834 0a2.528 2.528 0 0 1 2.521 2.522v2.52H8.834zM8.834 6.313a2.528 2.528 0 0 1 2.521 2.521 2.528 2.528 0 0 1-2.521 2.521H2.522A2.528 2.528 0 0 1 0 8.834a2.528 2.528 0 0 1 2.522-2.521h6.312zM18.956 8.834a2.528 2.528 0 0 1 2.522-2.521A2.528 2.528 0 0 1 24 8.834a2.528 2.528 0 0 1-2.522 2.521h-2.522V8.834zM17.688 8.834a2.528 2.528 0 0 1-2.523 2.521 2.527 2.527 0 0 1-2.52-2.521V2.522A2.527 2.527 0 0 1 15.165 0a2.528 2.528 0 0 1 2.523 2.522v6.312zM15.165 18.956a2.528 2.528 0 0 1 2.523 2.522A2.528 2.528 0 0 1 15.165 24a2.527 2.527 0 0 1-2.52-2.522v-2.522h2.52zM15.165 17.688a2.527 2.527 0 0 1-2.52-2.523 2.526 2.526 0 0 1 2.52-2.52h6.313A2.527 2.527 0 0 1 24 15.165a2.528 2.528 0 0 1-2.522 2.523h-6.313z"/></svg>';
+        slackChip.addEventListener("mouseenter", function() {
+          slackChip.style.borderColor = "#f472b6";
+        });
+        slackChip.addEventListener("mouseleave", function() {
+          slackChip.style.borderColor = "#334155";
+        });
+        slackChip.addEventListener("click", function(e) {
+          e.preventDefault();
+          e.stopPropagation();
+          openSlackChipDropdown(slackChip, slackUrls);
+        });
+        chipsRow1.appendChild(slackChip);
+      })();
       var cardReminder = getCardScheduledReminder(b);
       if (cardReminder) {
         var remChip = document.createElement("button");
@@ -17140,6 +17163,45 @@
     if (!raw || raw === "Slack") return "Slack";
     return raw.charAt(0).toUpperCase() + raw.slice(1);
   }
+  function collectSlackMessageUrls(text) {
+    var out = [];
+    var re = /https?:\/\/[^\s<>"]+/g;
+    var m;
+    while ((m = re.exec(text)) !== null) {
+      var url = m[0].replace(/[.,;:!?)"'\]]+$/, "");
+      if (parseSlackMessageUrl(url)) out.push(url);
+    }
+    return out;
+  }
+  function openSlackChipDropdown(anchor, urls) {
+    document.querySelectorAll("[" + SLACK_CHIP_DROPDOWN_ATTR + "]").forEach(function(el) {
+      el.remove();
+    });
+    var drop = document.createElement("div");
+    drop.setAttribute(SLACK_CHIP_DROPDOWN_ATTR, "1");
+    drop.style.cssText = "position:fixed;z-index:2147483020;background:#0f172a;border:1px solid #334155;border-radius:8px;padding:6px;display:flex;flex-direction:column;gap:6px;max-width:340px;max-height:60vh;overflow-y:auto;box-shadow:0 10px 32px rgba(0,0,0,0.55);";
+    urls.forEach(function(url) {
+      var card = makeSlackMessagePreview(url);
+      if (card) drop.appendChild(card);
+    });
+    if (!drop.children.length) return;
+    document.body.appendChild(drop);
+    var rect = anchor.getBoundingClientRect();
+    var x = Math.min(rect.left, window.innerWidth - 356);
+    var y = rect.bottom + 4;
+    if (y + Math.min(drop.scrollHeight, window.innerHeight * 0.6) > window.innerHeight - 8) {
+      y = Math.max(8, rect.top - Math.min(drop.scrollHeight + 12, window.innerHeight * 0.6));
+    }
+    drop.style.left = Math.max(8, x) + "px";
+    drop.style.top = y + "px";
+    setTimeout(function() {
+      document.addEventListener("mousedown", function onOut(ev) {
+        if (drop.contains(ev.target)) return;
+        drop.remove();
+        document.removeEventListener("mousedown", onOut, true);
+      }, true);
+    }, 0);
+  }
   async function slackApiGet(token, method, params) {
     var qs = Object.keys(params).map(function(k) {
       return encodeURIComponent(k) + "=" + encodeURIComponent(params[k]);
@@ -17355,7 +17417,9 @@
       "color:#e2e8f0",
       "max-width:100%",
       "box-sizing:border-box",
-      "font-size:12px"
+      "font-size:13px",
+      "font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif",
+      "cursor:default"
     ].join(";");
     var headerRow = document.createElement("div");
     headerRow.style.cssText = "display:flex;gap:8px;align-items:center;";
@@ -18151,7 +18215,7 @@
       container.appendChild(chip);
     });
   }
-  var CASE_STATUS_OPTIONS, lineContextCloseTimer, lineContextOutsideHandler, SLACK_ICON_SVG, _slackPreviewCache, _slackRenderGroups, INLINE_LINE_REF_RE, PARSER_BADGE_RE;
+  var CASE_STATUS_OPTIONS, lineContextCloseTimer, lineContextOutsideHandler, SLACK_CHIP_DROPDOWN_ATTR, SLACK_ICON_SVG, _slackPreviewCache, _slackRenderGroups, INLINE_LINE_REF_RE, PARSER_BADGE_RE;
   var init_cards = __esm({
     "src/notes/05-cards.ts"() {
       "use strict";
@@ -18182,6 +18246,7 @@
       CASE_STATUS_OPTIONS = ["open", "resolved"];
       lineContextCloseTimer = null;
       lineContextOutsideHandler = null;
+      SLACK_CHIP_DROPDOWN_ATTR = "data-qaw-slack-chip-dropdown";
       SLACK_ICON_SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" style="color:#f472b6"><path d="M5.042 15.165a2.528 2.528 0 0 1-2.52 2.523A2.528 2.528 0 0 1 0 15.165a2.527 2.527 0 0 1 2.522-2.52h2.52v2.52zM6.313 15.165a2.527 2.527 0 0 1 2.521-2.52 2.527 2.527 0 0 1 2.521 2.52v6.313A2.528 2.528 0 0 1 8.834 24a2.528 2.528 0 0 1-2.521-2.522v-6.313zM8.834 5.042a2.528 2.528 0 0 1-2.521-2.52A2.528 2.528 0 0 1 8.834 0a2.528 2.528 0 0 1 2.521 2.522v2.52H8.834zM8.834 6.313a2.528 2.528 0 0 1 2.521 2.521 2.528 2.528 0 0 1-2.521 2.521H2.522A2.528 2.528 0 0 1 0 8.834a2.528 2.528 0 0 1 2.522-2.521h6.312zM18.956 8.834a2.528 2.528 0 0 1 2.522-2.521A2.528 2.528 0 0 1 24 8.834a2.528 2.528 0 0 1-2.522 2.521h-2.522V8.834zM17.688 8.834a2.528 2.528 0 0 1-2.523 2.521 2.527 2.527 0 0 1-2.52-2.521V2.522A2.527 2.527 0 0 1 15.165 0a2.528 2.528 0 0 1 2.523 2.522v6.312zM15.165 18.956a2.528 2.528 0 0 1 2.523 2.522A2.528 2.528 0 0 1 15.165 24a2.527 2.527 0 0 1-2.52-2.522v-2.522h2.52zM15.165 17.688a2.527 2.527 0 0 1-2.52-2.523 2.526 2.526 0 0 1 2.52-2.52h6.313A2.527 2.527 0 0 1 24 15.165a2.528 2.528 0 0 1-2.522 2.523h-6.313z"/></svg>';
       _slackPreviewCache = /* @__PURE__ */ new Map();
       _slackRenderGroups = {};
@@ -27986,7 +28051,7 @@ This won't delete the actual file.`)) return;
       } catch (e) {
       }
       try {
-        if ("1.659") return "1.659";
+        if ("1.663") return "1.663";
       } catch (e2) {
       }
       return "unknown";
@@ -30978,7 +31043,7 @@ This won't delete the actual file.`)) return;
     clone.querySelectorAll("[data-qaw-run-log-ui]").forEach(function(el) {
       el.remove();
     });
-    return cleanLogText(clone.innerText || clone.textContent || "");
+    return cleanLogText(clone.textContent || clone.innerText || "");
   }
   function shouldSkipRow(el, text) {
     var isKnownLogRow = isQawVirtualizedLogRow(el);
@@ -30997,7 +31062,6 @@ This won't delete the actual file.`)) return;
     var fallback = rowText(fallbackRow);
     if (!selectedLogRows.size) return fallback ? [fallback] : [];
     var out = Array.from(selectedLogRows).filter(Boolean);
-    if (out.indexOf(fallback) === -1 && selectedLogRows.has(fallback)) out.push(fallback);
     return out.length ? out : fallback ? [fallback] : [];
   }
   function fallbackCopyText(text) {
@@ -31112,7 +31176,7 @@ This won't delete the actual file.`)) return;
     } catch (_) {
     }
     try {
-      if ("1.659") return "1.659";
+      if ("1.663") return "1.663";
     } catch (_) {
     }
     return "unknown";
@@ -31251,6 +31315,22 @@ This won't delete the actual file.`)) return;
       if (!isQawVirtualizedLogRow(el) && !isRunLogText(txt)) continue;
       injectRow(el);
     }
+    if (selectedLogRows.size > 0) {
+      var liveChecked = /* @__PURE__ */ new Set();
+      document.querySelectorAll("[" + LOG_CHECK_ATTR + "]").forEach(function(el2) {
+        var cb = el2;
+        if (!cb.checked) return;
+        var row2 = cb.closest("[" + LOG_ROW_ATTR + "]");
+        if (row2) {
+          var t = rowText(row2);
+          if (t) liveChecked.add(t);
+        }
+      });
+      selectedLogRows.forEach(function(t) {
+        if (!liveChecked.has(t)) selectedLogRows.delete(t);
+      });
+      if (selectedLogRows.size === 0) lastCheckedLogText = "";
+    }
   }
   function scheduleScan() {
     if (scanTimer) return;
@@ -31357,6 +31437,11 @@ This won't delete the actual file.`)) return;
       clearPendingNoteInsert();
       flashNotesHint("Dismissed run log note insert; copied text remains on clipboard", false);
     }, true);
+    window.addEventListener("popstate", function() {
+      selectedLogRows.clear();
+      lastCheckedLogText = "";
+      if (state.pendingRunLogCopy) clearPendingNoteInsert();
+    });
   }
 
   // src/notes/13-init.ts
