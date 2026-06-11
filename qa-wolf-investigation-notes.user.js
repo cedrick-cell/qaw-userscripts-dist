@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         QA Wolf Investigation Notes
 // @namespace    http://tampermonkey.net/
-// @version      1.663
+// @version      1.664
 // @description  Per-file investigation notes: quick links (new-tab opens, PoC textarea, client-wide notes), client/env chips, instant tooltips, run timing, shift sync, work mode, export, search. data-e2e investigation-* hooks.
 // @author       You
 // @match        https://app.qawolf.com/*
@@ -28051,7 +28051,7 @@ This won't delete the actual file.`)) return;
       } catch (e) {
       }
       try {
-        if ("1.663") return "1.663";
+        if ("1.664") return "1.664";
       } catch (e2) {
       }
       return "unknown";
@@ -31176,7 +31176,7 @@ This won't delete the actual file.`)) return;
     } catch (_) {
     }
     try {
-      if ("1.663") return "1.663";
+      if ("1.664") return "1.664";
     } catch (_) {
     }
     return "unknown";
@@ -31302,7 +31302,7 @@ This won't delete the actual file.`)) return;
   function scanLogRows() {
     scanTimer = null;
     var knownRows = Array.from(document.querySelectorAll('[data-e2e="virtualized-log-item"]'));
-    var fallbackRows = Array.from(document.querySelectorAll('div, li, [role="row"], [data-index]'));
+    var fallbackRows = Array.from(document.querySelectorAll('[role="row"], [data-index]'));
     var seen = /* @__PURE__ */ new Set();
     var all = knownRows.concat(fallbackRows).filter(function(el2) {
       if (seen.has(el2)) return false;
@@ -31311,8 +31311,12 @@ This won't delete the actual file.`)) return;
     });
     for (var i = 0; i < all.length; i++) {
       var el = all[i];
-      var txt = (el.innerText || el.textContent || "").trim();
-      if (!isQawVirtualizedLogRow(el) && !isRunLogText(txt)) continue;
+      if (isQawVirtualizedLogRow(el)) {
+        injectRow(el);
+        continue;
+      }
+      var txt = (el.textContent || "").trim();
+      if (txt.length < 20 || !isRunLogText(txt)) continue;
       injectRow(el);
     }
     if (selectedLogRows.size > 0) {
