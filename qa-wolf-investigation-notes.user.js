@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         QA Wolf Investigation Notes
 // @namespace    http://tampermonkey.net/
-// @version      1.664
+// @version      1.672
 // @description  Per-file investigation notes: quick links (new-tab opens, PoC textarea, client-wide notes), client/env chips, instant tooltips, run timing, shift sync, work mode, export, search. data-e2e investigation-* hooks.
 // @author       You
 // @match        https://app.qawolf.com/*
@@ -14947,18 +14947,21 @@
       var _logCount = _tsList ? _tsList.filter(function(e) {
         return e.log && e.log.trim();
       }).length : 0;
+      var isBugOrMaint = b.tag === "bug" || b.tag === "maintenance";
       var logsChip = document.createElement("button");
       logsChip.type = "button";
       logsChip.className = "qaw-chip-btn";
       logsChip.setAttribute("data-e2e", "investigation-notes-viewer-logs");
       logsChip.title = "View timestamps & logs";
-      logsChip.style.cssText = "display:inline-block;font-size:10px;font-weight:600;font-family:monospace;letter-spacing:0.04em;background:#0f172a;color:#94a3b8;padding:3px 10px;border-radius:999px;border:1px dashed #475569;cursor:pointer;";
+      logsChip.style.cssText = "display:inline-block;font-size:10px;font-weight:600;font-family:monospace;letter-spacing:0.04em;background:#0f172a;color:#94a3b8;padding:3px 10px;border-radius:999px;border:1px dashed #475569;" + (isBugOrMaint ? "cursor:default;" : "cursor:pointer;");
       logsChip.textContent = _logCount > 0 ? "Logs (" + _logCount + ")" : "+ Logs";
-      logsChip.addEventListener("click", function(e) {
-        e.preventDefault();
-        e.stopPropagation();
-        openBack();
-      });
+      if (!isBugOrMaint) {
+        logsChip.addEventListener("click", function(e) {
+          e.preventDefault();
+          e.stopPropagation();
+          openBack();
+        });
+      }
       chipsRow2.appendChild(logsChip);
       if (b.copiedFromBulletId) {
         var srcChip = document.createElement("button");
@@ -15087,15 +15090,17 @@
       timeChip.setAttribute("data-e2e", "investigation-notes-viewer-time");
       var carriesToToday = bulletIsFromPriorDay(b);
       timeChip.title = carriesToToday ? "Add / manage timestamps. + Add now carries this note to today." : "Add / manage timestamps";
-      timeChip.style.cssText = "display:inline-block;font-size:10px;font-weight:600;font-family:monospace;letter-spacing:0.04em;background:#1e1b4b;color:#c4b5fd;padding:3px 10px;border-radius:999px;border:1px solid #6366f1;";
+      timeChip.style.cssText = "display:inline-block;font-size:10px;font-weight:600;font-family:monospace;letter-spacing:0.04em;background:#1e1b4b;color:#c4b5fd;padding:3px 10px;border-radius:999px;border:1px solid #6366f1;" + (isBugOrMaint ? "cursor:default;" : "");
       timeChip.textContent = _latestTs ? formatBulletLoggedShort(_latestTs) + (_tsCount > 1 ? " \xD7" + _tsCount : "") : "+ time";
-      timeChip.addEventListener("click", function(e) {
-        e.preventDefault();
-        e.stopPropagation();
-        openTimeChipMenu(timeChip, b, persist, redraw, editKey, carriesToToday ? function() {
-          return carryBulletToToday(b);
-        } : void 0);
-      });
+      if (!isBugOrMaint) {
+        timeChip.addEventListener("click", function(e) {
+          e.preventDefault();
+          e.stopPropagation();
+          openTimeChipMenu(timeChip, b, persist, redraw, editKey, carriesToToday ? function() {
+            return carryBulletToToday(b);
+          } : void 0);
+        });
+      }
       chipsRow1.appendChild(timeChip);
       (function() {
         var slackUrls = collectSlackMessageUrls(String(b.text || ""));
@@ -16006,9 +16011,9 @@
       backTitle.textContent = "Timestamps & Logs";
       var backAddBtn = document.createElement("button");
       backAddBtn.type = "button";
-      backAddBtn.style.cssText = "background:none;border:1px solid #0369a1;color:#38bdf8;font-size:10px;cursor:pointer;padding:2px 8px;font-family:monospace;border-radius:999px;flex-shrink:0;";
+      backAddBtn.style.cssText = "background:none;border:1px solid #0369a1;color:#38bdf8;font-size:10px;padding:2px 8px;font-family:monospace;border-radius:999px;flex-shrink:0;" + (isBugOrMaint ? "display:none;" : "cursor:pointer;");
       backAddBtn.textContent = "+ Add now";
-      if (carriesToToday) backAddBtn.title = "Carry this note forward to today";
+      if (!isBugOrMaint && carriesToToday) backAddBtn.title = "Carry this note forward to today";
       backHdr.appendChild(backBtn);
       backHdr.appendChild(backTitle);
       backHdr.appendChild(backAddBtn);
@@ -16306,8 +16311,105 @@
         addRow.className = "qaw-add-note";
         addRow.setAttribute("data-e2e", "investigation-notes-add");
         addRow.setAttribute("data-qaw-add-note", "1");
-        addRow.textContent = "+ Add note";
-        addRow.addEventListener("click", function() {
+        addRow.style.cssText = "display:flex;align-items:center;padding:0;";
+        var _defTag = loadSettings().defaultNewNoteTag || null;
+        var _addPrimary = document.createElement("button");
+        _addPrimary.type = "button";
+        _addPrimary.textContent = "+ Add " + tagLabel(_defTag);
+        _addPrimary.style.cssText = "flex:1;background:none;border:none;cursor:pointer;color:#64748b;font-size:11px;font-family:monospace;text-align:center;padding:7px 4px;";
+        _addPrimary.addEventListener("mouseenter", function() {
+          _addPrimary.style.color = "#94a3b8";
+        });
+        _addPrimary.addEventListener("mouseleave", function() {
+          _addPrimary.style.color = "#64748b";
+        });
+        var _addArrow = document.createElement("button");
+        _addArrow.type = "button";
+        _addArrow.title = "Choose note type";
+        _addArrow.textContent = "\u25BE";
+        _addArrow.style.cssText = "background:none;border:none;border-left:1px solid #334155;cursor:pointer;color:#475569;font-size:10px;padding:7px 8px;line-height:1;font-family:monospace;";
+        _addArrow.addEventListener("mouseenter", function() {
+          _addArrow.style.color = "#94a3b8";
+        });
+        _addArrow.addEventListener("mouseleave", function() {
+          _addArrow.style.color = "#475569";
+        });
+        _addArrow.addEventListener("click", function(e) {
+          e.stopPropagation();
+          document.querySelectorAll("[data-qaw-add-note-drop]").forEach(function(el) {
+            el.remove();
+          });
+          var tags = [null, "flake", "locator", "bug", "maintenance", "helper", "unknown", "note"];
+          var drop = document.createElement("div");
+          drop.setAttribute("data-qaw-add-note-drop", "1");
+          drop.style.cssText = "position:fixed;background:#0f172a;border:1px solid #334155;border-radius:6px;padding:3px;min-width:130px;z-index:2147483647;box-shadow:0 4px 16px rgba(0,0,0,0.7);font-family:monospace;";
+          tags.forEach(function(t) {
+            var item = document.createElement("button");
+            item.type = "button";
+            var isActive = t === _defTag;
+            item.style.cssText = "display:block;width:100%;text-align:left;padding:5px 9px;border:none;border-radius:3px;cursor:pointer;font-size:11px;font-family:monospace;background:" + (isActive ? "#1e293b" : "transparent") + ";color:" + (isActive ? "#f8fafc" : "#cbd5e1") + ";";
+            item.textContent = tagLabel(t);
+            item.addEventListener("mouseenter", function() {
+              if (!isActive) item.style.background = "#1e293b";
+            });
+            item.addEventListener("mouseleave", function() {
+              if (!isActive) item.style.background = "transparent";
+            });
+            item.addEventListener("click", function(ev) {
+              ev.stopPropagation();
+              drop.remove();
+              document.removeEventListener("mousedown", onDropOutside, true);
+              var atBottom2 = isAtBottom();
+              var pendingRunLog2 = state.pendingRunLogCopy;
+              var newBullet2 = appendNewBullet(n);
+              newBullet2.tag = t;
+              if (t !== "helper") delete newBullet2.helperName;
+              if (onNewBullet) onNewBullet(newBullet2);
+              var failedLine2 = getFailedRunLineForNote(editKey);
+              if (failedLine2 != null) {
+                newBullet2.lineNo = failedLine2;
+                var ctx2 = captureLineContext(failedLine2);
+                if (ctx2) newBullet2.lineContext = ctx2;
+              }
+              var appliedRunLog2 = false;
+              var attachedTsId2 = "";
+              if (pendingRunLog2) {
+                var rlr2 = applyRunLogPayloadToBullet(newBullet2, pendingRunLog2);
+                appliedRunLog2 = rlr2.applied;
+                attachedTsId2 = rlr2.timestampId || "";
+                clearPendingRunLogCopyUi();
+              }
+              vs.collapsedDays[getDayKey((/* @__PURE__ */ new Date()).toISOString())] = false;
+              persist();
+              redraw({});
+              if (atBottom2) {
+                viewerEl.scrollTop = viewerEl.scrollHeight;
+              } else {
+                newNoteInd.style.display = "flex";
+              }
+              if (appliedRunLog2) {
+                flashNotesHint(pendingRunLog2 && pendingRunLog2.target === "body" ? "Created note with parsed context" : "Created note with raw logs", false);
+              }
+              recordHistoryEvent(editKey, { type: "timestamp_add", bulletId: newBullet2.id || "", bulletText: String(newBullet2.text || "").slice(0, 80), timestampId: attachedTsId2 || newBullet2.id || "" });
+            });
+            drop.appendChild(item);
+          });
+          document.body.appendChild(drop);
+          var ar = _addArrow.getBoundingClientRect();
+          drop.style.left = Math.max(8, Math.min(ar.left, window.innerWidth - 150)) + "px";
+          drop.style.top = ar.bottom + 4 + "px";
+          function onDropOutside(ev) {
+            if (drop.contains(ev.target)) return;
+            drop.remove();
+            document.removeEventListener("mousedown", onDropOutside, true);
+          }
+          setTimeout(function() {
+            document.addEventListener("mousedown", onDropOutside, true);
+          }, 0);
+        });
+        addRow.appendChild(_addPrimary);
+        addRow.appendChild(_addArrow);
+        _addPrimary.addEventListener("click", function() {
           var atBottom = isAtBottom();
           var pendingRunLog = state.pendingRunLogCopy;
           var newBullet = appendNewBullet(n);
@@ -20466,9 +20568,121 @@
       notesLabel.style.cssText = "padding:4px 12px 2px;font-size:9px;font-weight:600;letter-spacing:0.06em;color:#7c3aed;text-transform:uppercase;";
       notesLabel.textContent = "Notes";
       menu.appendChild(notesLabel);
+      var groups = [];
       noteBullets.forEach(function(b) {
-        var bi = allBullets.indexOf(b);
-        menu.appendChild(makeNoteRow(b, bi));
+        var key = String(b.text || "").trim();
+        var existing = groups.find(function(g) {
+          return g.text === key;
+        });
+        if (existing) {
+          existing.bullets.push({ b, bi: allBullets.indexOf(b) });
+        } else {
+          groups.push({ text: key, bullets: [{ b, bi: allBullets.indexOf(b) }] });
+        }
+      });
+      groups.forEach(function(group) {
+        if (group.bullets.length === 1) {
+          menu.appendChild(makeNoteRow(group.bullets[0].b, group.bullets[0].bi));
+          return;
+        }
+        var first = group.bullets[0];
+        var row2 = makeNoteRow(first.b, first.bi);
+        var arrow = row2.querySelector(".qaw-note-row-arrow");
+        if (arrow) {
+          arrow.textContent = "\xD7" + group.bullets.length;
+          arrow.style.cssText = "flex-shrink:0;font-size:10px;color:#a78bfa;font-family:monospace;font-weight:600;";
+        }
+        var _days = new Set(group.bullets.map(function(e) {
+          var ts = e.b.loggedAt || e.b.timestamps && e.b.timestamps[0] && e.b.timestamps[0].ts || "";
+          return ts ? getDayKey(ts) : "";
+        }));
+        var _multiDay = _days.size > 1;
+        row2.title = group.bullets.length + " occurrences \u2014 hover to see " + (_multiDay ? "dates" : "times");
+        var rowClone = row2.cloneNode(true);
+        rowClone.addEventListener("click", function(e) {
+          e.preventDefault();
+          e.stopPropagation();
+          dismissGutterMenu();
+          openDrawerAndHighlightBullet(first.bi);
+        });
+        rowClone.addEventListener("mouseover", function() {
+          rowClone.style.background = "#253859";
+        });
+        rowClone.addEventListener("mouseenter", function() {
+          if (gutterSubMenuTimer) {
+            clearTimeout(gutterSubMenuTimer);
+            gutterSubMenuTimer = null;
+          }
+          gutterSubMenuTimer = setTimeout(function() {
+            gutterSubMenuTimer = null;
+            dismissGutterSubMenu();
+            var sub = document.createElement("div");
+            gutterSubMenuEl = sub;
+            sub.style.cssText = [
+              "position:fixed",
+              "z-index:" + (Z_INV_MODAL + 1),
+              "background:#1e293b",
+              "border:1px solid #334155",
+              "border-radius:8px",
+              "box-shadow:0 4px 20px rgba(0,0,0,0.6)",
+              "overflow:hidden",
+              "min-width:160px",
+              'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif'
+            ].join(";");
+            var subHdr = document.createElement("div");
+            subHdr.style.cssText = "padding:5px 12px 4px;font-size:9px;font-weight:700;letter-spacing:0.08em;color:#64748b;text-transform:uppercase;";
+            subHdr.textContent = group.bullets.length + " occurrences";
+            sub.appendChild(subHdr);
+            sub.appendChild(Object.assign(document.createElement("div"), { style: "height:1px;background:#334155;" }));
+            var sorted = group.bullets.slice().sort(function(a, b) {
+              var ta = a.b.loggedAt || a.b.timestamps && a.b.timestamps[0] && a.b.timestamps[0].ts || "";
+              var tb = b.b.loggedAt || b.b.timestamps && b.b.timestamps[0] && b.b.timestamps[0].ts || "";
+              return new Date(tb).getTime() - new Date(ta).getTime();
+            });
+            sorted.forEach(function(entry) {
+              var ts = entry.b.loggedAt || entry.b.timestamps && entry.b.timestamps[0] && entry.b.timestamps[0].ts || "";
+              var timeStr = ts ? formatBulletLoggedShort(ts) : "?";
+              var dateLabel = _multiDay && ts ? formatDayLabel(getDayKey(ts)) + " \xB7 " + timeStr : timeStr;
+              var subRow = document.createElement("button");
+              subRow.type = "button";
+              subRow.style.cssText = "display:flex;align-items:center;gap:8px;width:100%;padding:7px 12px;background:none;border:none;text-align:left;cursor:pointer;font-size:12px;font-family:inherit;color:#e2e8f0;outline:none;";
+              subRow.textContent = dateLabel;
+              subRow.addEventListener("mouseover", function() {
+                subRow.style.background = "#253859";
+              });
+              subRow.addEventListener("mouseout", function() {
+                subRow.style.background = "none";
+              });
+              subRow.addEventListener("click", function(ev) {
+                ev.preventDefault();
+                ev.stopPropagation();
+                dismissGutterMenu();
+                openDrawerAndHighlightBullet(entry.bi);
+              });
+              sub.appendChild(subRow);
+            });
+            document.body.appendChild(sub);
+            var rr2 = rowClone.getBoundingClientRect();
+            var mx = gutterMenuEl ? gutterMenuEl.getBoundingClientRect() : rr2;
+            sub.style.left = mx.right + 4 + "px";
+            sub.style.top = Math.max(8, Math.min(rr2.top, window.innerHeight - sub.offsetHeight - 8)) + "px";
+            sub.addEventListener("mouseleave", function() {
+              dismissGutterSubMenu();
+            });
+          }, 150);
+        });
+        rowClone.addEventListener("mouseleave", function(e) {
+          var related = e.relatedTarget;
+          rowClone.style.background = "";
+          if (gutterSubMenuEl && related && gutterSubMenuEl.contains(related)) return;
+          if (gutterSubMenuTimer) {
+            clearTimeout(gutterSubMenuTimer);
+            gutterSubMenuTimer = null;
+          }
+          if (!gutterSubMenuEl) return;
+          dismissGutterSubMenu();
+        });
+        menu.appendChild(rowClone);
       });
       var noteDivider = document.createElement("div");
       noteDivider.style.cssText = "height:1px;background:#334155;margin:4px 0 0;";
@@ -21197,6 +21411,7 @@
       init_head();
       init_panel_shell();
       init_shift();
+      init_head();
       init_history();
       WATCH_LINE_TRIGGER_KEY = "_qawWatchLineTrigger";
       GUTTER_NOTE_TAGS = [
@@ -26692,6 +26907,7 @@ This won't delete the actual file.`)) return;
       }
     }
     if (!state.panelEl) return;
+    if (document.hidden) return;
     tryUpgradePanelFromBootstrap();
     flushProtectedPanelRenderIfReady(function(pendingKey) {
       applyStoreFromDiskMergedNotes();
@@ -27069,7 +27285,7 @@ This won't delete the actual file.`)) return;
       var label = btn3.querySelector("[data-qaw-tab-label]");
       if (label) label.style.display = active ? "inline" : "none";
     }
-    var notesSectionHtml = '<div data-qaw-notes-section style="margin-top:14px;border-top:1px solid #334155;padding-top:12px;display:flex;flex-direction:column;gap:6px;flex:1;min-height:0;"><div style="border-bottom:1px solid #1e293b;margin-bottom:2px;flex-shrink:0;overflow-x:auto;scrollbar-width:none;-ms-overflow-style:none;"><div style="display:flex;align-items:center;gap:0;width:max-content;min-width:365px;">' + tabBtnHtml("notes", "Notes", "investigation-panel-tab-notes", true) + tabBtnHtml("history", "History", "investigation-panel-tab-history", false) + tabBtnHtml("bugs", "Bugs", null, false) + tabBtnHtml("maintenance", "Maint", null, false) + tabBtnHtml("ai", "AI", null, false) + tabBtnHtml("cases", "Cases", null, false) + tabBtnHtml("work", "Work", null, false) + tabBtnHtml("map", "Helpers", null, false) + tabBtnHtml("cleaning", "Clean", null, false) + (showPlaygrounds ? tabBtnHtml("playgrounds", "Play", null, false) : "") + tabBtnHtml("settings", "Settings", "investigation-panel-tab-settings", false) + '</div></div><div data-qaw-tab-content="notes" style="flex:1;min-height:0;display:flex;flex-direction:column;gap:6px;"><div style="display:flex;align-items:center;gap:6px;"><span data-qaw-notes-syntax-info-wrap></span><button type="button" data-qaw-filter-favs data-e2e="investigation-filter-favs" style="' + FAV_BTN_STYLE + '">\u2606 Pinned</button><button type="button" data-qaw-watch-count-btn style="' + WATCH_BTN_STYLE + '">\u26A1 0 tracked</button></div><div data-qaw-notes-view-wrap data-e2e="investigation-notes-region" style="position:relative;flex:1;min-height:0;display:flex;flex-direction:column;"><div data-qaw-notes-viewer data-e2e="investigation-notes-viewer" tabindex="0" style="display:flex;flex-direction:column;flex:1;min-height:180px;overflow-y:auto;box-sizing:border-box;background:#0f172a;border:1px solid #475569;border-radius:8px;padding:10px 8px;cursor:text;outline:none;"></div><textarea data-qaw-raw data-e2e="investigation-notes-editor" wrap="soft" spellcheck="false" style="display:none;width:100%;flex:1;min-height:180px;resize:vertical;box-sizing:border-box;background:#0f172a;color:#e2e8f0;border:1px solid #475569;border-radius:8px;padding:8px;font-family:monospace;font-size:11px;line-height:1.45;white-space:pre-wrap;word-break:break-word;overflow-x:hidden;"></textarea></div><div data-qaw-raw-status data-e2e="investigation-notes-parse-status" style="font-size:10px;min-height:14px;line-height:1.3;flex-shrink:0;"></div></div><div data-qaw-tab-content="history" style="flex:1;min-height:0;overflow-y:auto;display:none;"><div data-qaw-history-toolbar style="padding:8px 8px 4px;display:flex;justify-content:flex-end;"></div><div data-qaw-history-list></div></div><div data-qaw-tab-content="settings" data-qaw-settings-view style="display:none;flex:1;min-height:0;"></div><div data-qaw-tab-content="cases" style="display:none;flex:1;min-height:0;overflow-y:auto;"></div><div data-qaw-tab-content="bugs" style="display:none;flex:1;min-height:0;overflow-y:auto;"></div><div data-qaw-tab-content="maintenance" style="display:none;flex:1;min-height:0;overflow-y:auto;"></div><div data-qaw-tab-content="work" style="display:none;flex:1;min-height:0;overflow-y:auto;"></div><div data-qaw-tab-content="map" style="display:none;flex:1;min-height:0;overflow-y:auto;flex-direction:column;padding:4px 0;"></div><div data-qaw-tab-content="ai" style="display:none;flex:1;min-height:0;overflow-y:auto;padding:12px 8px;"></div><div data-qaw-tab-content="cleaning" style="display:none;flex:1;min-height:0;overflow-y:auto;padding:4px 0;"></div>' + (showPlaygrounds ? '<div data-qaw-tab-content="playgrounds" style="display:none;flex:1;min-height:0;overflow:hidden;padding:0;"></div>' : "") + "</div>";
+    var notesSectionHtml = '<div data-qaw-notes-section style="margin-top:14px;border-top:1px solid #334155;padding-top:12px;display:flex;flex-direction:column;gap:6px;flex:1;min-height:0;"><div style="border-bottom:1px solid #1e293b;margin-bottom:2px;flex-shrink:0;overflow-x:auto;scrollbar-width:none;-ms-overflow-style:none;"><div style="display:flex;align-items:center;gap:0;width:max-content;min-width:365px;">' + tabBtnHtml("notes", "Notes", "investigation-panel-tab-notes", true) + tabBtnHtml("history", "History", "investigation-panel-tab-history", false) + tabBtnHtml("bugs", "Bugs", null, false) + tabBtnHtml("maintenance", "Maint", null, false) + tabBtnHtml("ai", "AI", null, false) + tabBtnHtml("cases", "Cases", null, false) + tabBtnHtml("work", "Work", null, false) + tabBtnHtml("map", "Helpers", null, false) + tabBtnHtml("cleaning", "Clean", null, false) + (showPlaygrounds ? tabBtnHtml("playgrounds", "Play", null, false) : "") + tabBtnHtml("settings", "Settings", "investigation-panel-tab-settings", false) + '</div></div><div data-qaw-tab-content="notes" style="flex:1;min-height:0;display:flex;flex-direction:column;gap:6px;"><div style="display:flex;align-items:center;gap:6px;"><span data-qaw-notes-syntax-info-wrap></span><button type="button" data-qaw-filter-favs data-e2e="investigation-filter-favs" style="' + FAV_BTN_STYLE + '">\u2606 Pinned</button><button type="button" data-qaw-watch-count-btn style="' + WATCH_BTN_STYLE + '">\u26A1 0 tracked</button></div><div data-qaw-notes-view-wrap data-e2e="investigation-notes-region" style="position:relative;flex:1;min-height:0;display:flex;flex-direction:column;"><div data-qaw-notes-viewer data-e2e="investigation-notes-viewer" tabindex="0" style="display:flex;flex-direction:column;flex:1;min-height:180px;overflow-y:auto;box-sizing:border-box;background:#0f172a;border:1px solid #475569;border-radius:8px;padding:10px 8px;cursor:default;outline:none;"></div><textarea data-qaw-raw data-e2e="investigation-notes-editor" wrap="soft" spellcheck="false" style="display:none;width:100%;flex:1;min-height:180px;resize:vertical;box-sizing:border-box;background:#0f172a;color:#e2e8f0;border:1px solid #475569;border-radius:8px;padding:8px;font-family:monospace;font-size:11px;line-height:1.45;white-space:pre-wrap;word-break:break-word;overflow-x:hidden;"></textarea></div><div data-qaw-raw-status data-e2e="investigation-notes-parse-status" style="font-size:10px;min-height:14px;line-height:1.3;flex-shrink:0;"></div></div><div data-qaw-tab-content="history" style="flex:1;min-height:0;overflow-y:auto;display:none;"><div data-qaw-history-toolbar style="padding:8px 8px 4px;display:flex;justify-content:flex-end;"></div><div data-qaw-history-list></div></div><div data-qaw-tab-content="settings" data-qaw-settings-view style="display:none;flex:1;min-height:0;"></div><div data-qaw-tab-content="cases" style="display:none;flex:1;min-height:0;overflow-y:auto;"></div><div data-qaw-tab-content="bugs" style="display:none;flex:1;min-height:0;overflow-y:auto;"></div><div data-qaw-tab-content="maintenance" style="display:none;flex:1;min-height:0;overflow-y:auto;"></div><div data-qaw-tab-content="work" style="display:none;flex:1;min-height:0;overflow-y:auto;"></div><div data-qaw-tab-content="map" style="display:none;flex:1;min-height:0;overflow-y:auto;flex-direction:column;padding:4px 0;"></div><div data-qaw-tab-content="ai" style="display:none;flex:1;min-height:0;overflow-y:auto;padding:12px 8px;"></div><div data-qaw-tab-content="cleaning" style="display:none;flex:1;min-height:0;overflow-y:auto;padding:4px 0;"></div>' + (showPlaygrounds ? '<div data-qaw-tab-content="playgrounds" style="display:none;flex:1;min-height:0;overflow:hidden;padding:0;"></div>' : "") + "</div>";
     var notesSectionHtmlClient = '<div data-qaw-notes-section style="margin-top:14px;border-top:1px solid #334155;padding-top:12px;display:flex;flex-direction:column;gap:6px;"><div data-qaw-client-notes-view data-e2e="investigation-client-notes-view" style="min-height:200px;"></div></div>';
     if (state.rawSaveTimer) {
       clearTimeout(state.rawSaveTimer);
@@ -27762,6 +27978,7 @@ This won't delete the actual file.`)) return;
     });
   }
   function refreshThrowBadge() {
+    if (document.hidden) return;
     if (!state.panelEl) return;
     var foot = state.panelEl.querySelector("[data-qaw-drawer-footer]");
     if (!foot) return;
@@ -27876,6 +28093,7 @@ This won't delete the actual file.`)) return;
       var liveRow = null;
       if (isThisFileRunning) {
         let updateLiveRow2 = function() {
+          if (document.hidden) return;
           var mm = readRunChimeMetrics();
           var slot = mm.byFile && mm.byFile[capturedFileName] || {};
           if (slot.currentRunStartedAt == null || !Number.isFinite(slot.currentRunStartedAt)) {
@@ -27916,6 +28134,7 @@ This won't delete the actual file.`)) return;
       }
       if (noteData.lastRunEndedAt != null && Number.isFinite(noteData.lastRunEndedAt)) {
         let tickEndedRel2 = function() {
+          if (document.hidden) return;
           var nd = ek && state.store.notes[ek] || {};
           if (nd.lastRunEndedAt == null || !Number.isFinite(nd.lastRunEndedAt)) return;
           endedStrong.textContent = formatRelativeEndedAgo(nd.lastRunEndedAt);
@@ -28051,7 +28270,7 @@ This won't delete the actual file.`)) return;
       } catch (e) {
       }
       try {
-        if ("1.664") return "1.664";
+        if ("1.672") return "1.672";
       } catch (e2) {
       }
       return "unknown";
@@ -28395,16 +28614,18 @@ This won't delete the actual file.`)) return;
     }
     return cache.line;
   }
-  function failedLineFromOpenTabEntry(t, fileName) {
+  function failedLineFromOpenTabEntry(t, fileName, skipMetricCheck) {
     if (!t) return null;
     if (t.isRunning) return null;
     if (t.lastRunPassed === true) return null;
     var ln = Number(t.currentLine);
     if (!Number.isFinite(ln) || ln <= 0) return null;
-    var slot = readRunMetricsSlot(fileName);
-    var metricRunStart = finiteNumber(slot && slot.completedRunStartedAt);
-    var tabRunStart = finiteNumber(t.lastCompletedRunStartedAt);
-    if (metricRunStart != null && tabRunStart != null && !runTimesMatch(metricRunStart, tabRunStart)) return null;
+    if (!skipMetricCheck) {
+      var slot = readRunMetricsSlot(fileName);
+      var metricRunStart = finiteNumber(slot && slot.completedRunStartedAt);
+      var tabRunStart = finiteNumber(t.lastCompletedRunStartedAt);
+      if (metricRunStart != null && tabRunStart != null && !runTimesMatch(metricRunStart, tabRunStart)) return null;
+    }
     return Math.floor(ln);
   }
   function findBestOpenTabForNote(client, envId, fileName) {
@@ -28431,7 +28652,7 @@ This won't delete the actual file.`)) return;
   function getCompletedFailedRunLineFromOpenTabs(client, envId, fileName) {
     var tab = findBestOpenTabForNote(client, envId, fileName);
     if (!tab) return null;
-    return failedLineFromOpenTabEntry(tab, fileName);
+    return failedLineFromOpenTabEntry(tab, fileName, true);
   }
   function getFailedRunLineForNote(editKey) {
     var meta = parseNoteKey(editKey);
@@ -28439,8 +28660,6 @@ This won't delete the actual file.`)) return;
     if (!noteMatchesActiveEditorFile(editKey)) return null;
     var panelOutcome = detectTerminalOutcomeFromPanel();
     if (panelOutcome === "passed" || panelOutcome === "stopped") return null;
-    var cached = recallCachedFailedRunLine(meta.client, meta.envId, meta.fileName);
-    if (cached != null) return cached;
     var fromTabs = getCompletedFailedRunLineFromOpenTabs(meta.client, meta.envId, meta.fileName);
     if (fromTabs != null) {
       var tab = findBestOpenTabForNote(meta.client, meta.envId, meta.fileName);
@@ -28453,6 +28672,8 @@ This won't delete the actual file.`)) return;
       );
       return fromTabs;
     }
+    var cached = recallCachedFailedRunLine(meta.client, meta.envId, meta.fileName);
+    if (cached != null) return cached;
     var fromHistory = getLatestFailedRunLineFromHistory(editKey);
     if (fromHistory != null) {
       var histTab = findBestOpenTabForNote(meta.client, meta.envId, meta.fileName);
@@ -30156,6 +30377,7 @@ This won't delete the actual file.`)) return;
   }
   function initShiftEndSlackNudge() {
     setInterval(function() {
+      if (document.hidden) return;
       maybeSendShiftEndCta();
       maybeSendShiftEndNudge();
     }, SHIFT_NUDGE_CHECK_MS);
@@ -31176,7 +31398,7 @@ This won't delete the actual file.`)) return;
     } catch (_) {
     }
     try {
-      if ("1.664") return "1.664";
+      if ("1.672") return "1.672";
     } catch (_) {
     }
     return "unknown";
