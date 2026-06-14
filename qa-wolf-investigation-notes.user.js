@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         QA Wolf Investigation Notes
 // @namespace    http://tampermonkey.net/
-// @version      1.672
+// @version      1.692
 // @description  Per-file investigation notes: quick links (new-tab opens, PoC textarea, client-wide notes), client/env chips, instant tooltips, run timing, shift sync, work mode, export, search. data-e2e investigation-* hooks.
 // @author       You
 // @match        https://app.qawolf.com/*
@@ -9655,6 +9655,34 @@
     if (!n) return "";
     return n.charAt(0) === "#" ? n : "#" + n;
   }
+  function collectOpenQuestionsByBug(clientSlug) {
+    var map = /* @__PURE__ */ new Map();
+    var notes = state.store && state.store.notes || {};
+    Object.keys(notes).forEach(function(k) {
+      var parts = k.split(NOTE_KEY_SEP2);
+      if (!parts.length || parts[0] !== clientSlug) return;
+      var n = notes[k];
+      var bullets = n && n.bullets || [];
+      bullets.forEach(function(b) {
+        if (!b || b.tag !== "bug" || !b.bugReport || !b.bugReport.url) return;
+        if (!Array.isArray(b.questions) || !b.questions.length) return;
+        var id = parseBugReportUuid(String(b.bugReport.url));
+        if (!id) return;
+        var open = b.questions.filter(function(q) {
+          return q && !q.resolved && q.text;
+        }).map(function(q) {
+          return String(q.text);
+        });
+        if (!open.length) return;
+        var existing = map.get(id) || [];
+        open.forEach(function(t) {
+          if (existing.indexOf(t) === -1) existing.push(t);
+        });
+        map.set(id, existing);
+      });
+    });
+    return map;
+  }
   function aggregateBugBulletsForClient(clientSlug) {
     var map = /* @__PURE__ */ new Map();
     var notes = state.store && state.store.notes || {};
@@ -9795,6 +9823,29 @@
     });
     return prevAll;
   }
+  function buildBugRevalMarkdownWithQuestions(draft, selectedQuestions) {
+    var body = [];
+    body.push(draft.markdown.split("\n")[0]);
+    body.push("");
+    body.push(":ladybug: Open (" + draft.open.length + ")");
+    draft.open.forEach(function(r) {
+      body.push(r.line);
+      if (selectedQuestions) {
+        var qs = selectedQuestions.get(r.reportId) || [];
+        qs.forEach(function(q) {
+          body.push("\u2022 " + q);
+        });
+      }
+    });
+    if (draft.closed.length) {
+      body.push("");
+      body.push(":white_check_mark: Closed (" + draft.closed.length + ")");
+      draft.closed.forEach(function(r) {
+        body.push(r.line);
+      });
+    }
+    return body.join("\n");
+  }
   function buildBugRevalReportDraft(clientSlug, entries) {
     var clientLabel = getClientDisplayName(clientSlug) || clientSlug;
     var aggMap = aggregateBugBulletsForClient(clientSlug);
@@ -9855,7 +9906,8 @@
         body.push(r.line);
       });
     }
-    return { open: openLines, closed: closedLines, markdown: body.join("\n") };
+    var questionsByBug = collectOpenQuestionsByBug(clientSlug);
+    return { open: openLines, closed: closedLines, questionsByBug, markdown: body.join("\n") };
   }
   var NOTE_KEY_SEP2;
   var init_bug_reval_report = __esm({
@@ -9877,6 +9929,50 @@
   });
 
   // src/notes/24-bugs-tab.ts
+  function renderSlackMrkdwnPreview(mrkdwn) {
+    function esc5(s) {
+      return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    }
+    function renderInline(raw) {
+      var parts = [];
+      var re = /<(https?:[^|>\s]+)(?:\|([^>]*))?>/g;
+      var lastIdx = 0;
+      var m;
+      while ((m = re.exec(raw)) !== null) {
+        if (m.index > lastIdx) parts.push(esc5(raw.slice(lastIdx, m.index)));
+        var href = m[1], label = m[2] != null ? m[2] : m[1];
+        parts.push('<a href="' + esc5(href) + '" target="_blank" rel="noopener noreferrer" style="color:#1d9bd1;text-decoration:none;">' + esc5(label) + "</a>");
+        lastIdx = m.index + m[0].length;
+      }
+      if (lastIdx < raw.length) parts.push(esc5(raw.slice(lastIdx)));
+      var text = parts.join("");
+      text = text.replace(/\*([^*\n]+)\*/g, "<strong>$1</strong>");
+      text = text.replace(/_([^_\n]+)_/g, "<em>$1</em>");
+      text = text.replace(/~([^~\n]+)~/g, "<del>$1</del>");
+      text = text.replace(/`([^`]+)`/g, '<code style="background:#2c2d30;border-radius:3px;padding:1px 4px;font-size:12px;">$1</code>');
+      text = text.replace(/:([a-z0-9_]+):/g, function(_m, name) {
+        return SLACK_EMOJI[name] || '<span style="color:#94a3b8;">:' + name + ":</span>";
+      });
+      return text;
+    }
+    var lines = mrkdwn.split("\n");
+    var html = "";
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i];
+      if (line === "") {
+        html += '<div style="height:8px;"></div>';
+      } else if (/^:ladybug:|^:white_check_mark:|^:tada:|^:sparkles:/.test(line)) {
+        html += '<div style="font-weight:700;color:#e8e8e8;margin-top:4px;">' + renderInline(line) + "</div>";
+      } else if (/^- /.test(line)) {
+        html += '<div style="padding-left:12px;color:#d1d2d3;display:flex;gap:6px;"><span style="color:#94a3b8;flex-shrink:0;">-</span><span>' + renderInline(line.slice(2)) + "</span></div>";
+      } else if (/^• /.test(line)) {
+        html += '<div style="padding-left:24px;color:#b0b1b2;display:flex;gap:6px;"><span style="color:#64748b;flex-shrink:0;">\u2022</span><span>' + renderInline(line.slice(2)) + "</span></div>";
+      } else {
+        html += "<div>" + renderInline(line) + "</div>";
+      }
+    }
+    return html;
+  }
   function ensureBugsStore() {
     if (!state.store.bugsDashboard || typeof state.store.bugsDashboard !== "object") {
       state.store.bugsDashboard = { lastCollectedAt: "", entries: [] };
@@ -10317,6 +10413,16 @@
     }
     function refreshBaselineHint() {
       baselineHint.textContent = formatRevalBaselineSavedLabel(clientSlug);
+      var snap = getRevalReportSnapshot(clientSlug);
+      var stale = false;
+      if (snap && snap.sentAt) {
+        try {
+          stale = Date.now() - new Date(snap.sentAt).getTime() > 5 * 24 * 60 * 60 * 1e3;
+        } catch (_) {
+        }
+      }
+      baselineHint.style.color = stale ? "#f87171" : "#64748b";
+      baselineHint.title = stale ? "Baseline is more than 5 days old \u2014 consider saving a new one" : "";
     }
     refreshLastCollectedHint();
     refreshBaselineHint();
@@ -10331,8 +10437,8 @@
     var revalRow = document.createElement("div");
     revalRow.style.cssText = "display:flex;align-items:center;gap:6px;flex-wrap:wrap;width:100%;";
     root.appendChild(revalRow);
-    var dmRevalBtn = makeQawButton("Post to my Slack DM", "secondary");
-    dmRevalBtn.title = "Posts the reval report to your Slack DM via the bot. Does not update the baseline.";
+    var dmRevalBtn = makeQawButton("Preview Slack DM", "secondary");
+    dmRevalBtn.title = "Preview and send the reval report to your Slack DM. Does not update the baseline.";
     revalRow.appendChild(dmRevalBtn);
     var editHeaderBtn = makeQawButton("Edit header", "secondary");
     editHeaderBtn.title = "Customize the intro paragraph for this client\u2019s Slack reval DM";
@@ -10391,8 +10497,9 @@
       return draft;
     }
     dmRevalBtn.addEventListener("click", function() {
-      var draft = makeRevalDraft();
-      if (!draft) return;
+      var draftOrNull = makeRevalDraft();
+      if (!draftOrNull) return;
+      var draft = draftOrNull;
       var settings = loadSettings();
       var token = String(settings.slackToken || "").trim();
       var memberId = String(settings.slackMemberUserId || "").trim();
@@ -10400,14 +10507,159 @@
         alert("Slack bot token and your Slack member ID required (Settings \u2192 SLACK).");
         return;
       }
-      (async function() {
-        try {
-          await slackPostTextToSelfDm(token, memberId, draft.markdown);
-          flashNotesHint("Posted to Slack DM", false);
-        } catch (err) {
-          alert(err && err.message ? String(err.message) : String(err));
+      var backdrop = document.createElement("div");
+      backdrop.style.cssText = "position:fixed;inset:0;background:rgba(2,6,23,0.6);z-index:2147483600;display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box;";
+      var modal = document.createElement("div");
+      modal.style.cssText = "background:#0f172a;border:1px solid #334155;border-radius:10px;width:100%;max-width:500px;max-height:80vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 16px 48px rgba(0,0,0,0.7);font-family:monospace;font-size:11px;color:#e2e8f0;";
+      var mHdr = document.createElement("div");
+      mHdr.style.cssText = "display:flex;align-items:center;justify-content:space-between;padding:12px 14px;border-bottom:1px solid #1e293b;";
+      var mTitle = document.createElement("strong");
+      mTitle.style.cssText = "font-size:12px;color:#f8fafc;";
+      mTitle.textContent = "Preview: Bug Reval DM";
+      var mClose = document.createElement("button");
+      mClose.type = "button";
+      mClose.textContent = "\u2715";
+      mClose.style.cssText = "background:none;border:none;color:#64748b;cursor:pointer;font-size:14px;line-height:1;";
+      mClose.addEventListener("click", function() {
+        backdrop.remove();
+      });
+      mHdr.appendChild(mTitle);
+      mHdr.appendChild(mClose);
+      modal.appendChild(mHdr);
+      var mBody = document.createElement("div");
+      mBody.style.cssText = "flex:1;min-height:0;overflow-y:auto;padding:12px 14px;display:flex;flex-direction:column;gap:12px;";
+      var selectedQuestions = /* @__PURE__ */ new Map();
+      var hasQuestions = false;
+      draft.open.forEach(function(r) {
+        var qs = draft.questionsByBug.get(r.reportId) || [];
+        if (qs.length) {
+          hasQuestions = true;
+          selectedQuestions.set(r.reportId, qs.slice());
         }
-      })();
+      });
+      if (hasQuestions) {
+        var qSection = document.createElement("div");
+        qSection.style.cssText = "display:flex;flex-direction:column;gap:6px;";
+        var qHdr = document.createElement("div");
+        qHdr.style.cssText = "display:flex;align-items:center;justify-content:space-between;";
+        var qLabel = document.createElement("div");
+        qLabel.style.cssText = "font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.04em;";
+        qLabel.textContent = "Open questions to include";
+        var toggleAllBtn = document.createElement("button");
+        toggleAllBtn.type = "button";
+        toggleAllBtn.style.cssText = "background:none;border:none;color:#38bdf8;font-size:10px;cursor:pointer;font-family:monospace;";
+        toggleAllBtn.textContent = "Deselect all";
+        var allSelected = true;
+        toggleAllBtn.addEventListener("click", function() {
+          allSelected = !allSelected;
+          toggleAllBtn.textContent = allSelected ? "Deselect all" : "Select all";
+          draft.open.forEach(function(r) {
+            var qs = draft.questionsByBug.get(r.reportId) || [];
+            selectedQuestions.set(r.reportId, allSelected ? qs.slice() : []);
+          });
+          checkboxes.forEach(function(cb) {
+            cb.checked = allSelected;
+          });
+          if (previewBox) previewBox.innerHTML = renderSlackMrkdwnPreview(buildBugRevalMarkdownWithQuestions(draft, selectedQuestions));
+        });
+        qHdr.appendChild(qLabel);
+        qHdr.appendChild(toggleAllBtn);
+        qSection.appendChild(qHdr);
+        var checkboxes = [];
+        draft.open.forEach(function(r) {
+          var bugQs = draft.questionsByBug.get(r.reportId) || [];
+          if (!bugQs.length) return;
+          var bugRow = document.createElement("div");
+          bugRow.style.cssText = "display:flex;align-items:flex-start;gap:10px;padding:2px 0;";
+          var bugNum = document.createElement("span");
+          bugNum.style.cssText = "flex-shrink:0;font-size:10px;color:#64748b;font-family:monospace;padding-top:3px;min-width:32px;";
+          bugNum.textContent = r.number;
+          var qStack = document.createElement("div");
+          qStack.style.cssText = "flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;";
+          bugQs.forEach(function(qText) {
+            var row2 = document.createElement("label");
+            row2.style.cssText = "display:flex;align-items:flex-start;gap:8px;cursor:pointer;";
+            var cb = document.createElement("input");
+            cb.type = "checkbox";
+            cb.checked = true;
+            cb.style.cssText = "margin-top:2px;flex-shrink:0;accent-color:#3b82f6;";
+            cb.addEventListener("change", function() {
+              var cur = selectedQuestions.get(r.reportId) || [];
+              if (cb.checked) {
+                if (cur.indexOf(qText) === -1) cur.push(qText);
+              } else {
+                cur = cur.filter(function(t) {
+                  return t !== qText;
+                });
+              }
+              selectedQuestions.set(r.reportId, cur);
+              if (previewBox) previewBox.innerHTML = renderSlackMrkdwnPreview(buildBugRevalMarkdownWithQuestions(draft, selectedQuestions));
+            });
+            checkboxes.push(cb);
+            var span = document.createElement("span");
+            span.style.cssText = "color:#cbd5e1;line-height:1.4;font-size:11px;";
+            span.textContent = qText;
+            row2.appendChild(cb);
+            row2.appendChild(span);
+            qStack.appendChild(row2);
+          });
+          bugRow.appendChild(bugNum);
+          bugRow.appendChild(qStack);
+          qSection.appendChild(bugRow);
+        });
+        mBody.appendChild(qSection);
+        var divider = document.createElement("div");
+        divider.style.cssText = "border-top:1px solid #1e293b;";
+        mBody.appendChild(divider);
+      }
+      var previewLabel = document.createElement("div");
+      previewLabel.style.cssText = "font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px;";
+      previewLabel.textContent = "Message preview";
+      var previewBox = document.createElement("div");
+      previewBox.style.cssText = 'background:#1a1d21;border-radius:8px;padding:12px 14px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:13px;color:#d1d2d3;line-height:1.5;max-height:240px;overflow-y:auto;word-break:break-word;';
+      previewBox.innerHTML = renderSlackMrkdwnPreview(
+        hasQuestions ? buildBugRevalMarkdownWithQuestions(draft, selectedQuestions) : draft.markdown
+      );
+      mBody.appendChild(previewLabel);
+      mBody.appendChild(previewBox);
+      modal.appendChild(mBody);
+      var mFoot = document.createElement("div");
+      mFoot.style.cssText = "display:flex;justify-content:flex-end;gap:8px;padding:10px 14px;border-top:1px solid #1e293b;";
+      var cancelBtn = document.createElement("button");
+      cancelBtn.type = "button";
+      cancelBtn.textContent = "Cancel";
+      cancelBtn.style.cssText = "background:none;border:1px solid #334155;border-radius:6px;color:#94a3b8;cursor:pointer;padding:5px 14px;font-family:monospace;font-size:11px;";
+      cancelBtn.addEventListener("click", function() {
+        backdrop.remove();
+      });
+      var sendBtn = document.createElement("button");
+      sendBtn.type = "button";
+      sendBtn.textContent = "Send to Slack DM";
+      sendBtn.style.cssText = "background:#0c4a6e;border:1px solid #0ea5e9;border-radius:6px;color:#e0f2fe;cursor:pointer;padding:5px 14px;font-family:monospace;font-size:11px;";
+      sendBtn.addEventListener("click", function() {
+        sendBtn.disabled = true;
+        sendBtn.textContent = "Sending\u2026";
+        var finalMarkdown = hasQuestions ? buildBugRevalMarkdownWithQuestions(draft, selectedQuestions) : draft.markdown;
+        (async function() {
+          try {
+            await slackPostTextToSelfDm(token, memberId, finalMarkdown);
+            backdrop.remove();
+            flashNotesHint("Posted to Slack DM", false);
+          } catch (err) {
+            sendBtn.disabled = false;
+            sendBtn.textContent = "Send to Slack DM";
+            alert(err && err.message ? String(err.message) : String(err));
+          }
+        })();
+      });
+      mFoot.appendChild(cancelBtn);
+      mFoot.appendChild(sendBtn);
+      modal.appendChild(mFoot);
+      backdrop.appendChild(modal);
+      backdrop.addEventListener("click", function(e) {
+        if (e.target === backdrop) backdrop.remove();
+      });
+      document.body.appendChild(backdrop);
     });
     saveBaselineBtn.addEventListener("click", function() {
       var draft = makeRevalDraft();
@@ -10891,6 +11143,7 @@
     renderList();
     setCollectUi();
   }
+  var SLACK_EMOJI;
   var init_bugs_tab = __esm({
     "src/notes/24-bugs-tab.ts"() {
       "use strict";
@@ -10904,6 +11157,19 @@
       init_map_tab();
       init_bug_reval_report();
       init_reval_history();
+      SLACK_EMOJI = {
+        ladybug: "\u{1F41B}",
+        white_check_mark: "\u2705",
+        saluting_face: "\u{1FAE1}",
+        tada: "\u{1F389}",
+        warning: "\u26A0\uFE0F",
+        x: "\u274C",
+        heavy_check_mark: "\u2714\uFE0F",
+        bug: "\u{1F41E}",
+        eyes: "\u{1F440}",
+        memo: "\u{1F4DD}",
+        sparkles: "\u2728"
+      };
     }
   });
 
@@ -14953,15 +15219,13 @@
       logsChip.className = "qaw-chip-btn";
       logsChip.setAttribute("data-e2e", "investigation-notes-viewer-logs");
       logsChip.title = "View timestamps & logs";
-      logsChip.style.cssText = "display:inline-block;font-size:10px;font-weight:600;font-family:monospace;letter-spacing:0.04em;background:#0f172a;color:#94a3b8;padding:3px 10px;border-radius:999px;border:1px dashed #475569;" + (isBugOrMaint ? "cursor:default;" : "cursor:pointer;");
+      logsChip.style.cssText = "display:inline-block;font-size:10px;font-weight:600;font-family:monospace;letter-spacing:0.04em;background:#0f172a;color:#94a3b8;padding:3px 10px;border-radius:999px;border:1px dashed #475569;cursor:pointer;";
       logsChip.textContent = _logCount > 0 ? "Logs (" + _logCount + ")" : "+ Logs";
-      if (!isBugOrMaint) {
-        logsChip.addEventListener("click", function(e) {
-          e.preventDefault();
-          e.stopPropagation();
-          openBack();
-        });
-      }
+      logsChip.addEventListener("click", function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        openBack();
+      });
       chipsRow2.appendChild(logsChip);
       if (b.copiedFromBulletId) {
         var srcChip = document.createElement("button");
@@ -15076,7 +15340,7 @@
       refChip.className = "qaw-chip-btn";
       refChip.setAttribute("data-e2e", "investigation-notes-viewer-references");
       refChip.style.cssText = caseObj ? "display:inline-block;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10px;font-weight:600;font-family:monospace;letter-spacing:0.03em;background:#0b223f;color:#93c5fd;padding:3px 10px;border-radius:999px;border:1px solid #1d4ed8;" : clientRefCount ? "display:inline-block;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10px;font-weight:600;font-family:monospace;letter-spacing:0.03em;background:#111827;color:#c7d2fe;padding:3px 10px;border-radius:999px;border:1px solid #4f46e5;" : "display:inline-block;font-size:10px;font-weight:600;font-family:monospace;letter-spacing:0.04em;background:#0f172a;color:#64748b;padding:3px 10px;border-radius:999px;border:1px dashed #475569;";
-      refChip.textContent = caseObj ? "Case: " + caseChipLabel(caseObj) : clientRefCount ? "Refs: " + clientRefCount : "+ Reference";
+      refChip.textContent = caseObj ? "Case: " + caseChipLabel(caseObj) : clientRefCount ? "Refs: " + clientRefCount : "+ Ref";
       refChip.title = caseObj ? "Linked case - " + caseScopeLabel(caseObj) + ". Click to manage references." : "Link a case or reference a client note";
       refChip.addEventListener("click", function(e) {
         e.preventDefault();
@@ -15124,6 +15388,26 @@
           openSlackChipDropdown(slackChip, slackUrls);
         });
         chipsRow1.appendChild(slackChip);
+      })();
+      (function() {
+        var qs = Array.isArray(b.questions) ? b.questions : [];
+        var openCount = qs.filter(function(q) {
+          return !q.resolved;
+        }).length;
+        var qChip = document.createElement("button");
+        qChip.type = "button";
+        var noQuestions = qs.length === 0;
+        var chipLabel = noQuestions ? "? +" : openCount > 0 ? "? " + openCount : "?";
+        qChip.textContent = chipLabel;
+        qChip.setAttribute("aria-label", noQuestions ? "Add question" : openCount > 0 ? openCount + " open question" + (openCount === 1 ? "" : "s") : "Questions (all resolved)");
+        qChip.title = noQuestions ? "Add a question" : openCount > 0 ? openCount + " open question" + (openCount === 1 ? "" : "s") : "Questions (all resolved)";
+        qChip.style.cssText = "display:inline-block;font-size:10px;font-weight:600;font-family:monospace;letter-spacing:0.04em;padding:3px 8px;border-radius:999px;cursor:pointer;transition:opacity .1s;" + (noQuestions ? "background:#0f172a;color:#64748b;border:1px solid #1e293b;" : openCount > 0 ? "background:#1c1107;color:#fbbf24;border:1px solid #92400e;" : "background:#0f172a;color:#475569;border:1px solid #334155;");
+        qChip.addEventListener("click", function(e) {
+          e.preventDefault();
+          e.stopPropagation();
+          openQuestionPopover(qChip, b, persist, redraw);
+        });
+        chipsRow1.appendChild(qChip);
       })();
       var cardReminder = getCardScheduledReminder(b);
       if (cardReminder) {
@@ -17265,6 +17549,234 @@
     if (!raw || raw === "Slack") return "Slack";
     return raw.charAt(0).toUpperCase() + raw.slice(1);
   }
+  function dismissQuestionDropdown() {
+    document.querySelectorAll("[" + QUESTION_DROP_ATTR + "]").forEach(function(el) {
+      el.remove();
+    });
+  }
+  function openQuestionPopover(anchor, b, persist, redraw) {
+    dismissQuestionDropdown();
+    if (!Array.isArray(b.questions)) b.questions = [];
+    var questions = b.questions;
+    var drop = document.createElement("div");
+    drop.setAttribute(QUESTION_DROP_ATTR, "1");
+    drop.style.cssText = "position:fixed;z-index:2147483020;background:#0f172a;border:1px solid #334155;border-radius:8px;padding:6px;min-width:260px;max-width:340px;box-shadow:0 8px 24px rgba(0,0,0,0.6);font-family:monospace;font-size:11px;";
+    var showResolved = false;
+    var resolvedCount = questions.filter(function(q) {
+      return q.resolved;
+    }).length;
+    function renderDrop() {
+      drop.innerHTML = "";
+      var hdr = document.createElement("div");
+      hdr.style.cssText = "display:flex;align-items:center;justify-content:space-between;padding:3px 4px 6px;border-bottom:1px solid #1e293b;margin-bottom:4px;";
+      var hdrLabel = document.createElement("span");
+      hdrLabel.style.cssText = "font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.04em;";
+      hdrLabel.textContent = "Open questions";
+      hdr.appendChild(hdrLabel);
+      if (resolvedCount > 0) {
+        var toggleResolved = document.createElement("button");
+        toggleResolved.type = "button";
+        toggleResolved.style.cssText = "background:none;border:none;color:#475569;font-size:10px;cursor:pointer;font-family:monospace;";
+        toggleResolved.textContent = showResolved ? "Hide resolved" : "Show " + resolvedCount + " resolved";
+        toggleResolved.addEventListener("click", function(e) {
+          e.stopPropagation();
+          showResolved = !showResolved;
+          renderDrop();
+        });
+        hdr.appendChild(toggleResolved);
+      }
+      drop.appendChild(hdr);
+      var visibleQs = questions.filter(function(q) {
+        return !q.resolved || showResolved;
+      });
+      if (!visibleQs.length) {
+        var empty = document.createElement("div");
+        empty.style.cssText = "color:#475569;font-size:10px;padding:6px 4px;";
+        empty.textContent = questions.length === 0 ? "No questions yet." : "All questions resolved.";
+        drop.appendChild(empty);
+      }
+      visibleQs.forEach(function(q) {
+        var row2 = document.createElement("div");
+        row2.style.cssText = "display:flex;align-items:flex-start;gap:6px;padding:5px 4px;border-radius:4px;" + (q.resolved ? "opacity:0.5;" : "");
+        var resolveBtn = document.createElement("button");
+        resolveBtn.type = "button";
+        resolveBtn.title = q.resolved ? "Mark as open" : "Mark as resolved";
+        resolveBtn.style.cssText = "flex-shrink:0;width:14px;height:14px;border-radius:3px;border:1px solid " + (q.resolved ? "#22c55e" : "#475569") + ";background:" + (q.resolved ? "#052e16" : "transparent") + ";cursor:pointer;font-size:9px;color:" + (q.resolved ? "#22c55e" : "#475569") + ";display:flex;align-items:center;justify-content:center;margin-top:1px;";
+        resolveBtn.textContent = q.resolved ? "\u2713" : "";
+        resolveBtn.addEventListener("click", function(e) {
+          e.stopPropagation();
+          q.resolved = !q.resolved;
+          resolvedCount = questions.filter(function(x2) {
+            return x2.resolved;
+          }).length;
+          persist();
+          redraw({});
+          renderDrop();
+        });
+        var textWrap = document.createElement("div");
+        textWrap.style.cssText = "flex:1;min-width:0;";
+        var textEl = document.createElement("div");
+        textEl.style.cssText = "color:#cbd5e1;line-height:1.4;word-break:break-word;" + (q.resolved ? "text-decoration:line-through;" : "");
+        textEl.textContent = q.text;
+        textWrap.appendChild(textEl);
+        if (q.answer) {
+          var ansEl = document.createElement("div");
+          ansEl.style.cssText = "color:#64748b;font-size:10px;margin-top:2px;font-style:italic;";
+          ansEl.textContent = "\u2192 " + q.answer;
+          textWrap.appendChild(ansEl);
+        }
+        textEl.style.cursor = "text";
+        textEl.title = "Click to edit";
+        textEl.addEventListener("click", function(e) {
+          e.stopPropagation();
+          var inp = document.createElement("input");
+          inp.type = "text";
+          inp.value = q.text;
+          inp.style.cssText = "width:100%;background:#1e293b;color:#e2e8f0;border:1px solid #334155;border-radius:4px;padding:3px 6px;font-family:monospace;font-size:10px;";
+          inp.addEventListener("keydown", function(ev) {
+            if (ev.key === "Enter") {
+              var t = inp.value.trim();
+              if (t) {
+                q.text = t;
+                persist();
+                redraw({});
+              }
+              renderDrop();
+            } else if (ev.key === "Escape") {
+              renderDrop();
+            }
+          });
+          inp.addEventListener("blur", function() {
+            var t = inp.value.trim();
+            if (t && t !== q.text) {
+              q.text = t;
+              persist();
+              redraw({});
+            }
+            setTimeout(renderDrop, 0);
+          });
+          textWrap.replaceChild(inp, textEl);
+          inp.focus();
+          inp.select();
+        });
+        var ansBtn = document.createElement("button");
+        ansBtn.type = "button";
+        ansBtn.title = q.answer ? "Edit answer" : "Add answer";
+        ansBtn.style.cssText = "flex-shrink:0;background:none;border:none;color:#334155;cursor:pointer;font-size:11px;padding:0;line-height:1;";
+        ansBtn.textContent = "\u270E";
+        ansBtn.addEventListener("click", function(e) {
+          e.stopPropagation();
+          var inp = document.createElement("input");
+          inp.type = "text";
+          inp.value = q.answer || "";
+          inp.placeholder = "Write answer\u2026";
+          inp.style.cssText = "width:100%;background:#1e293b;color:#e2e8f0;border:1px solid #334155;border-radius:4px;padding:3px 6px;font-family:monospace;font-size:10px;margin-top:4px;";
+          inp.addEventListener("keydown", function(ev) {
+            if (ev.key === "Enter") {
+              q.answer = inp.value.trim() || void 0;
+              persist();
+              redraw({});
+              renderDrop();
+            } else if (ev.key === "Escape") {
+              inp.remove();
+            }
+          });
+          inp.addEventListener("blur", function() {
+            if (inp.value.trim() !== (q.answer || "")) {
+              q.answer = inp.value.trim() || void 0;
+              persist();
+              redraw({});
+            }
+            setTimeout(function() {
+              inp.remove();
+            }, 0);
+          });
+          textWrap.appendChild(inp);
+          inp.focus();
+        });
+        var delBtn = document.createElement("button");
+        delBtn.type = "button";
+        delBtn.title = "Delete question";
+        delBtn.style.cssText = "flex-shrink:0;background:none;border:none;color:#334155;cursor:pointer;font-size:12px;padding:0;line-height:1;";
+        delBtn.textContent = "\xD7";
+        delBtn.addEventListener("mouseenter", function() {
+          delBtn.style.color = "#f87171";
+        });
+        delBtn.addEventListener("mouseleave", function() {
+          delBtn.style.color = "#334155";
+        });
+        delBtn.addEventListener("click", function(e) {
+          e.stopPropagation();
+          var idx = questions.indexOf(q);
+          if (idx !== -1) questions.splice(idx, 1);
+          resolvedCount = questions.filter(function(x2) {
+            return x2.resolved;
+          }).length;
+          persist();
+          redraw({});
+          renderDrop();
+        });
+        row2.appendChild(resolveBtn);
+        row2.appendChild(textWrap);
+        row2.appendChild(ansBtn);
+        row2.appendChild(delBtn);
+        drop.appendChild(row2);
+      });
+      var addRow = document.createElement("div");
+      addRow.style.cssText = "display:flex;gap:6px;margin-top:6px;padding-top:6px;border-top:1px solid #1e293b;";
+      var addInput = document.createElement("input");
+      addInput.type = "text";
+      addInput.placeholder = "Add a question\u2026";
+      addInput.style.cssText = "flex:1;background:#1e293b;color:#e2e8f0;border:1px solid #334155;border-radius:4px;padding:4px 7px;font-family:monospace;font-size:10px;";
+      var addBtn = document.createElement("button");
+      addBtn.type = "button";
+      addBtn.textContent = "+";
+      addBtn.style.cssText = "background:#1e3a5f;color:#38bdf8;border:1px solid #1d4ed8;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:12px;flex-shrink:0;";
+      function doAdd() {
+        var text = addInput.value.trim();
+        if (!text) return;
+        questions.push({ id: uid(), text, resolved: false, createdAt: (/* @__PURE__ */ new Date()).toISOString() });
+        addInput.value = "";
+        persist();
+        redraw({});
+        resolvedCount = questions.filter(function(q) {
+          return q.resolved;
+        }).length;
+        renderDrop();
+      }
+      addInput.addEventListener("keydown", function(e) {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          doAdd();
+        }
+      });
+      addBtn.addEventListener("click", function(e) {
+        e.stopPropagation();
+        doAdd();
+      });
+      addRow.appendChild(addInput);
+      addRow.appendChild(addBtn);
+      drop.appendChild(addRow);
+    }
+    renderDrop();
+    drop.style.maxHeight = Math.floor(window.innerHeight * 0.6) + "px";
+    drop.style.overflowY = "auto";
+    document.body.appendChild(drop);
+    var rect = anchor.getBoundingClientRect();
+    var dropH = drop.offsetHeight;
+    var x = Math.min(rect.left, window.innerWidth - 356);
+    var y = rect.bottom + 4;
+    if (y + dropH > window.innerHeight - 8) y = Math.max(8, rect.top - dropH - 4);
+    drop.style.left = Math.max(8, x) + "px";
+    drop.style.top = Math.max(8, y) + "px";
+    setTimeout(function() {
+      document.addEventListener("mousedown", function onOut(ev) {
+        if (drop.contains(ev.target)) return;
+        drop.remove();
+        document.removeEventListener("mousedown", onOut, true);
+      }, true);
+    }, 0);
+  }
   function collectSlackMessageUrls(text) {
     var out = [];
     var re = /https?:\/\/[^\s<>"]+/g;
@@ -18317,7 +18829,7 @@
       container.appendChild(chip);
     });
   }
-  var CASE_STATUS_OPTIONS, lineContextCloseTimer, lineContextOutsideHandler, SLACK_CHIP_DROPDOWN_ATTR, SLACK_ICON_SVG, _slackPreviewCache, _slackRenderGroups, INLINE_LINE_REF_RE, PARSER_BADGE_RE;
+  var CASE_STATUS_OPTIONS, lineContextCloseTimer, lineContextOutsideHandler, QUESTION_DROP_ATTR, SLACK_CHIP_DROPDOWN_ATTR, SLACK_ICON_SVG, _slackPreviewCache, _slackRenderGroups, INLINE_LINE_REF_RE, PARSER_BADGE_RE;
   var init_cards = __esm({
     "src/notes/05-cards.ts"() {
       "use strict";
@@ -18348,6 +18860,7 @@
       CASE_STATUS_OPTIONS = ["open", "resolved"];
       lineContextCloseTimer = null;
       lineContextOutsideHandler = null;
+      QUESTION_DROP_ATTR = "data-qaw-question-drop";
       SLACK_CHIP_DROPDOWN_ATTR = "data-qaw-slack-chip-dropdown";
       SLACK_ICON_SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" style="color:#f472b6"><path d="M5.042 15.165a2.528 2.528 0 0 1-2.52 2.523A2.528 2.528 0 0 1 0 15.165a2.527 2.527 0 0 1 2.522-2.52h2.52v2.52zM6.313 15.165a2.527 2.527 0 0 1 2.521-2.52 2.527 2.527 0 0 1 2.521 2.52v6.313A2.528 2.528 0 0 1 8.834 24a2.528 2.528 0 0 1-2.521-2.522v-6.313zM8.834 5.042a2.528 2.528 0 0 1-2.521-2.52A2.528 2.528 0 0 1 8.834 0a2.528 2.528 0 0 1 2.521 2.522v2.52H8.834zM8.834 6.313a2.528 2.528 0 0 1 2.521 2.521 2.528 2.528 0 0 1-2.521 2.521H2.522A2.528 2.528 0 0 1 0 8.834a2.528 2.528 0 0 1 2.522-2.521h6.312zM18.956 8.834a2.528 2.528 0 0 1 2.522-2.521A2.528 2.528 0 0 1 24 8.834a2.528 2.528 0 0 1-2.522 2.521h-2.522V8.834zM17.688 8.834a2.528 2.528 0 0 1-2.523 2.521 2.527 2.527 0 0 1-2.52-2.521V2.522A2.527 2.527 0 0 1 15.165 0a2.528 2.528 0 0 1 2.523 2.522v6.312zM15.165 18.956a2.528 2.528 0 0 1 2.523 2.522A2.528 2.528 0 0 1 15.165 24a2.527 2.527 0 0 1-2.52-2.522v-2.522h2.52zM15.165 17.688a2.527 2.527 0 0 1-2.52-2.523 2.526 2.526 0 0 1 2.52-2.52h6.313A2.527 2.527 0 0 1 24 15.165a2.528 2.528 0 0 1-2.522 2.523h-6.313z"/></svg>';
       _slackPreviewCache = /* @__PURE__ */ new Map();
@@ -25725,6 +26238,575 @@ This won't delete the actual file.`)) return;
     }
   });
 
+  // src/notes/57-inv-run-hub.ts
+  function parseRunDetailsPage() {
+    var m = location.pathname.match(/^\/([^/]+)\/environments\/([^/]+)\/runs\/([^/?]+)/);
+    if (!m) return null;
+    return { client: m[1], envId: m[2], runId: m[3] };
+  }
+  function runFlowHrefToIdeUrl(href) {
+    var m = href.match(/\/([^/]+)\/environments\/([^/]+)\/runs\/([^/]+)\/flows\/([^/?]+)/);
+    if (!m) return null;
+    return {
+      client: m[1],
+      envId: m[2],
+      runId: m[3],
+      flowId: m[4],
+      ideUrl: "/" + m[1] + "/environments/" + m[2] + "/automate/ide?flowId=" + m[4]
+    };
+  }
+  function scrapeRunDetailsFlows() {
+    var ctx = parseRunDetailsPage();
+    if (!ctx) return null;
+    var seen = /* @__PURE__ */ new Set();
+    var flows = [];
+    document.querySelectorAll('[data-e2e^="Workflow-"]').forEach(function(el) {
+      var workflowEl = el;
+      var attr = workflowEl.getAttribute("data-e2e") || "";
+      var displayName = attr.replace(/^Workflow-/, "").trim();
+      if (!displayName) return;
+      var a = workflowEl.querySelector('a[href*="/flows/"]');
+      if (!a) return;
+      var href = a.getAttribute("href") || "";
+      var parsed = runFlowHrefToIdeUrl(href);
+      if (!parsed || parsed.runId !== ctx.runId) return;
+      if (seen.has(parsed.flowId)) return;
+      seen.add(parsed.flowId);
+      var fileTabEl = workflowEl.querySelector('[data-e2e^="file-tab-"]');
+      var basename = fileTabEl ? (fileTabEl.textContent || "").trim() : "";
+      flows.push({
+        flowId: parsed.flowId,
+        displayName,
+        basename,
+        ideUrl: parsed.ideUrl
+      });
+    });
+    if (!flows.length) return null;
+    var startedAtEl = document.querySelector('[data-e2e="RunTimeInterval-createdAt"]');
+    var startedAt = startedAtEl ? (startedAtEl.textContent || "").trim() : "";
+    return {
+      runId: ctx.runId,
+      runUrl: location.href,
+      client: ctx.client,
+      envId: ctx.envId,
+      displayName: getClientDisplayName(ctx.client) + " run",
+      startedAt,
+      savedAt: Date.now(),
+      flows
+    };
+  }
+  function gmGet(key) {
+    try {
+      var v = GM_getValue(key, null);
+      if (v === null || v === void 0) return null;
+      return JSON.parse(String(v));
+    } catch (_) {
+      return null;
+    }
+  }
+  function gmSet(key, val) {
+    try {
+      GM_setValue(key, JSON.stringify(val));
+    } catch (_) {
+    }
+  }
+  function gmDel(key) {
+    try {
+      GM_setValue(key, null);
+    } catch (_) {
+    }
+  }
+  function getIndex() {
+    return gmGet(INV_RUN_INDEX_KEY) || [];
+  }
+  function setIndex(ids) {
+    gmSet(INV_RUN_INDEX_KEY, ids);
+  }
+  function saveInvRun(run) {
+    gmSet(INV_RUN_KEY_PREFIX + run.runId, run);
+    var idx = getIndex().filter(function(id) {
+      return id !== run.runId;
+    });
+    idx.unshift(run.runId);
+    setIndex(idx);
+  }
+  function getSavedInvRuns() {
+    var now = Date.now();
+    var idx = getIndex();
+    var valid = [];
+    var runs = [];
+    idx.forEach(function(id) {
+      var r = gmGet(INV_RUN_KEY_PREFIX + id);
+      if (!r || now - r.savedAt > INV_RUN_TTL_MS) {
+        gmDel(INV_RUN_KEY_PREFIX + id);
+        return;
+      }
+      valid.push(id);
+      runs.push(r);
+    });
+    if (valid.length !== idx.length) setIndex(valid);
+    return runs;
+  }
+  function deleteInvRun(runId) {
+    gmDel(INV_RUN_KEY_PREFIX + runId);
+    setIndex(getIndex().filter(function(id) {
+      return id !== runId;
+    }));
+  }
+  function setPendingRescrape(runId) {
+    gmSet(INV_RESCRAPE_KEY, { runId, requestedAt: Date.now() });
+  }
+  function consumePendingRescrapeForRun(runId) {
+    var val = gmGet(INV_RESCRAPE_KEY);
+    if (!val || val.runId !== runId) return false;
+    if (Date.now() - val.requestedAt > 12e4) {
+      gmDel(INV_RESCRAPE_KEY);
+      return false;
+    }
+    gmDel(INV_RESCRAPE_KEY);
+    return true;
+  }
+  function executeRescrape(runId, saveBtn) {
+    var freshRun = scrapeRunDetailsFlows();
+    var existing = gmGet(INV_RUN_KEY_PREFIX + runId);
+    if (!existing) {
+      if (saveBtn) saveBtn.textContent = "\u2B07 Save flows";
+      return;
+    }
+    if (!freshRun || !freshRun.flows.length) {
+      deleteInvRun(runId);
+      if (saveBtn) {
+        saveBtn.textContent = "\u2713 All resolved \u2014 closing\u2026";
+        saveBtn.style.color = "#86efac";
+      }
+      setTimeout(function() {
+        try {
+          window.close();
+        } catch (_) {
+        }
+      }, 1200);
+      return;
+    }
+    existing.flows = freshRun.flows;
+    existing.startedAt = freshRun.startedAt;
+    existing.runUrl = location.href;
+    existing.savedAt = Date.now();
+    syncInvRunNoteStatuses(existing);
+    saveInvRun(existing);
+    if (saveBtn) {
+      saveBtn.textContent = "\u2713 " + freshRun.flows.length + " flows \u2014 closing\u2026";
+      saveBtn.style.borderColor = "#22c55e";
+      saveBtn.style.color = "#86efac";
+    }
+    setTimeout(function() {
+      try {
+        window.close();
+      } catch (_) {
+      }
+    }, 1200);
+  }
+  function handleInconclusive(saveBtn) {
+    if (saveBtn) {
+      saveBtn.textContent = "Could not verify \u2014 closing";
+      saveBtn.style.color = "#94a3b8";
+    }
+    setTimeout(function() {
+      try {
+        window.close();
+      } catch (_) {
+      }
+    }, 1500);
+  }
+  function waitAndAutoRescrape(runId, maxRetries, saveBtn) {
+    var els = document.querySelectorAll('[data-e2e^="Workflow-"]');
+    if (els.length > 0) {
+      executeRescrape(runId, saveBtn);
+      return;
+    }
+    var listReady = !!document.querySelector('[data-e2e="WorkflowList"], [data-e2e="FiltersAndWorkflowList"]');
+    if (!listReady) {
+      if (maxRetries > 0) {
+        setTimeout(function() {
+          waitAndAutoRescrape(runId, maxRetries - 1, saveBtn);
+        }, 1e3);
+      } else {
+        handleInconclusive(saveBtn);
+      }
+      return;
+    }
+    if (saveBtn) saveBtn.textContent = "\u21BB Waiting for rows\u2026";
+    setTimeout(function() {
+      var elsAgain = document.querySelectorAll('[data-e2e^="Workflow-"]');
+      if (elsAgain.length > 0) {
+        executeRescrape(runId, saveBtn);
+        return;
+      }
+      var overlay = document.createElement("div");
+      overlay.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:2147483500;display:flex;align-items:center;justify-content:center;";
+      var modal = document.createElement("div");
+      modal.style.cssText = "background:#fff;border-radius:12px;padding:28px 32px;max-width:380px;width:90%;box-shadow:0 16px 48px rgba(0,0,0,0.2);font-family:-apple-system,sans-serif;display:flex;flex-direction:column;gap:16px;text-align:center;";
+      var modalTitle = document.createElement("div");
+      modalTitle.style.cssText = "font-size:16px;font-weight:600;color:#111;";
+      modalTitle.textContent = "No flows found";
+      var modalMsg = document.createElement("div");
+      modalMsg.style.cssText = "font-size:14px;color:#555;line-height:1.5;";
+      modalMsg.textContent = "The filtered list appears empty. Are all flows resolved, or are they still loading?";
+      var modalBtns = document.createElement("div");
+      modalBtns.style.cssText = "display:flex;gap:10px;justify-content:center;";
+      var confirmBtn = document.createElement("button");
+      confirmBtn.type = "button";
+      confirmBtn.textContent = "Yes, all complete";
+      confirmBtn.style.cssText = "background:#111;border:none;border-radius:8px;color:#fff;cursor:pointer;padding:9px 18px;font-size:14px;font-weight:500;";
+      var waitBtn = document.createElement("button");
+      waitBtn.type = "button";
+      waitBtn.textContent = "Keep waiting";
+      waitBtn.style.cssText = "background:#f3f4f6;border:1px solid #e5e7eb;border-radius:8px;color:#374151;cursor:pointer;padding:9px 18px;font-size:14px;";
+      modalBtns.appendChild(confirmBtn);
+      modalBtns.appendChild(waitBtn);
+      modal.appendChild(modalTitle);
+      modal.appendChild(modalMsg);
+      modal.appendChild(modalBtns);
+      overlay.appendChild(modal);
+      document.body.appendChild(overlay);
+      if (saveBtn) saveBtn.textContent = "\u21BB Awaiting confirmation\u2026";
+      var done = false;
+      var deadline = Date.now() + 1e4;
+      var checkTimer = setInterval(function() {
+        if (done) {
+          clearInterval(checkTimer);
+          return;
+        }
+        var flowed = document.querySelectorAll('[data-e2e^="Workflow-"]');
+        if (flowed.length > 0) {
+          done = true;
+          clearInterval(checkTimer);
+          overlay.remove();
+          executeRescrape(runId, saveBtn);
+          return;
+        }
+        if (Date.now() >= deadline) {
+          done = true;
+          clearInterval(checkTimer);
+          overlay.remove();
+          handleInconclusive(saveBtn);
+        }
+      }, 500);
+      confirmBtn.addEventListener("click", function() {
+        if (done) return;
+        done = true;
+        clearInterval(checkTimer);
+        overlay.remove();
+        deleteInvRun(runId);
+        if (saveBtn) {
+          saveBtn.textContent = "\u2713 Complete \u2014 closing\u2026";
+          saveBtn.style.color = "#22c55e";
+        }
+        setTimeout(function() {
+          try {
+            window.close();
+          } catch (_) {
+          }
+        }, 1200);
+      });
+      waitBtn.addEventListener("click", function() {
+        deadline = Date.now() + 1e4;
+        overlay.remove();
+      });
+    }, 3e3);
+  }
+  function findNoteKeyForFlow(client, envId, flow) {
+    var notes = state.store && state.store.notes || {};
+    var basename = flow.basename;
+    if (basename) {
+      var found = null;
+      Object.keys(notes).forEach(function(key) {
+        if (found) return;
+        var meta = parseNoteKey(key);
+        if (!meta || meta.client !== client || meta.envId !== envId) return;
+        var fn = meta.fileName;
+        if (fn === basename || fn.endsWith("/" + basename) || fn.endsWith("\\" + basename)) {
+          found = key;
+        }
+      });
+      if (found) return found;
+    }
+    return null;
+  }
+  function syncInvRunNoteStatuses(run) {
+    var updated = 0;
+    run.flows.forEach(function(flow) {
+      var key = findNoteKeyForFlow(run.client, run.envId, flow);
+      if (!key) return;
+      var note2 = state.store && state.store.notes && state.store.notes[key];
+      if (!note2) return;
+      if (note2.status === "passing") {
+        note2.status = "open";
+        updated++;
+      }
+    });
+    if (updated > 0) saveStoreImmediate();
+    return updated;
+  }
+  function ensureInvRunSaveButton() {
+    var ctx = parseRunDetailsPage();
+    if (!ctx) return;
+    if (document.querySelector("[" + SAVE_BTN_ATTR + "]") || document.querySelector("[data-qaw-inv-run-bar-overlay]")) {
+      if (consumePendingRescrapeForRun(ctx.runId)) {
+        var existingBtn = document.querySelector("[" + SAVE_BTN_ATTR + "]");
+        if (existingBtn) {
+          existingBtn.textContent = "\u21BB Rescraping\u2026";
+          existingBtn.style.color = "#38bdf8";
+        }
+        waitAndAutoRescrape(ctx.runId, 20, existingBtn);
+      }
+      return;
+    }
+    var btn3 = document.createElement("button");
+    btn3.type = "button";
+    btn3.setAttribute(SAVE_BTN_ATTR, "1");
+    btn3.textContent = "\u2B07 Save flows";
+    btn3.title = "Save failing flows to the Investigation Hub in the Notes panel";
+    btn3.style.cssText = "background:#0f172a;border:1px solid #334155;border-radius:8px;color:#94a3b8;cursor:pointer;font-size:12px;font-family:monospace;padding:8px 14px;transition:border-color .1s,color .1s;flex-shrink:0;";
+    btn3.addEventListener("mouseenter", function() {
+      btn3.style.borderColor = "#38bdf8";
+      btn3.style.color = "#e2e8f0";
+    });
+    btn3.addEventListener("mouseleave", function() {
+      btn3.style.borderColor = "#334155";
+      btn3.style.color = "#94a3b8";
+    });
+    btn3.addEventListener("click", function() {
+      var run = scrapeRunDetailsFlows();
+      if (!run || !run.flows.length) {
+        btn3.textContent = "\u26A0 No flows found";
+        setTimeout(function() {
+          btn3.textContent = "\u2B07 Save flows";
+        }, 2e3);
+        return;
+      }
+      var synced = syncInvRunNoteStatuses(run);
+      saveInvRun(run);
+      btn3.textContent = "\u2713 Saved " + run.flows.length + " flows" + (synced ? " (+" + synced + " reopened)" : "");
+      btn3.style.borderColor = "#22c55e";
+      btn3.style.color = "#86efac";
+      setTimeout(function() {
+        btn3.textContent = "\u2B07 Save flows";
+        btn3.style.borderColor = "#334155";
+        btn3.style.color = "#94a3b8";
+      }, 3e3);
+    });
+    var BAR_OVERLAY_ATTR = "data-qaw-inv-run-bar-overlay";
+    var barSelectors = [
+      '[data-e2e="button-reattempt-failed-flows"]',
+      '[data-e2e="button-run-code"]',
+      '[data-e2e="button-duplicates-the-run-using-the-original-environment-variables-but-with-the-flows-latest-code-click-for-more-details"]'
+    ];
+    var barRect = null;
+    for (var si = 0; si < barSelectors.length; si++) {
+      var barEl = document.querySelector(barSelectors[si]);
+      if (barEl && barEl.parentElement) {
+        barRect = barEl.parentElement.getBoundingClientRect();
+        break;
+      }
+    }
+    var overlay = document.createElement("div");
+    overlay.setAttribute(BAR_OVERLAY_ATTR, "1");
+    overlay.style.cssText = "position:fixed;left:0;right:0;z-index:2147483000;pointer-events:none;display:flex;align-items:center;padding-left:16px;";
+    if (barRect) {
+      overlay.style.top = Math.round(barRect.top) + "px";
+      overlay.style.height = Math.round(barRect.height) + "px";
+    } else {
+      overlay.style.bottom = "0";
+      overlay.style.height = "60px";
+    }
+    btn3.style.pointerEvents = "auto";
+    overlay.appendChild(btn3);
+    document.body.appendChild(overlay);
+    var _resizeHandler = function() {
+      var updatedEl = null;
+      for (var si2 = 0; si2 < barSelectors.length; si2++) {
+        var el2 = document.querySelector(barSelectors[si2]);
+        if (el2 && el2.parentElement) {
+          updatedEl = el2.parentElement;
+          break;
+        }
+      }
+      if (updatedEl) {
+        var r = updatedEl.getBoundingClientRect();
+        overlay.style.top = Math.round(r.top) + "px";
+        overlay.style.height = Math.round(r.height) + "px";
+      }
+    };
+    window.addEventListener("resize", _resizeHandler);
+    if (consumePendingRescrapeForRun(ctx.runId)) {
+      btn3.textContent = "\u21BB Rescraping\u2026";
+      btn3.style.color = "#38bdf8";
+      waitAndAutoRescrape(ctx.runId, 20, btn3);
+    }
+  }
+  function mountInvRunHubView(container) {
+    container.innerHTML = "";
+    container.style.cssText = "display:flex;flex-direction:column;gap:10px;padding:8px;font-family:monospace;font-size:11px;color:#e2e8f0;";
+    var collapsed = /* @__PURE__ */ new Set();
+    function render() {
+      container.innerHTML = "";
+      var runs = getSavedInvRuns();
+      if (!runs.length) {
+        var empty = document.createElement("div");
+        empty.style.cssText = "border:1px dashed #334155;border-radius:8px;padding:16px;color:#475569;text-align:center;font-size:11px;line-height:1.5;";
+        empty.textContent = "No saved runs. Open a run details page and click \u2B07 Save flows.";
+        container.appendChild(empty);
+        return;
+      }
+      runs.sort(function(a, b) {
+        return a.displayName.localeCompare(b.displayName);
+      });
+      runs.forEach(function(run) {
+        var card = document.createElement("div");
+        card.style.cssText = "border:1px solid #334155;border-radius:8px;background:#0f172a;overflow:hidden;";
+        var isCollapsed = collapsed.has(run.runId);
+        var hdr = document.createElement("div");
+        hdr.style.cssText = "display:flex;align-items:center;gap:8px;padding:8px 10px;cursor:pointer;" + (isCollapsed ? "" : "border-bottom:1px solid #1e293b;");
+        hdr.title = "Click to " + (isCollapsed ? "expand" : "collapse");
+        var chevron = document.createElement("span");
+        chevron.style.cssText = "flex-shrink:0;font-size:9px;color:#475569;transition:transform .15s;";
+        chevron.textContent = isCollapsed ? "\u25B6" : "\u25BC";
+        var title = document.createElement("div");
+        title.style.cssText = "flex:1;min-width:0;font-size:11px;font-weight:700;color:#f8fafc;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
+        title.textContent = run.displayName;
+        var flowCount = document.createElement("span");
+        flowCount.style.cssText = "font-size:10px;color:#64748b;flex-shrink:0;";
+        flowCount.textContent = (run.startedAt ? run.startedAt + " \xB7 " : "") + run.flows.length + " flow" + (run.flows.length === 1 ? "" : "s");
+        var rescrapeBtn = document.createElement("button");
+        rescrapeBtn.type = "button";
+        rescrapeBtn.textContent = "\u21BB";
+        rescrapeBtn.title = "Rescrape from run details page";
+        rescrapeBtn.style.cssText = "background:none;border:1px solid #334155;border-radius:4px;color:#64748b;cursor:pointer;font-size:11px;padding:1px 6px;flex-shrink:0;";
+        rescrapeBtn.addEventListener("click", function(e) {
+          e.stopPropagation();
+          setPendingRescrape(run.runId);
+          var a = document.createElement("a");
+          a.href = run.runUrl;
+          a.target = "_blank";
+          a.rel = "noopener noreferrer";
+          a.click();
+          rescrapeBtn.textContent = "\u21BB\u2026";
+          rescrapeBtn.style.color = "#38bdf8";
+          rescrapeBtn.title = "Rescraping \u2014 the new tab will update automatically";
+          if (_activePollTimer) {
+            clearInterval(_activePollTimer);
+            _activePollTimer = null;
+          }
+          var pollCount = 0;
+          var savedAtSnapshot = run.savedAt;
+          _activePollTimer = setInterval(function() {
+            pollCount++;
+            var updated = gmGet(INV_RUN_KEY_PREFIX + run.runId);
+            var deleted = !updated;
+            if (deleted || updated && updated.savedAt !== savedAtSnapshot || pollCount > 45) {
+              if (_activePollTimer) {
+                clearInterval(_activePollTimer);
+                _activePollTimer = null;
+              }
+              rescrapeBtn.textContent = "\u21BB";
+              rescrapeBtn.style.color = "#64748b";
+              rescrapeBtn.title = "Rescrape from run details page";
+              render();
+            }
+          }, 2e3);
+        });
+        var delBtn = document.createElement("button");
+        delBtn.type = "button";
+        delBtn.textContent = "\u2715";
+        delBtn.title = "Remove this run";
+        delBtn.style.cssText = "background:none;border:none;color:#475569;cursor:pointer;font-size:12px;padding:0 2px;flex-shrink:0;";
+        delBtn.addEventListener("click", function(e) {
+          e.stopPropagation();
+          deleteInvRun(run.runId);
+          render();
+        });
+        hdr.appendChild(chevron);
+        hdr.appendChild(title);
+        hdr.appendChild(flowCount);
+        hdr.appendChild(rescrapeBtn);
+        hdr.appendChild(delBtn);
+        card.appendChild(hdr);
+        var list = document.createElement("div");
+        list.style.cssText = "display:" + (isCollapsed ? "none" : "flex") + ";flex-direction:column;";
+        hdr.addEventListener("click", function() {
+          if (collapsed.has(run.runId)) {
+            collapsed.delete(run.runId);
+            list.style.display = "flex";
+            hdr.style.borderBottom = "1px solid #1e293b";
+            chevron.textContent = "\u25BC";
+            hdr.title = "Click to collapse";
+          } else {
+            collapsed.add(run.runId);
+            list.style.display = "none";
+            hdr.style.borderBottom = "";
+            chevron.textContent = "\u25B6";
+            hdr.title = "Click to expand";
+          }
+        });
+        run.flows.forEach(function(flow, fi) {
+          var row2 = document.createElement("a");
+          row2.href = flow.ideUrl;
+          row2.target = "_blank";
+          row2.rel = "noopener noreferrer";
+          row2.style.cssText = "display:flex;align-items:center;gap:8px;padding:7px 10px;color:#cbd5e1;text-decoration:none;font-size:11px;" + (fi > 0 ? "border-top:1px solid #1e293b;" : "");
+          row2.addEventListener("mouseenter", function() {
+            row2.style.background = "#132030";
+          });
+          row2.addEventListener("mouseleave", function() {
+            row2.style.background = "";
+          });
+          var noteKey3 = findNoteKeyForFlow(run.client, run.envId, flow);
+          var note2 = noteKey3 && state.store && state.store.notes && state.store.notes[noteKey3];
+          var status = note2 ? String(note2.status || "empty") : "";
+          var STATUS_COLORS = {
+            open: "#3b82f6",
+            bugged: "#ef4444",
+            maintenance: "#06b6d4",
+            blocked: "#f59e0b",
+            passing: "#22c55e",
+            empty: "#475569"
+          };
+          var dot = document.createElement("span");
+          dot.style.cssText = "width:6px;height:6px;border-radius:50%;flex-shrink:0;background:" + (STATUS_COLORS[status] || "#334155") + ";";
+          dot.title = status ? "Note status: " + status : "No note found";
+          var name = document.createElement("span");
+          name.style.cssText = "flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
+          name.textContent = flow.displayName || flow.basename || flow.flowId;
+          var arrow = document.createElement("span");
+          arrow.style.cssText = "flex-shrink:0;font-size:11px;color:#334155;";
+          arrow.textContent = "\u2197";
+          row2.appendChild(dot);
+          row2.appendChild(name);
+          row2.appendChild(arrow);
+          list.appendChild(row2);
+        });
+        card.appendChild(list);
+        container.appendChild(card);
+      });
+    }
+    render();
+  }
+  var INV_RUN_KEY_PREFIX, INV_RUN_TTL_MS, INV_RUN_INDEX_KEY, INV_RESCRAPE_KEY, _activePollTimer, SAVE_BTN_ATTR;
+  var init_inv_run_hub = __esm({
+    "src/notes/57-inv-run-hub.ts"() {
+      "use strict";
+      init_state();
+      init_store();
+      init_context();
+      INV_RUN_KEY_PREFIX = "invRun_";
+      INV_RUN_TTL_MS = 7 * 24 * 60 * 60 * 1e3;
+      INV_RUN_INDEX_KEY = "invRunIndex";
+      INV_RESCRAPE_KEY = "invRescrape";
+      _activePollTimer = null;
+      SAVE_BTN_ATTR = "data-qaw-inv-run-save";
+    }
+  });
+
   // src/notes/38-panel-bootstrap.ts
   function panelBootstrapMode(ctx, fileName, hostname, pathname) {
     if (ctx && fileName) return "ready";
@@ -26839,6 +27921,7 @@ This won't delete the actual file.`)) return;
     tryObserveFlowPassedPanel();
     resumeBugsCollectJobIfNeeded();
     injectSpeedDial();
+    ensureInvRunSaveButton();
     ensureGutterMenuListener();
     ensureWatchLineIndicators();
     ensureSoftBreakpointObserver();
@@ -26983,6 +28066,7 @@ This won't delete the actual file.`)) return;
       init_gutter_menu();
       init_store();
       init_bugs_tab();
+      init_inv_run_hub();
       init_status_resolver();
       ALL_TAGS = ["bug", "maintenance", "flake", "locator", "helper", "note", "unknown", ""];
       TAG_LABELS2 = { bug: "Bug", maintenance: "Maintenance", flake: "Flake", locator: "Locator", helper: "Helper", note: "Note", unknown: "Unknown", "": "Untagged" };
@@ -27270,6 +28354,7 @@ This won't delete the actual file.`)) return;
       ai: '<svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" style="' + TAB_ICON_STYLE + '" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/><path d="M19 16l.8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8z"/></svg>',
       cases: '<svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" style="' + TAB_ICON_STYLE + '" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7h7l2 2h9v10H3z"/><path d="M3 7v12"/></svg>',
       work: '<svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" style="' + TAB_ICON_STYLE + '" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2-6 4 12 2-6h6"/></svg>',
+      runs: '<svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" style="' + TAB_ICON_STYLE + '" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>',
       map: '<svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" style="' + TAB_ICON_STYLE + '" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 4 3 12l5 8"/><path d="m16 4 5 8-5 8"/><path d="m14 5-4 14"/></svg>',
       cleaning: '<svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" style="' + TAB_ICON_STYLE + '" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 9h14"/><path d="M7 9l1 12h8l1-12"/><path d="M8 9V7a4 4 0 0 1 8 0v2"/><path d="M4 9V7h16v2"/><path d="M10 12v5M12 12v4M14 12v5"/></svg>',
       playgrounds: '<svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" style="' + TAB_ICON_STYLE + '" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3v5l-4 8a4 4 0 0 0 3.6 5h6.8A4 4 0 0 0 19 16l-4-8V3"/><path d="M8 3h8"/><path d="M7 14h10"/></svg>',
@@ -27285,7 +28370,7 @@ This won't delete the actual file.`)) return;
       var label = btn3.querySelector("[data-qaw-tab-label]");
       if (label) label.style.display = active ? "inline" : "none";
     }
-    var notesSectionHtml = '<div data-qaw-notes-section style="margin-top:14px;border-top:1px solid #334155;padding-top:12px;display:flex;flex-direction:column;gap:6px;flex:1;min-height:0;"><div style="border-bottom:1px solid #1e293b;margin-bottom:2px;flex-shrink:0;overflow-x:auto;scrollbar-width:none;-ms-overflow-style:none;"><div style="display:flex;align-items:center;gap:0;width:max-content;min-width:365px;">' + tabBtnHtml("notes", "Notes", "investigation-panel-tab-notes", true) + tabBtnHtml("history", "History", "investigation-panel-tab-history", false) + tabBtnHtml("bugs", "Bugs", null, false) + tabBtnHtml("maintenance", "Maint", null, false) + tabBtnHtml("ai", "AI", null, false) + tabBtnHtml("cases", "Cases", null, false) + tabBtnHtml("work", "Work", null, false) + tabBtnHtml("map", "Helpers", null, false) + tabBtnHtml("cleaning", "Clean", null, false) + (showPlaygrounds ? tabBtnHtml("playgrounds", "Play", null, false) : "") + tabBtnHtml("settings", "Settings", "investigation-panel-tab-settings", false) + '</div></div><div data-qaw-tab-content="notes" style="flex:1;min-height:0;display:flex;flex-direction:column;gap:6px;"><div style="display:flex;align-items:center;gap:6px;"><span data-qaw-notes-syntax-info-wrap></span><button type="button" data-qaw-filter-favs data-e2e="investigation-filter-favs" style="' + FAV_BTN_STYLE + '">\u2606 Pinned</button><button type="button" data-qaw-watch-count-btn style="' + WATCH_BTN_STYLE + '">\u26A1 0 tracked</button></div><div data-qaw-notes-view-wrap data-e2e="investigation-notes-region" style="position:relative;flex:1;min-height:0;display:flex;flex-direction:column;"><div data-qaw-notes-viewer data-e2e="investigation-notes-viewer" tabindex="0" style="display:flex;flex-direction:column;flex:1;min-height:180px;overflow-y:auto;box-sizing:border-box;background:#0f172a;border:1px solid #475569;border-radius:8px;padding:10px 8px;cursor:default;outline:none;"></div><textarea data-qaw-raw data-e2e="investigation-notes-editor" wrap="soft" spellcheck="false" style="display:none;width:100%;flex:1;min-height:180px;resize:vertical;box-sizing:border-box;background:#0f172a;color:#e2e8f0;border:1px solid #475569;border-radius:8px;padding:8px;font-family:monospace;font-size:11px;line-height:1.45;white-space:pre-wrap;word-break:break-word;overflow-x:hidden;"></textarea></div><div data-qaw-raw-status data-e2e="investigation-notes-parse-status" style="font-size:10px;min-height:14px;line-height:1.3;flex-shrink:0;"></div></div><div data-qaw-tab-content="history" style="flex:1;min-height:0;overflow-y:auto;display:none;"><div data-qaw-history-toolbar style="padding:8px 8px 4px;display:flex;justify-content:flex-end;"></div><div data-qaw-history-list></div></div><div data-qaw-tab-content="settings" data-qaw-settings-view style="display:none;flex:1;min-height:0;"></div><div data-qaw-tab-content="cases" style="display:none;flex:1;min-height:0;overflow-y:auto;"></div><div data-qaw-tab-content="bugs" style="display:none;flex:1;min-height:0;overflow-y:auto;"></div><div data-qaw-tab-content="maintenance" style="display:none;flex:1;min-height:0;overflow-y:auto;"></div><div data-qaw-tab-content="work" style="display:none;flex:1;min-height:0;overflow-y:auto;"></div><div data-qaw-tab-content="map" style="display:none;flex:1;min-height:0;overflow-y:auto;flex-direction:column;padding:4px 0;"></div><div data-qaw-tab-content="ai" style="display:none;flex:1;min-height:0;overflow-y:auto;padding:12px 8px;"></div><div data-qaw-tab-content="cleaning" style="display:none;flex:1;min-height:0;overflow-y:auto;padding:4px 0;"></div>' + (showPlaygrounds ? '<div data-qaw-tab-content="playgrounds" style="display:none;flex:1;min-height:0;overflow:hidden;padding:0;"></div>' : "") + "</div>";
+    var notesSectionHtml = '<div data-qaw-notes-section style="margin-top:14px;border-top:1px solid #334155;padding-top:12px;display:flex;flex-direction:column;gap:6px;flex:1;min-height:0;"><div style="border-bottom:1px solid #1e293b;margin-bottom:2px;flex-shrink:0;overflow-x:auto;scrollbar-width:none;-ms-overflow-style:none;"><div style="display:flex;align-items:center;gap:0;width:max-content;min-width:365px;">' + tabBtnHtml("notes", "Notes", "investigation-panel-tab-notes", true) + tabBtnHtml("runs", "Runs", null, false) + tabBtnHtml("history", "History", "investigation-panel-tab-history", false) + tabBtnHtml("bugs", "Bugs", null, false) + tabBtnHtml("maintenance", "Maint", null, false) + tabBtnHtml("ai", "AI", null, false) + tabBtnHtml("cases", "Cases", null, false) + tabBtnHtml("work", "Work", null, false) + tabBtnHtml("map", "Helpers", null, false) + tabBtnHtml("cleaning", "Clean", null, false) + (showPlaygrounds ? tabBtnHtml("playgrounds", "Play", null, false) : "") + tabBtnHtml("settings", "Settings", "investigation-panel-tab-settings", false) + '</div></div><div data-qaw-tab-content="notes" style="flex:1;min-height:0;display:flex;flex-direction:column;gap:6px;"><div style="display:flex;align-items:center;gap:6px;"><span data-qaw-notes-syntax-info-wrap></span><button type="button" data-qaw-filter-favs data-e2e="investigation-filter-favs" style="' + FAV_BTN_STYLE + '">\u2606 Pinned</button><button type="button" data-qaw-watch-count-btn style="' + WATCH_BTN_STYLE + '">\u26A1 0 tracked</button></div><div data-qaw-notes-view-wrap data-e2e="investigation-notes-region" style="position:relative;flex:1;min-height:0;display:flex;flex-direction:column;"><div data-qaw-notes-viewer data-e2e="investigation-notes-viewer" tabindex="0" style="display:flex;flex-direction:column;flex:1;min-height:180px;overflow-y:auto;box-sizing:border-box;background:#0f172a;border:1px solid #475569;border-radius:8px;padding:10px 8px;cursor:default;outline:none;"></div><textarea data-qaw-raw data-e2e="investigation-notes-editor" wrap="soft" spellcheck="false" style="display:none;width:100%;flex:1;min-height:180px;resize:vertical;box-sizing:border-box;background:#0f172a;color:#e2e8f0;border:1px solid #475569;border-radius:8px;padding:8px;font-family:monospace;font-size:11px;line-height:1.45;white-space:pre-wrap;word-break:break-word;overflow-x:hidden;"></textarea></div><div data-qaw-raw-status data-e2e="investigation-notes-parse-status" style="font-size:10px;min-height:14px;line-height:1.3;flex-shrink:0;"></div></div><div data-qaw-tab-content="history" style="flex:1;min-height:0;overflow-y:auto;display:none;"><div data-qaw-history-toolbar style="padding:8px 8px 4px;display:flex;justify-content:flex-end;"></div><div data-qaw-history-list></div></div><div data-qaw-tab-content="settings" data-qaw-settings-view style="display:none;flex:1;min-height:0;"></div><div data-qaw-tab-content="cases" style="display:none;flex:1;min-height:0;overflow-y:auto;"></div><div data-qaw-tab-content="bugs" style="display:none;flex:1;min-height:0;overflow-y:auto;"></div><div data-qaw-tab-content="maintenance" style="display:none;flex:1;min-height:0;overflow-y:auto;"></div><div data-qaw-tab-content="work" style="display:none;flex:1;min-height:0;overflow-y:auto;"></div><div data-qaw-tab-content="runs" style="display:none;flex:1;min-height:0;overflow-y:auto;"></div><div data-qaw-tab-content="map" style="display:none;flex:1;min-height:0;overflow-y:auto;flex-direction:column;padding:4px 0;"></div><div data-qaw-tab-content="ai" style="display:none;flex:1;min-height:0;overflow-y:auto;padding:12px 8px;"></div><div data-qaw-tab-content="cleaning" style="display:none;flex:1;min-height:0;overflow-y:auto;padding:4px 0;"></div>' + (showPlaygrounds ? '<div data-qaw-tab-content="playgrounds" style="display:none;flex:1;min-height:0;overflow:hidden;padding:0;"></div>' : "") + "</div>";
     var notesSectionHtmlClient = '<div data-qaw-notes-section style="margin-top:14px;border-top:1px solid #334155;padding-top:12px;display:flex;flex-direction:column;gap:6px;"><div data-qaw-client-notes-view data-e2e="investigation-client-notes-view" style="min-height:200px;"></div></div>';
     if (state.rawSaveTimer) {
       clearTimeout(state.rawSaveTimer);
@@ -27303,6 +28388,7 @@ This won't delete the actual file.`)) return;
         if (tabBugsContent) tabBugsContent.style.display = tab === "bugs" ? "block" : "none";
         if (tabMaintenanceContent) tabMaintenanceContent.style.display = tab === "maintenance" ? "block" : "none";
         if (tabWorkContent) tabWorkContent.style.display = tab === "work" ? "block" : "none";
+        if (tabRunsContent) tabRunsContent.style.display = tab === "runs" ? "block" : "none";
         if (tabMapContent) tabMapContent.style.display = tab === "map" ? "flex" : "none";
         if (tabAiContent) tabAiContent.style.display = tab === "ai" ? "block" : "none";
         if (tabCleaningContent) tabCleaningContent.style.display = tab === "cleaning" ? "flex" : "none";
@@ -27314,6 +28400,7 @@ This won't delete the actual file.`)) return;
         setTabButtonVisual(tabBugsBtn2, tab === "bugs");
         setTabButtonVisual(tabMaintenanceBtn2, tab === "maintenance");
         setTabButtonVisual(tabWorkBtn2, tab === "work");
+        setTabButtonVisual(tabRunsBtn2, tab === "runs");
         setTabButtonVisual(tabMapBtn2, tab === "map");
         setTabButtonVisual(tabAiBtn2, tab === "ai");
         setTabButtonVisual(tabCleaningBtn2, tab === "cleaning");
@@ -27362,6 +28449,7 @@ This won't delete the actual file.`)) return;
         if (tab === "bugs" && tabBugsContent) mountBugsView(tabBugsContent);
         if (tab === "maintenance" && tabMaintenanceContent) mountMaintenanceView(tabMaintenanceContent);
         if (tab === "work" && tabWorkContent) mountDailyWorkView(tabWorkContent);
+        if (tab === "runs" && tabRunsContent) mountInvRunHubView(tabRunsContent);
         if (tab === "map" && tabMapContent) mountMapView(tabMapContent);
         if (tab === "ai" && tabAiContent && !tabAiContent.hasAttribute("data-qaw-ai-mounted")) mountAiTab(tabAiContent, editKey);
         if (tab === "cleaning" && tabCleaningContent) mountHouseCleaningView(tabCleaningContent);
@@ -27375,6 +28463,7 @@ This won't delete the actual file.`)) return;
       var tabBugsBtn2 = body.querySelector('[data-qaw-tab-btn="bugs"]');
       var tabMaintenanceBtn2 = body.querySelector('[data-qaw-tab-btn="maintenance"]');
       var tabWorkBtn2 = body.querySelector('[data-qaw-tab-btn="work"]');
+      var tabRunsBtn2 = body.querySelector('[data-qaw-tab-btn="runs"]');
       var tabMapBtn2 = body.querySelector('[data-qaw-tab-btn="map"]');
       var tabAiBtn2 = body.querySelector('[data-qaw-tab-btn="ai"]');
       var tabCleaningBtn2 = body.querySelector('[data-qaw-tab-btn="cleaning"]');
@@ -27386,6 +28475,7 @@ This won't delete the actual file.`)) return;
       var tabBugsContent = body.querySelector('[data-qaw-tab-content="bugs"]');
       var tabMaintenanceContent = body.querySelector('[data-qaw-tab-content="maintenance"]');
       var tabWorkContent = body.querySelector('[data-qaw-tab-content="work"]');
+      var tabRunsContent = body.querySelector('[data-qaw-tab-content="runs"]');
       var tabMapContent = body.querySelector('[data-qaw-tab-content="map"]');
       var tabAiContent = body.querySelector('[data-qaw-tab-content="ai"]');
       var tabCleaningContent = body.querySelector('[data-qaw-tab-content="cleaning"]');
@@ -27410,6 +28500,9 @@ This won't delete the actual file.`)) return;
       });
       if (tabWorkBtn2) tabWorkBtn2.addEventListener("click", function() {
         switchTab2("work");
+      });
+      if (tabRunsBtn2) tabRunsBtn2.addEventListener("click", function() {
+        switchTab2("runs");
       });
       if (tabMapBtn2) tabMapBtn2.addEventListener("click", function() {
         switchTab2("map");
@@ -27633,6 +28726,7 @@ This won't delete the actual file.`)) return;
       init_editor_protection();
       init_daily_work();
       init_status_resolver();
+      init_inv_run_hub();
       init_discover();
       state.renderPanelForKeyFn = renderPanelForKey;
     }
@@ -28270,7 +29364,7 @@ This won't delete the actual file.`)) return;
       } catch (e) {
       }
       try {
-        if ("1.672") return "1.672";
+        if ("1.692") return "1.692";
       } catch (e2) {
       }
       return "unknown";
@@ -31398,7 +32492,7 @@ This won't delete the actual file.`)) return;
     } catch (_) {
     }
     try {
-      if ("1.672") return "1.672";
+      if ("1.692") return "1.692";
     } catch (_) {
     }
     return "unknown";
