@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         QA Wolf Investigation Notes
 // @namespace    http://tampermonkey.net/
-// @version      1.692
+// @version      1.694
 // @description  Per-file investigation notes: quick links (new-tab opens, PoC textarea, client-wide notes), client/env chips, instant tooltips, run timing, shift sync, work mode, export, search. data-e2e investigation-* hooks.
 // @author       You
 // @match        https://app.qawolf.com/*
@@ -11643,7 +11643,7 @@
         otherBullets.push((ts ? ts + " \u2014 " : "") + obText);
       });
     }
-    var intro = "You are helping a QA engineer investigate a failing or unexpected test. For every issue, cover these three things:\n1. **Root cause** \u2014 what is actually causing this? Be specific, reference code or screenshots.\n2. **Fix** \u2014 is this something we can fix on our end (update the test), or is it a bug in the app? If we can fix it, show the change. If it's the app, explain what's broken.\n3. **Bug report** \u2014 if it's an app bug, summarize what you'd put in a bug report (title, steps to reproduce, expected vs actual behavior).\n\n";
+    var intro = "You are helping a QA engineer investigate a failing or unexpected test. For every issue, cover these two things:\n1. **Root cause** \u2014 what is actually causing this? Be specific, reference code or screenshots.\n2. **Fix** \u2014 is this something we can fix on our end (update the test), or is it a bug in the app? If we can fix it, show the change. If it's the app, explain what's broken.\n\n";
     intro += "### Note\n" + cleanedText + "\n";
     if (loggedAt) intro += "_Logged:_ " + loggedAt + "\n";
     if (tag) intro += "_Tag:_ " + tag + "\n";
@@ -11872,6 +11872,68 @@
       if (bodyEl) bodyEl.innerHTML = '<span style="color:#475569;font-style:italic;font-size:11px;">Thinking\u2026</span>';
       return wrap;
     }
+    function addAssistantActions(wrap, text) {
+      var actions = document.createElement("div");
+      actions.style.cssText = "display:flex;gap:6px;margin-top:8px;padding-top:6px;border-top:1px solid #1e3a5f;";
+      var copyBtn = document.createElement("button");
+      copyBtn.type = "button";
+      copyBtn.textContent = "Copy";
+      copyBtn.title = "Copy raw markdown (preserves backticks)";
+      copyBtn.style.cssText = "background:none;border:1px solid #334155;border-radius:4px;color:#64748b;cursor:pointer;font-size:10px;padding:2px 8px;font-family:monospace;";
+      copyBtn.addEventListener("mouseenter", function() {
+        copyBtn.style.borderColor = "#64748b";
+      });
+      copyBtn.addEventListener("mouseleave", function() {
+        copyBtn.style.borderColor = "#334155";
+      });
+      copyBtn.addEventListener("click", function() {
+        navigator.clipboard.writeText(text).then(function() {
+          copyBtn.textContent = "\u2713 Copied";
+          setTimeout(function() {
+            copyBtn.textContent = "Copy";
+          }, 1500);
+        }).catch(function() {
+          var ta = document.createElement("textarea");
+          ta.value = text;
+          document.body.appendChild(ta);
+          ta.select();
+          var ok = document.execCommand("copy");
+          ta.remove();
+          if (ok) {
+            copyBtn.textContent = "\u2713 Copied";
+            setTimeout(function() {
+              copyBtn.textContent = "Copy";
+            }, 1500);
+          } else {
+            copyBtn.textContent = "\u26A0 Copy failed";
+            setTimeout(function() {
+              copyBtn.textContent = "Copy";
+            }, 2e3);
+          }
+        });
+      });
+      actions.appendChild(copyBtn);
+      var bugBtn = document.createElement("button");
+      bugBtn.type = "button";
+      bugBtn.textContent = "Generate bug report";
+      bugBtn.title = "Ask the LLM to write a bug report based on this reply";
+      bugBtn.style.cssText = "background:none;border:1px solid #334155;border-radius:4px;color:#64748b;cursor:pointer;font-size:10px;padding:2px 8px;font-family:monospace;";
+      bugBtn.addEventListener("mouseenter", function() {
+        bugBtn.style.borderColor = "#64748b";
+      });
+      bugBtn.addEventListener("mouseleave", function() {
+        bugBtn.style.borderColor = "#334155";
+      });
+      bugBtn.addEventListener("click", function() {
+        bugBtn.disabled = true;
+        bugBtn.style.opacity = "0.4";
+        var followUp = { role: "user", text: "Please write a bug report for this issue. Include: a concise title, steps to reproduce, expected vs actual behavior, and any relevant technical details from the file." };
+        addMessage("user", followUp.text);
+        send(followUp);
+      });
+      actions.appendChild(bugBtn);
+      wrap.appendChild(actions);
+    }
     function fireReplyCallback(text) {
       if (!bulletId) return;
       var cb = state.llmReplyCallbacks.get(bulletId);
@@ -11890,7 +11952,8 @@
         var replyMsg = { role: "assistant", text: reply };
         conversation.push(replyMsg);
         thinking.remove();
-        addMessage("assistant", reply);
+        var replyWrap = addMessage("assistant", reply);
+        addAssistantActions(replyWrap, reply);
         fireReplyCallback(reply);
       } catch (err) {
         thinking.remove();
@@ -11911,7 +11974,8 @@
       firstSent = true;
       replyInput.placeholder = "Follow-up\u2026";
       savedConv.forEach(function(msg) {
-        addMessage(msg.role, msg.text);
+        var msgWrap = addMessage(msg.role, msg.text);
+        if (msg.role === "assistant") addAssistantActions(msgWrap, msg.text);
       });
       if (bulletId && state.llmPendingBullets.has(bulletId)) {
         setInputEnabled(false);
@@ -29364,7 +29428,7 @@ This won't delete the actual file.`)) return;
       } catch (e) {
       }
       try {
-        if ("1.692") return "1.692";
+        if ("1.694") return "1.694";
       } catch (e2) {
       }
       return "unknown";
@@ -32492,7 +32556,7 @@ This won't delete the actual file.`)) return;
     } catch (_) {
     }
     try {
-      if ("1.692") return "1.692";
+      if ("1.694") return "1.694";
     } catch (_) {
     }
     return "unknown";
