@@ -2,7 +2,7 @@
 
 Notable changes for the QA Wolf userscripts install channel.
 
-## Investigation Notes v1.694
+## Investigation Notes v1.721
 
 - Various improvements and bug fixes.
 

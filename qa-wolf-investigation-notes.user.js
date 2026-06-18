@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         QA Wolf Investigation Notes
 // @namespace    http://tampermonkey.net/
-// @version      1.694
+// @version      1.721
 // @description  Per-file investigation notes: quick links (new-tab opens, PoC textarea, client-wide notes), client/env chips, instant tooltips, run timing, shift sync, work mode, export, search. data-e2e investigation-* hooks.
 // @author       You
 // @match        https://app.qawolf.com/*
@@ -4338,6 +4338,381 @@
     }
   });
 
+  // src/notes/58-open-local.ts
+  function olDbOpen() {
+    return new Promise(function(resolve, reject) {
+      var req = indexedDB.open(OL_IDB_NAME, 1);
+      req.onupgradeneeded = function() {
+        req.result.createObjectStore(OL_IDB_STORE);
+      };
+      req.onsuccess = function() {
+        resolve(req.result);
+      };
+      req.onerror = function() {
+        reject(req.error);
+      };
+    });
+  }
+  function olHandleGet() {
+    return olDbOpen().then(function(db) {
+      return new Promise(function(resolve) {
+        var tx = db.transaction(OL_IDB_STORE, "readonly");
+        var req = tx.objectStore(OL_IDB_STORE).get(OL_IDB_KEY);
+        req.onsuccess = function() {
+          resolve(req.result || null);
+        };
+        req.onerror = function() {
+          resolve(null);
+        };
+      });
+    }).catch(function() {
+      return null;
+    });
+  }
+  function olHandleSet(handle) {
+    return olDbOpen().then(function(db) {
+      return new Promise(function(resolve, reject) {
+        var tx = db.transaction(OL_IDB_STORE, "readwrite");
+        tx.objectStore(OL_IDB_STORE).put(handle, OL_IDB_KEY);
+        tx.oncomplete = function() {
+          resolve();
+        };
+        tx.onerror = function() {
+          reject(tx.error);
+        };
+      });
+    });
+  }
+  function olGetEditor() {
+    try {
+      var v = GM_getValue(OL_GM_EDITOR_KEY, "");
+      if (v === "cursor" || v === "antigravity") return v;
+    } catch (_) {
+    }
+    return "vscode";
+  }
+  function olSetEditor(e) {
+    try {
+      GM_setValue(OL_GM_EDITOR_KEY, e);
+    } catch (_) {
+    }
+  }
+  async function olReadHandleMap(handle) {
+    try {
+      var file = await handle.getFile();
+      var text = await file.text();
+      return JSON.parse(text);
+    } catch (_) {
+      return null;
+    }
+  }
+  async function initOpenLocal() {
+    if (_olInited) return;
+    _olInited = true;
+    try {
+      var handle = await olHandleGet();
+      if (!handle) return;
+      _olHandle = handle;
+      var perm = await handle.queryPermission({ mode: "read" });
+      _olPermState = perm;
+      if (perm === "granted") _olMapData = await olReadHandleMap(handle);
+    } catch (_) {
+    }
+  }
+  function olResolveFilePath(meta, entry) {
+    try {
+      var urlFile = new URLSearchParams(window.location.search).get("file") || "";
+      urlFile = urlFile.replace(/\\/g, "/");
+      var norm2 = meta.fileName.replace(/\\/g, "/");
+      if (urlFile && (urlFile === norm2 || urlFile.endsWith("/" + norm2))) return urlFile;
+    } catch (_) {
+    }
+    var baseName = meta.fileName.replace(/\\/g, "/").split("/").pop() || meta.fileName;
+    if (entry.files && entry.files[baseName]) return entry.files[baseName];
+    return meta.fileName;
+  }
+  function olBuildUri(entry, resolvedPath, editor) {
+    var scheme = OL_EDITOR_SCHEMES[editor] || editor;
+    var filePath = String(resolvedPath).replace(/\\/g, "/");
+    var basePath = String(entry.path || "").replace(/\/$/, "");
+    return scheme + "://file" + basePath + "/GitWolf/" + filePath;
+  }
+  async function olOpenFile(meta, editorOverride) {
+    var handle = _olHandle || await olHandleGet();
+    if (!handle) {
+      alert("No map file configured. Go to Settings \u2192 Local IDE to select your qawolf-clients-map.json.");
+      return;
+    }
+    _olHandle = handle;
+    var perm = _olPermState !== "unknown" ? _olPermState : await handle.queryPermission({ mode: "read" });
+    if (perm === "prompt") {
+      perm = await handle.requestPermission({ mode: "read" });
+      _olPermState = perm;
+    }
+    if (perm !== "granted") {
+      alert("Permission to read the map file was denied.");
+      return;
+    }
+    if (!_olMapData) _olMapData = await olReadHandleMap(handle);
+    if (!_olMapData) {
+      alert("Could not read qawolf-clients-map.json.");
+      return;
+    }
+    var entry = _olMapData[meta.client];
+    if (!entry) {
+      alert('Client "' + meta.client + '" not found in local map.\nRun `qawolf sync` for this client first.');
+      return;
+    }
+    var editor = editorOverride || olGetEditor();
+    window.open(olBuildUri(entry, olResolveFilePath(meta, entry), editor), "_self");
+  }
+  function showEditorPicker(anchor, meta) {
+    var existing = document.querySelector("[data-qaw-ol-picker]");
+    if (existing) {
+      existing.remove();
+      return;
+    }
+    var pop = document.createElement("div");
+    pop.setAttribute("data-qaw-ol-picker", "1");
+    pop.style.cssText = "position:fixed;background:#0f172a;border:1px solid #334155;border-radius:6px;padding:4px;z-index:2147483640;box-shadow:0 4px 16px rgba(0,0,0,0.6);min-width:120px;";
+    var EDITORS = ["vscode", "cursor", "antigravity"];
+    var current = olGetEditor();
+    EDITORS.forEach(function(ed) {
+      var btn3 = document.createElement("button");
+      btn3.type = "button";
+      var active = ed === current;
+      btn3.style.cssText = "display:block;width:100%;text-align:left;background:" + (active ? "#1e293b" : "none") + ";border:none;border-radius:4px;color:" + (active ? "#e2e8f0" : "#94a3b8") + ";cursor:pointer;font-size:10px;font-family:monospace;padding:5px 8px;white-space:nowrap;";
+      btn3.textContent = (active ? "\u2713 " : "  ") + OL_EDITOR_LABELS[ed];
+      btn3.addEventListener("mouseenter", function() {
+        btn3.style.background = "#1e293b";
+        btn3.style.color = "#e2e8f0";
+      });
+      btn3.addEventListener("mouseleave", function() {
+        btn3.style.background = active ? "#1e293b" : "none";
+        btn3.style.color = active ? "#e2e8f0" : "#94a3b8";
+      });
+      btn3.addEventListener("click", function() {
+        pop.remove();
+        olOpenFile(meta, ed).catch(function(e) {
+          console.error("[QAW OpenLocal]", e);
+        });
+      });
+      pop.appendChild(btn3);
+    });
+    document.body.appendChild(pop);
+    var rect = anchor.getBoundingClientRect();
+    pop.style.left = Math.min(rect.left, window.innerWidth - 140) + "px";
+    pop.style.top = rect.bottom + 4 + "px";
+    setTimeout(function() {
+      function dismiss(e) {
+        if (!pop.contains(e.target)) {
+          pop.remove();
+          document.removeEventListener("mousedown", dismiss, true);
+        }
+      }
+      document.addEventListener("mousedown", dismiss, true);
+    }, 0);
+  }
+  function ensureOpenLocalButton(fileRow, meta) {
+    if (window._qawUserscriptsSafeMode) return;
+    if (!meta.fileName || meta.fileName.startsWith("__")) return;
+    var existing = fileRow.querySelector("[" + OL_BTN_ATTR + "]");
+    if (existing) existing.remove();
+    if (!_olHandle) return;
+    if (_olPermState === "denied") return;
+    if (_olMapData && !_olMapData[meta.client]) return;
+    var entry = _olMapData ? _olMapData[meta.client] : null;
+    var envMatch = !entry || entry.environmentId === meta.envId;
+    var BORDER = envMatch ? "#334155" : "#92400e";
+    var wrap = document.createElement("div");
+    wrap.setAttribute(OL_BTN_ATTR, "1");
+    wrap.style.cssText = "display:inline-flex;align-items:stretch;flex-shrink:0;border:1px solid " + BORDER + ";border-radius:5px;overflow:hidden;";
+    var mainBtn = document.createElement("button");
+    mainBtn.type = "button";
+    mainBtn.style.cssText = "background:none;border:none;border-right:1px solid " + BORDER + ";color:#94a3b8;cursor:pointer;font-size:10px;font-family:monospace;padding:2px 7px;white-space:nowrap;display:flex;align-items:center;gap:3px;line-height:1;";
+    if (!envMatch) {
+      var badge = document.createElement("span");
+      badge.textContent = "\u2260";
+      badge.style.cssText = "color:#f59e0b;font-size:9px;";
+      mainBtn.appendChild(badge);
+    }
+    mainBtn.appendChild(document.createTextNode("local"));
+    mainBtn.title = envMatch ? "Open in " + OL_EDITOR_LABELS[olGetEditor()] + " (local)" : "Local map is synced to a different environment \u2014 file may differ";
+    mainBtn.addEventListener("mouseenter", function() {
+      mainBtn.style.color = "#e2e8f0";
+      wrap.style.borderColor = "#64748b";
+    });
+    mainBtn.addEventListener("mouseleave", function() {
+      mainBtn.style.color = "#94a3b8";
+      wrap.style.borderColor = BORDER;
+    });
+    mainBtn.addEventListener("click", function() {
+      olOpenFile(meta).catch(function(e) {
+        console.error("[QAW OpenLocal]", e);
+      });
+    });
+    var arrowBtn = document.createElement("button");
+    arrowBtn.type = "button";
+    arrowBtn.style.cssText = "background:none;border:none;color:#475569;cursor:pointer;font-size:9px;padding:2px 4px;line-height:1;";
+    arrowBtn.textContent = "\u25BE";
+    arrowBtn.title = "Open with a different editor";
+    arrowBtn.addEventListener("mouseenter", function() {
+      arrowBtn.style.color = "#e2e8f0";
+    });
+    arrowBtn.addEventListener("mouseleave", function() {
+      arrowBtn.style.color = "#475569";
+    });
+    arrowBtn.addEventListener("click", function(e) {
+      e.stopPropagation();
+      showEditorPicker(arrowBtn, meta);
+    });
+    wrap.appendChild(mainBtn);
+    wrap.appendChild(arrowBtn);
+    fileRow.appendChild(wrap);
+  }
+  function olMountSettings(container) {
+    container.innerHTML = "";
+    container.style.cssText = "display:flex;flex-direction:column;gap:14px;";
+    function label(text) {
+      var el = document.createElement("div");
+      el.style.cssText = "font-size:10px;color:#64748b;font-family:monospace;margin-bottom:3px;";
+      el.textContent = text;
+      return el;
+    }
+    var mapSection = document.createElement("div");
+    var fileStatus = document.createElement("div");
+    fileStatus.style.cssText = "font-size:10px;color:#475569;font-family:monospace;margin-top:4px;";
+    async function refreshStatus() {
+      var h = await olHandleGet();
+      if (!h) {
+        fileStatus.textContent = "No file selected";
+        return;
+      }
+      try {
+        var perm = await h.queryPermission({ mode: "read" });
+        var fname = perm === "granted" ? (await h.getFile()).name : h.name;
+        fileStatus.textContent = fname + (perm !== "granted" ? " (click to reauthorize)" : " \u2713");
+        fileStatus.style.color = perm === "granted" ? "#34d399" : "#f59e0b";
+        fileStatus.style.cursor = perm !== "granted" ? "pointer" : "default";
+        var hNonNull = h;
+        fileStatus.onclick = perm !== "granted" ? async function() {
+          var rp = await hNonNull.requestPermission({ mode: "read" });
+          _olPermState = rp;
+          if (rp === "granted") {
+            _olMapData = await olReadHandleMap(hNonNull);
+          }
+          await refreshStatus();
+        } : null;
+      } catch (_) {
+        fileStatus.textContent = "File selected";
+      }
+    }
+    var selectBtn = document.createElement("button");
+    selectBtn.type = "button";
+    selectBtn.textContent = "Select map file\u2026";
+    selectBtn.style.cssText = "background:#1e293b;border:1px solid #334155;border-radius:5px;color:#94a3b8;cursor:pointer;font-size:10px;font-family:monospace;padding:5px 10px;";
+    selectBtn.addEventListener("mouseenter", function() {
+      selectBtn.style.borderColor = "#64748b";
+      selectBtn.style.color = "#e2e8f0";
+    });
+    selectBtn.addEventListener("mouseleave", function() {
+      selectBtn.style.borderColor = "#334155";
+      selectBtn.style.color = "#94a3b8";
+    });
+    selectBtn.addEventListener("click", async function() {
+      try {
+        var picker = window.showOpenFilePicker;
+        if (!picker) {
+          alert("File System Access API not supported in this browser.");
+          return;
+        }
+        var handles = await picker({
+          types: [{ description: "JSON", accept: { "application/json": [".json"] } }],
+          multiple: false
+        });
+        var handle = handles[0];
+        if (!handle) return;
+        await olHandleSet(handle);
+        _olHandle = handle;
+        _olPermState = await handle.queryPermission({ mode: "read" });
+        _olMapData = _olPermState === "granted" ? await olReadHandleMap(handle) : null;
+        await refreshStatus();
+      } catch (e) {
+        if ((e == null ? void 0 : e.name) !== "AbortError") console.error("[QAW OpenLocal]", e);
+      }
+    });
+    mapSection.appendChild(label("Map file (qawolf-clients-map.json)"));
+    mapSection.appendChild(selectBtn);
+    mapSection.appendChild(fileStatus);
+    container.appendChild(mapSection);
+    var editorSection = document.createElement("div");
+    editorSection.appendChild(label("Default editor"));
+    var editorBtns = document.createElement("div");
+    editorBtns.style.cssText = "display:flex;gap:4px;flex-wrap:wrap;";
+    var EDITORS = ["vscode", "cursor", "antigravity"];
+    function refreshEditorBtns(sel) {
+      editorBtns.querySelectorAll("[data-ol-ed]").forEach(function(b) {
+        var el = b;
+        var ed = el.getAttribute("data-ol-ed");
+        var on = ed === sel;
+        el.style.borderColor = on ? "#6366f1" : "#334155";
+        el.style.color = on ? "#a5b4fc" : "#64748b";
+        el.style.background = on ? "#1e1b4b" : "none";
+      });
+    }
+    var currentEditor = olGetEditor();
+    EDITORS.forEach(function(ed) {
+      var b = document.createElement("button");
+      b.type = "button";
+      b.setAttribute("data-ol-ed", ed);
+      var on = ed === currentEditor;
+      b.style.cssText = "background:" + (on ? "#1e1b4b" : "none") + ";border:1px solid " + (on ? "#6366f1" : "#334155") + ";border-radius:5px;color:" + (on ? "#a5b4fc" : "#64748b") + ";cursor:pointer;font-size:10px;font-family:monospace;padding:4px 10px;";
+      b.textContent = OL_EDITOR_LABELS[ed];
+      b.addEventListener("mouseenter", function() {
+        if (olGetEditor() !== ed) {
+          b.style.borderColor = "#64748b";
+          b.style.color = "#94a3b8";
+        }
+      });
+      b.addEventListener("mouseleave", function() {
+        refreshEditorBtns(olGetEditor());
+      });
+      b.addEventListener("click", function() {
+        olSetEditor(ed);
+        refreshEditorBtns(ed);
+      });
+      editorBtns.appendChild(b);
+    });
+    editorSection.appendChild(editorBtns);
+    container.appendChild(editorSection);
+    refreshStatus();
+  }
+  var OL_IDB_NAME, OL_IDB_STORE, OL_IDB_KEY, OL_GM_EDITOR_KEY, OL_BTN_ATTR, OL_EDITOR_LABELS, OL_EDITOR_SCHEMES, _olHandle, _olPermState, _olMapData, _olInited;
+  var init_open_local = __esm({
+    "src/notes/58-open-local.ts"() {
+      "use strict";
+      OL_IDB_NAME = "qaw-open-local";
+      OL_IDB_STORE = "handles";
+      OL_IDB_KEY = "mapFile";
+      OL_GM_EDITOR_KEY = "localIdeEditor";
+      OL_BTN_ATTR = "data-qaw-open-local";
+      OL_EDITOR_LABELS = {
+        vscode: "VS Code",
+        cursor: "Cursor",
+        antigravity: "Antigravity IDE"
+      };
+      OL_EDITOR_SCHEMES = {
+        vscode: "vscode",
+        cursor: "cursor",
+        antigravity: "antigravity-ide"
+      };
+      _olHandle = null;
+      _olPermState = "unknown";
+      _olMapData = null;
+      _olInited = false;
+    }
+  });
+
   // src/notes/06-head.ts
   function applyStatusChipVisual(chip, status) {
     var s = STATUS_CHIP_STYLE[status] || STATUS_CHIP_STYLE.empty;
@@ -4495,6 +4870,7 @@
       });
       fileRow.appendChild(copyBtn);
     }
+    ensureOpenLocalButton(fileRow, meta);
     head.appendChild(fileRow);
     var row2 = document.createElement("div");
     row2.setAttribute("data-e2e", "investigation-note-subtitle");
@@ -4731,6 +5107,7 @@
       init_shift();
       init_context();
       init_quicklinks();
+      init_open_local();
       TAG_LABELS = { "null": "\u2014 none", flake: "Flake", locator: "Locator", helper: "Helper", unknown: "Unknown", note: "Note", bug: "Bug", maintenance: "Maintenance" };
       TAG_PILL_BG = QAW_TAG_PILL_BG;
     }
@@ -7033,31 +7410,147 @@
       doneHint.textContent = "Coverage workflow checklist is complete.";
       card.appendChild(doneHint);
     } else {
-      let appendPrivateNotesEditor2 = function() {
+      let crMd2 = function(text) {
+        function esc5(s) {
+          return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+        }
+        function inl(s) {
+          return s.replace(/`([^`]+)`/g, function(_, c) {
+            return '<code style="background:#1e293b;color:#e2e8f0;border-radius:3px;padding:1px 5px;font-size:11px;font-family:monospace;">' + c + "</code>";
+          }).replace(/\*\*([^\n]*?)\*\*/g, function(_, b) {
+            return "<strong>" + b + "</strong>";
+          });
+        }
+        var lines = text.split("\n");
+        var html = "";
+        var depth = 0;
+        function openTo(d) {
+          while (depth < d) {
+            html += '<ul style="margin:2px 0 2px 16px;padding:0;list-style:disc;">';
+            depth++;
+          }
+        }
+        function closeTo(d) {
+          while (depth > d) {
+            html += "</ul>";
+            depth--;
+          }
+        }
+        for (var i = 0; i < lines.length; i++) {
+          var raw = lines[i];
+          var hm = raw.match(/^#{1,3}\s+(.*)/);
+          var bm = raw.match(/^(\s*)([-*•])\s+(.*)/);
+          var blank = raw.trim() === "";
+          if (hm) {
+            closeTo(0);
+            html += '<div style="font-size:11px;font-weight:700;color:#0f172a;margin:8px 0 3px;">' + inl(esc5(hm[1])) + "</div>";
+          } else if (bm) {
+            var indent = bm[1].length;
+            var targetDepth = indent >= 2 ? 2 : 1;
+            if (targetDepth < depth) closeTo(targetDepth);
+            openTo(targetDepth);
+            html += '<li style="font-size:12px;color:#374151;margin-bottom:2px;line-height:1.45;">' + inl(esc5(bm[3])) + "</li>";
+          } else if (blank) {
+            closeTo(0);
+            html += '<div style="height:5px;"></div>';
+          } else {
+            closeTo(0);
+            html += '<div style="font-size:12px;color:#374151;line-height:1.45;margin-bottom:1px;">' + inl(esc5(raw)) + "</div>";
+          }
+        }
+        closeTo(0);
+        return html;
+      }, appendPrivateNotesEditor2 = function(focusImmediately) {
         card.appendChild(fieldLabel("Private notes"));
+        var preview = document.createElement("div");
+        preview.style.cssText = "width:100%;box-sizing:border-box;border:1px solid #cbd5e1;border-radius:7px;padding:8px;min-height:40px;cursor:text;margin-bottom:6px;";
+        preview.title = "Click to edit";
         var notes = document.createElement("textarea");
-        notes.placeholder = "Only you see this \u2014 reminders, flow names, tracker row notes\u2026";
+        notes.placeholder = "Only you see this \u2014 supports markdown: # heading, - bullet, `code`, **bold**";
         notes.value = ws.privateNotes || "";
-        notes.style.cssText = "width:100%;min-height:72px;box-sizing:border-box;border:1px solid #cbd5e1;border-radius:7px;padding:8px;font-size:12px;line-height:1.4;resize:none;overflow:hidden;font-family:inherit;margin-bottom:6px;";
-        function autosizePrivateNotes() {
+        notes.style.cssText = "width:100%;min-height:72px;box-sizing:border-box;border:1px solid #4f46e5;border-radius:7px;padding:8px;font-size:12px;line-height:1.4;resize:none;overflow:hidden;font-family:inherit;margin-bottom:6px;display:none;";
+        function showPreview() {
+          var content = (ws.privateNotes || "").trim();
+          if (content) {
+            preview.innerHTML = crMd2(content);
+            preview.style.display = "";
+          } else {
+            preview.style.display = "none";
+          }
+          notes.style.display = "none";
+        }
+        function showEditor() {
+          notes.style.height = preview.offsetHeight + "px";
+          preview.style.display = "none";
+          notes.style.display = "";
+          var sy = window.scrollY;
           notes.style.height = "auto";
           notes.style.height = Math.max(72, notes.scrollHeight + 2) + "px";
+          window.scrollTo(window.scrollX, sy);
+          notes.focus({ preventScroll: true });
         }
+        preview.addEventListener("click", showEditor);
         notes.addEventListener("input", function() {
           ws.privateNotes = notes.value;
           saveWorkspace(ws);
-          autosizePrivateNotes();
+          var sy = window.scrollY;
+          notes.style.height = "auto";
+          notes.style.height = Math.max(72, notes.scrollHeight + 2) + "px";
+          window.scrollTo(window.scrollX, sy);
         });
+        notes.addEventListener("keydown", function(e) {
+          var start = notes.selectionStart;
+          var end = notes.selectionEnd;
+          var val = notes.value;
+          var lineStart = val.lastIndexOf("\n", start - 1) + 1;
+          var lineEnd = val.indexOf("\n", start);
+          if (lineEnd === -1) lineEnd = val.length;
+          var line = val.substring(lineStart, lineEnd);
+          if (e.key === "Escape") {
+            notes.blur();
+          } else if (e.key === "Tab") {
+            e.preventDefault();
+            e.stopPropagation();
+            if (e.shiftKey) {
+              if (line.startsWith("  ")) {
+                notes.value = val.substring(0, lineStart) + line.substring(2) + val.substring(lineEnd);
+                var pos = Math.max(lineStart, start - 2);
+                notes.selectionStart = notes.selectionEnd = pos;
+              }
+            } else {
+              notes.value = val.substring(0, lineStart) + "  " + line + val.substring(lineEnd);
+              notes.selectionStart = notes.selectionEnd = start + 2;
+            }
+            notes.dispatchEvent(new Event("input"));
+          } else if (e.key === "Enter") {
+            var bm = line.match(/^(\s*)([-*•])\s+(.*)/);
+            if (bm) {
+              e.preventDefault();
+              var lineIndent = bm[1];
+              var marker = bm[2];
+              var content = bm[3].trim();
+              if (!content) {
+                notes.value = val.substring(0, lineStart) + val.substring(lineEnd + 1 > val.length ? lineEnd : lineEnd + 1);
+                notes.selectionStart = notes.selectionEnd = lineStart;
+              } else {
+                var insert = "\n" + lineIndent + marker + " ";
+                notes.value = val.substring(0, start) + insert + val.substring(end);
+                notes.selectionStart = notes.selectionEnd = start + insert.length;
+              }
+              notes.dispatchEvent(new Event("input"));
+            }
+          }
+        });
+        notes.addEventListener("blur", showPreview);
+        card.appendChild(preview);
         card.appendChild(notes);
-        autosizePrivateNotes();
-        setTimeout(function() {
-          autosizePrivateNotes();
-        }, 0);
-        if (typeof requestAnimationFrame === "function") {
-          requestAnimationFrame(autosizePrivateNotes);
+        if (focusImmediately) {
+          showEditor();
+        } else {
+          showPreview();
         }
       };
-      var appendPrivateNotesEditor = appendPrivateNotesEditor2;
+      var crMd = crMd2, appendPrivateNotesEditor = appendPrivateNotesEditor2;
       var usingPlan = coverageUsesCoveragePlan(ws);
       if (usingPlan) {
         card.appendChild(coveragePlanSection(ctx, ws));
@@ -7102,34 +7595,15 @@
       if ((ws.privateNotes || "").trim()) {
         appendPrivateNotesEditor2();
       } else {
-        card.appendChild(
-          btn("Add notes", {
-            variant: "secondary",
-            fullWidth: false,
-            onClick: function() {
-              renderCard(ctx);
-              var fresh = document.querySelector("[data-qaw-coverage-helper]");
-              if (!fresh) return;
-              var existingAdd = Array.from(fresh.querySelectorAll("button")).filter(function(b) {
-                return (b.textContent || "") === "Add notes";
-              })[0];
-              if (existingAdd) existingAdd.style.display = "none";
-              var freshCard = fresh;
-              freshCard.appendChild(fieldLabel("Private notes"));
-              var notes = document.createElement("textarea");
-              notes.placeholder = "Only you see this \u2014 reminders, flow names, tracker row notes\u2026";
-              notes.style.cssText = "width:100%;min-height:72px;box-sizing:border-box;border:1px solid #cbd5e1;border-radius:7px;padding:8px;font-size:12px;line-height:1.4;resize:none;overflow:hidden;font-family:inherit;margin-bottom:6px;";
-              notes.addEventListener("input", function() {
-                ws.privateNotes = notes.value;
-                saveWorkspace(ws);
-                notes.style.height = "auto";
-                notes.style.height = Math.max(72, notes.scrollHeight) + "px";
-              });
-              freshCard.appendChild(notes);
-              notes.focus();
-            }
-          })
-        );
+        var addNotesBtn = btn("Add notes", {
+          variant: "secondary",
+          fullWidth: false,
+          onClick: function() {
+            addNotesBtn.style.display = "none";
+            appendPrivateNotesEditor2(true);
+          }
+        });
+        card.appendChild(addNotesBtn);
       }
     }
     if (anchor.nextSibling) {
@@ -7161,6 +7635,7 @@
     syncCoverageHelper();
     if (!mountObserver) {
       mountObserver = new MutationObserver(function(mutations) {
+        if (document.hidden) return;
         for (var i = 0; i < mutations.length; i++) {
           var target = mutations[i].target;
           if (target && target.closest && target.closest("[data-qaw-coverage-helper]")) return;
@@ -7169,6 +7644,14 @@
         syncTimer = setTimeout(function() {
           syncTimer = null;
           syncCoverageHelper();
+          if (document.querySelector("[data-qaw-coverage-helper]") && mountObserver) {
+            mountObserver.disconnect();
+            mountObserver = null;
+            setInterval(function() {
+              if (document.hidden) return;
+              if (!document.querySelector("[data-qaw-coverage-helper]")) syncCoverageHelper();
+            }, 3e3);
+          }
         }, 350);
       });
       mountObserver.observe(document.body || document.documentElement, { childList: true, subtree: true });
@@ -10235,23 +10718,28 @@
     var number = numEl ? ((numEl.getAttribute("aria-label") || "").replace("Report number ", "#") || "").trim() : "";
     var title = titleEl ? String(titleEl.value || "").trim() : "";
     var flows = [];
-    doc.querySelectorAll('li[data-e2e-affected-workflow="true"]').forEach(function(li) {
-      var bugIcon = li.querySelector('[data-e2e="icon-Bug"]');
-      var links = Array.from(li.querySelectorAll("a"));
+    doc.querySelectorAll('[data-e2e-affected-workflow="true"]').forEach(function(el) {
+      var row2 = el.closest('[class*="itemRow"]');
+      if (!row2 || !row2.querySelector('[data-e2e="icon-Bug"]')) return;
+      var ariaLabel = el.getAttribute("aria-label") || "";
+      var flowName = ariaLabel.replace(/,\s*(bug|maintenance|flake)\s*$/i, "").trim();
+      if (!flowName) {
+        var truncated = el.querySelector('[class*="truncated"]');
+        flowName = truncated ? (truncated.textContent || "").trim() : "";
+      }
+      if (!flowName) return;
+      var links = Array.from(el.querySelectorAll("a"));
       var lastSeenLink = links.find(function(a) {
         return /last seen/i.test(textOf(a));
       }) || null;
-      if (!bugIcon && !lastSeenLink) return;
-      if (!lastSeenLink) return;
       var flowLink = links.find(function(a) {
         var t = textOf(a);
         return !/last seen/i.test(t) && !/first passed/i.test(t);
       }) || null;
-      var flowName = flowLink ? textOf(flowLink) : "Unknown flow";
       flows.push({
         flowName,
         flowUrl: flowLink ? absUrl(flowLink.getAttribute("href") || "") : "",
-        lastSeenUrl: absUrl(lastSeenLink.getAttribute("href") || "")
+        lastSeenUrl: lastSeenLink ? absUrl(lastSeenLink.getAttribute("href") || "") : ""
       });
     });
     return {
@@ -10360,6 +10848,12 @@
           if (!curUrl.includes(rid)) {
             return;
           }
+          doc.querySelectorAll('button[aria-label="Expand"]').forEach(function(btn3) {
+            try {
+              btn3.click();
+            } catch (_) {
+            }
+          });
           var entry = scrapeBugReportDocument(doc, reportUrl);
           var hasMeta = !!(entry.number || entry.title);
           var now = Date.now();
@@ -10823,10 +11317,13 @@
           entry.flows.forEach(function(f) {
             var row2 = document.createElement("div");
             row2.style.cssText = "display:flex;flex-direction:column;gap:5px;border-top:1px dashed #1e293b;padding-top:6px;";
-            var name = document.createElement("a");
-            name.href = f.flowUrl || f.lastSeenUrl || "#";
-            name.target = "_blank";
-            name.rel = "noopener";
+            var flowHref = f.flowUrl || f.lastSeenUrl;
+            var name = document.createElement(flowHref ? "a" : "span");
+            if (flowHref) {
+              name.href = flowHref;
+              name.target = "_blank";
+              name.rel = "noopener";
+            }
             name.textContent = f.flowName;
             name.style.cssText = "font-size:11px;color:#bfdbfe;text-decoration:none;display:block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
             row2.appendChild(name);
@@ -20385,10 +20882,15 @@
     navNotes.type = "button";
     navNotes.textContent = "NOTES";
     navNotes.style.cssText = navBtnStyle(false);
+    var navLocal = document.createElement("button");
+    navLocal.type = "button";
+    navLocal.textContent = "LOCAL IDE";
+    navLocal.style.cssText = navBtnStyle(false);
     sidebar.appendChild(navLlm);
     sidebar.appendChild(navSlack);
     sidebar.appendChild(navGithub);
     sidebar.appendChild(navNotes);
+    sidebar.appendChild(navLocal);
     navLlm.setAttribute("aria-current", "page");
     var rightCol = document.createElement("div");
     rightCol.style.cssText = "flex:1;display:flex;flex-direction:column;min-width:0;min-height:0;";
@@ -20796,36 +21298,36 @@
     notesFields.appendChild(diagWrap);
     notesBlock.appendChild(notesFields);
     scrollHost.appendChild(notesBlock);
+    var localBlock = document.createElement("div");
+    localBlock.setAttribute("data-qaw-settings-panel", "local");
+    localBlock.style.display = "none";
+    localBlock.appendChild(section("Local IDE"));
+    var localFields = document.createElement("div");
+    localFields.style.cssText = "display:flex;flex-direction:column;gap:10px;";
+    olMountSettings(localFields);
+    localBlock.appendChild(localFields);
+    scrollHost.appendChild(localBlock);
+    var NAV_BTNS = {
+      llm: navLlm,
+      slack: navSlack,
+      github: navGithub,
+      notes: navNotes,
+      local: navLocal
+    };
+    var BLOCKS = {
+      llm: llmBlock,
+      slack: slackBlock,
+      github: githubBlock,
+      notes: notesBlock,
+      local: localBlock
+    };
     function showSection(which) {
-      llmBlock.style.display = which === "llm" ? "" : "none";
-      slackBlock.style.display = which === "slack" ? "" : "none";
-      githubBlock.style.display = which === "github" ? "" : "none";
-      notesBlock.style.display = which === "notes" ? "" : "none";
-      navLlm.style.cssText = navBtnStyle(which === "llm");
-      navSlack.style.cssText = navBtnStyle(which === "slack");
-      navGithub.style.cssText = navBtnStyle(which === "github");
-      navNotes.style.cssText = navBtnStyle(which === "notes");
-      if (which === "llm") {
-        navLlm.setAttribute("aria-current", "page");
-        navSlack.removeAttribute("aria-current");
-        navGithub.removeAttribute("aria-current");
-        navNotes.removeAttribute("aria-current");
-      } else if (which === "slack") {
-        navSlack.setAttribute("aria-current", "page");
-        navLlm.removeAttribute("aria-current");
-        navGithub.removeAttribute("aria-current");
-        navNotes.removeAttribute("aria-current");
-      } else if (which === "github") {
-        navGithub.setAttribute("aria-current", "page");
-        navLlm.removeAttribute("aria-current");
-        navSlack.removeAttribute("aria-current");
-        navNotes.removeAttribute("aria-current");
-      } else {
-        navNotes.setAttribute("aria-current", "page");
-        navLlm.removeAttribute("aria-current");
-        navSlack.removeAttribute("aria-current");
-        navGithub.removeAttribute("aria-current");
-      }
+      Object.keys(BLOCKS).forEach(function(k) {
+        BLOCKS[k].style.display = k === which ? "" : "none";
+        NAV_BTNS[k].style.cssText = navBtnStyle(k === which);
+        if (k === which) NAV_BTNS[k].setAttribute("aria-current", "page");
+        else NAV_BTNS[k].removeAttribute("aria-current");
+      });
     }
     navLlm.addEventListener("click", function() {
       showSection("llm");
@@ -20838,6 +21340,9 @@
     });
     navNotes.addEventListener("click", function() {
       showSection("notes");
+    });
+    navLocal.addEventListener("click", function() {
+      showSection("local");
     });
     var savedMsg = document.createElement("span");
     savedMsg.style.cssText = "position:absolute;bottom:10px;right:14px;font-size:10px;color:#34d399;opacity:0;transition:opacity 0.2s;font-family:monospace;pointer-events:none;";
@@ -20904,6 +21409,7 @@
       init_llm_models();
       init_diagnostics();
       init_constants();
+      init_open_local();
       LLM_KEY_PLACEHOLDER = {
         gemini: "AIza...",
         claude: "sk-ant-...",
@@ -25024,8 +25530,17 @@ This won't delete the actual file.`)) return;
     var number = numEl ? ((numEl.getAttribute("aria-label") || "").replace("Report number ", "#") || "").trim() : "";
     var title = titleEl ? String(titleEl.value || "").trim() : "";
     var flows = [];
-    doc.querySelectorAll('li[data-e2e-affected-workflow="true"]').forEach(function(li) {
-      var links = Array.from(li.querySelectorAll("a"));
+    doc.querySelectorAll('[data-e2e-affected-workflow="true"]').forEach(function(el) {
+      var row2 = el.closest('[class*="itemRow"]');
+      if (!row2 || !row2.querySelector('[data-e2e="icon-Hammer"]') && !row2.querySelector('[data-e2e="icon-Bug"]')) return;
+      var ariaLabel = el.getAttribute("aria-label") || "";
+      var flowName = ariaLabel.replace(/,\s*(bug|maintenance|flake)\s*$/i, "").trim();
+      if (!flowName) {
+        var truncated = el.querySelector('[class*="truncated"]');
+        flowName = truncated ? (truncated.textContent || "").trim() : "";
+      }
+      if (!flowName) return;
+      var links = Array.from(el.querySelectorAll("a"));
       var lastSeenLink = links.find(function(a) {
         return /last seen/i.test(textOf2(a));
       }) || null;
@@ -25033,8 +25548,6 @@ This won't delete the actual file.`)) return;
         var t = textOf2(a);
         return !/last seen/i.test(t) && !/first passed/i.test(t);
       }) || null;
-      if (!flowLink && !lastSeenLink) return;
-      var flowName = flowLink ? textOf2(flowLink) : "Unknown flow";
       flows.push({
         fileName: flowName,
         envId: "",
@@ -25086,6 +25599,12 @@ This won't delete the actual file.`)) return;
             curUrl = "(cross-origin)";
           }
           if (!curUrl.includes(rid)) return;
+          doc.querySelectorAll('button[aria-label="Expand"]').forEach(function(btn3) {
+            try {
+              btn3.click();
+            } catch (_) {
+            }
+          });
           var entry = scrapeMaintenanceReportDocument(doc, reportUrl);
           var hasMeta = !!(entry.number || entry.title);
           var now = Date.now();
@@ -26316,8 +26835,38 @@ This won't delete the actual file.`)) return;
       envId: m[2],
       runId: m[3],
       flowId: m[4],
-      ideUrl: "/" + m[1] + "/environments/" + m[2] + "/automate/ide?flowId=" + m[4]
+      ideUrl: "/" + m[1] + "/environments/" + m[2] + "/automate/ide?flowId=" + m[4] + "&runId=" + m[3]
     };
+  }
+  function findOrunInProps(obj, depth) {
+    if (depth > 4 || !obj || typeof obj !== "object" || Array.isArray(obj)) return null;
+    var keys = Object.keys(obj);
+    for (var i = 0; i < keys.length; i++) {
+      var val = obj[keys[i]];
+      if (typeof val === "string" && /^[a-z0-9]+orun$/.test(val)) return val;
+      if (val && typeof val === "object") {
+        var found = findOrunInProps(val, depth + 1);
+        if (found) return found;
+      }
+    }
+    return null;
+  }
+  function readFlowRunIdFromFiber(el) {
+    try {
+      var fiberKey = Object.keys(el).find(function(k) {
+        return k.startsWith("__reactFiber") || k.startsWith("__reactInternalInstance");
+      });
+      if (!fiberKey) return null;
+      var fiber = el[fiberKey];
+      for (var i = 0; i < 40 && fiber; i++, fiber = fiber.return) {
+        var props = fiber.memoizedProps;
+        if (!props || typeof props !== "object") continue;
+        var found = findOrunInProps(props, 0);
+        if (found) return found;
+      }
+    } catch (_) {
+    }
+    return null;
   }
   function scrapeRunDetailsFlows() {
     var ctx = parseRunDetailsPage();
@@ -26336,13 +26885,26 @@ This won't delete the actual file.`)) return;
       if (!parsed || parsed.runId !== ctx.runId) return;
       if (seen.has(parsed.flowId)) return;
       seen.add(parsed.flowId);
+      var flowRunId = readFlowRunIdFromFiber(workflowEl) || parsed.runId;
       var fileTabEl = workflowEl.querySelector('[data-e2e^="file-tab-"]');
       var basename = fileTabEl ? (fileTabEl.textContent || "").trim() : "";
+      var filePath = "";
+      if (fileTabEl) {
+        var tabAttr = (fileTabEl.getAttribute("data-e2e") || "").replace(/^file-tab-/, "");
+        if (tabAttr.indexOf("/") !== -1) {
+          filePath = tabAttr;
+        }
+      }
+      if (!filePath && basename) {
+        var flowName = basename.replace(/\.flow\.[jt]s$/, "");
+        filePath = "src/flows/" + flowName + "/" + basename;
+      }
+      var ideUrl = "/" + parsed.client + "/environments/" + parsed.envId + "/automate/ide?flowId=" + parsed.flowId + "&runId=" + flowRunId + (filePath ? "&file=" + encodeURIComponent(filePath) : "") + "&autoStartAction=run";
       flows.push({
         flowId: parsed.flowId,
         displayName,
         basename,
-        ideUrl: parsed.ideUrl
+        ideUrl
       });
     });
     if (!flows.length) return null;
@@ -26353,7 +26915,7 @@ This won't delete the actual file.`)) return;
       runUrl: location.href,
       client: ctx.client,
       envId: ctx.envId,
-      displayName: getClientDisplayName(ctx.client) + " run",
+      displayName: getClientDisplayName(ctx.client),
       startedAt,
       savedAt: Date.now(),
       flows
@@ -26614,7 +27176,7 @@ This won't delete the actual file.`)) return;
   function ensureInvRunSaveButton() {
     var ctx = parseRunDetailsPage();
     if (!ctx) return;
-    if (document.querySelector("[" + SAVE_BTN_ATTR + "]") || document.querySelector("[data-qaw-inv-run-bar-overlay]")) {
+    if (document.querySelector("[" + SAVE_BTN_ATTR + "]")) {
       if (consumePendingRescrapeForRun(ctx.runId)) {
         var existingBtn = document.querySelector("[" + SAVE_BTN_ATTR + "]");
         if (existingBtn) {
@@ -26625,19 +27187,37 @@ This won't delete the actual file.`)) return;
       }
       return;
     }
+    var anchor = document.querySelector('[data-qaw-overlay="1"]');
+    if (!anchor || !anchor.parentElement) return;
     var btn3 = document.createElement("button");
     btn3.type = "button";
     btn3.setAttribute(SAVE_BTN_ATTR, "1");
+    btn3.setAttribute("data-e2e", "inv-run-save-flows");
     btn3.textContent = "\u2B07 Save flows";
     btn3.title = "Save failing flows to the Investigation Hub in the Notes panel";
-    btn3.style.cssText = "background:#0f172a;border:1px solid #334155;border-radius:8px;color:#94a3b8;cursor:pointer;font-size:12px;font-family:monospace;padding:8px 14px;transition:border-color .1s,color .1s;flex-shrink:0;";
+    btn3.style.cssText = [
+      "cursor:pointer",
+      "user-select:none",
+      "display:inline-flex",
+      "align-items:center",
+      "gap:2px",
+      "padding:4px 8px",
+      "border:1px solid #cbd5e1",
+      "border-radius:6px",
+      "background:#fff",
+      "color:#334155",
+      "font:600 14px ui-monospace,SFMono-Regular,Menlo,monospace",
+      "line-height:1",
+      "margin-right:6px",
+      "transition:border-color .1s,color .1s"
+    ].join(";");
     btn3.addEventListener("mouseenter", function() {
-      btn3.style.borderColor = "#38bdf8";
-      btn3.style.color = "#e2e8f0";
+      btn3.style.borderColor = "#6366f1";
+      btn3.style.color = "#4f46e5";
     });
     btn3.addEventListener("mouseleave", function() {
-      btn3.style.borderColor = "#334155";
-      btn3.style.color = "#94a3b8";
+      btn3.style.borderColor = "#cbd5e1";
+      btn3.style.color = "#334155";
     });
     btn3.addEventListener("click", function() {
       var run = scrapeRunDetailsFlows();
@@ -26645,6 +27225,7 @@ This won't delete the actual file.`)) return;
         btn3.textContent = "\u26A0 No flows found";
         setTimeout(function() {
           btn3.textContent = "\u2B07 Save flows";
+          btn3.title = "Save failing flows to the Investigation Hub in the Notes panel";
         }, 2e3);
         return;
       }
@@ -26652,69 +27233,39 @@ This won't delete the actual file.`)) return;
       saveInvRun(run);
       btn3.textContent = "\u2713 Saved " + run.flows.length + " flows" + (synced ? " (+" + synced + " reopened)" : "");
       btn3.style.borderColor = "#22c55e";
-      btn3.style.color = "#86efac";
+      btn3.style.color = "#16a34a";
       setTimeout(function() {
         btn3.textContent = "\u2B07 Save flows";
-        btn3.style.borderColor = "#334155";
-        btn3.style.color = "#94a3b8";
+        btn3.title = "Save failing flows to the Investigation Hub in the Notes panel";
+        btn3.style.borderColor = "#cbd5e1";
+        btn3.style.color = "#334155";
       }, 3e3);
     });
-    var BAR_OVERLAY_ATTR = "data-qaw-inv-run-bar-overlay";
-    var barSelectors = [
-      '[data-e2e="button-reattempt-failed-flows"]',
-      '[data-e2e="button-run-code"]',
-      '[data-e2e="button-duplicates-the-run-using-the-original-environment-variables-but-with-the-flows-latest-code-click-for-more-details"]'
-    ];
-    var barRect = null;
-    for (var si = 0; si < barSelectors.length; si++) {
-      var barEl = document.querySelector(barSelectors[si]);
-      if (barEl && barEl.parentElement) {
-        barRect = barEl.parentElement.getBoundingClientRect();
-        break;
-      }
-    }
-    var overlay = document.createElement("div");
-    overlay.setAttribute(BAR_OVERLAY_ATTR, "1");
-    overlay.style.cssText = "position:fixed;left:0;right:0;z-index:2147483000;pointer-events:none;display:flex;align-items:center;padding-left:16px;";
-    if (barRect) {
-      overlay.style.top = Math.round(barRect.top) + "px";
-      overlay.style.height = Math.round(barRect.height) + "px";
-    } else {
-      overlay.style.bottom = "0";
-      overlay.style.height = "60px";
-    }
-    btn3.style.pointerEvents = "auto";
-    overlay.appendChild(btn3);
-    document.body.appendChild(overlay);
-    var _resizeHandler = function() {
-      var updatedEl = null;
-      for (var si2 = 0; si2 < barSelectors.length; si2++) {
-        var el2 = document.querySelector(barSelectors[si2]);
-        if (el2 && el2.parentElement) {
-          updatedEl = el2.parentElement;
-          break;
-        }
-      }
-      if (updatedEl) {
-        var r = updatedEl.getBoundingClientRect();
-        overlay.style.top = Math.round(r.top) + "px";
-        overlay.style.height = Math.round(r.height) + "px";
-      }
-    };
-    window.addEventListener("resize", _resizeHandler);
+    anchor.parentElement.insertBefore(btn3, anchor);
     if (consumePendingRescrapeForRun(ctx.runId)) {
       btn3.textContent = "\u21BB Rescraping\u2026";
-      btn3.style.color = "#38bdf8";
+      btn3.style.color = "#4f46e5";
       waitAndAutoRescrape(ctx.runId, 20, btn3);
     }
   }
   function mountInvRunHubView(container) {
     container.innerHTML = "";
     container.style.cssText = "display:flex;flex-direction:column;gap:10px;padding:8px;font-family:monospace;font-size:11px;color:#e2e8f0;";
-    var collapsed = /* @__PURE__ */ new Set();
+    var collapsed = null;
     function render() {
       container.innerHTML = "";
       var runs = getSavedInvRuns();
+      var ctx = parseContext();
+      var currentClient = ctx ? ctx.client : null;
+      if (collapsed === null) {
+        collapsed = new Set(
+          runs.filter(function(r) {
+            return r.client !== currentClient;
+          }).map(function(r) {
+            return r.runId;
+          })
+        );
+      }
       if (!runs.length) {
         var empty = document.createElement("div");
         empty.style.cssText = "border:1px dashed #334155;border-radius:8px;padding:16px;color:#475569;text-align:center;font-size:11px;line-height:1.5;";
@@ -26726,20 +27277,27 @@ This won't delete the actual file.`)) return;
         return a.displayName.localeCompare(b.displayName);
       });
       runs.forEach(function(run) {
+        var isCurrent = run.client === currentClient;
         var card = document.createElement("div");
-        card.style.cssText = "border:1px solid #334155;border-radius:8px;background:#0f172a;overflow:hidden;";
+        card.style.cssText = "border:1px solid " + (isCurrent ? "#1d4ed8" : "#334155") + ";border-radius:8px;background:" + (isCurrent ? "#0d1f3c" : "#0f172a") + ";overflow:hidden;";
         var isCollapsed = collapsed.has(run.runId);
         var hdr = document.createElement("div");
-        hdr.style.cssText = "display:flex;align-items:center;gap:8px;padding:8px 10px;cursor:pointer;" + (isCollapsed ? "" : "border-bottom:1px solid #1e293b;");
+        hdr.style.cssText = "display:flex;flex-direction:column;gap:4px;padding:8px 10px;cursor:pointer;" + (isCollapsed ? "" : "border-bottom:1px solid #1e293b;");
         hdr.title = "Click to " + (isCollapsed ? "expand" : "collapse");
+        var hdrRow1 = document.createElement("div");
+        hdrRow1.style.cssText = "display:flex;align-items:center;gap:6px;";
         var chevron = document.createElement("span");
-        chevron.style.cssText = "flex-shrink:0;font-size:9px;color:#475569;transition:transform .15s;";
+        chevron.style.cssText = "flex-shrink:0;font-size:9px;color:#475569;";
         chevron.textContent = isCollapsed ? "\u25B6" : "\u25BC";
         var title = document.createElement("div");
-        title.style.cssText = "flex:1;min-width:0;font-size:11px;font-weight:700;color:#f8fafc;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
-        title.textContent = run.displayName;
+        title.style.cssText = "flex:1;min-width:0;font-size:11px;font-weight:700;color:#f8fafc;";
+        title.textContent = run.displayName.replace(/\s+run\s*$/i, "");
+        hdrRow1.appendChild(chevron);
+        hdrRow1.appendChild(title);
+        var hdrRow2 = document.createElement("div");
+        hdrRow2.style.cssText = "display:flex;align-items:center;gap:6px;padding-left:15px;";
         var flowCount = document.createElement("span");
-        flowCount.style.cssText = "font-size:10px;color:#64748b;flex-shrink:0;";
+        flowCount.style.cssText = "flex:1;font-size:10px;color:#64748b;";
         flowCount.textContent = (run.startedAt ? run.startedAt + " \xB7 " : "") + run.flows.length + " flow" + (run.flows.length === 1 ? "" : "s");
         var rescrapeBtn = document.createElement("button");
         rescrapeBtn.type = "button";
@@ -26789,11 +27347,28 @@ This won't delete the actual file.`)) return;
           deleteInvRun(run.runId);
           render();
         });
-        hdr.appendChild(chevron);
-        hdr.appendChild(title);
-        hdr.appendChild(flowCount);
-        hdr.appendChild(rescrapeBtn);
-        hdr.appendChild(delBtn);
+        var summaryBtn = document.createElement("a");
+        summaryBtn.href = run.runUrl;
+        summaryBtn.target = "_blank";
+        summaryBtn.rel = "noopener noreferrer";
+        summaryBtn.textContent = "\u2197";
+        summaryBtn.title = "Open run summary";
+        summaryBtn.style.cssText = "background:none;border:1px solid #334155;border-radius:4px;color:#64748b;font-size:11px;padding:1px 6px;flex-shrink:0;text-decoration:none;line-height:1.4;";
+        summaryBtn.addEventListener("click", function(e) {
+          e.stopPropagation();
+        });
+        summaryBtn.addEventListener("mouseenter", function() {
+          summaryBtn.style.color = "#e2e8f0";
+        });
+        summaryBtn.addEventListener("mouseleave", function() {
+          summaryBtn.style.color = "#64748b";
+        });
+        hdrRow2.appendChild(flowCount);
+        hdrRow2.appendChild(summaryBtn);
+        hdrRow2.appendChild(rescrapeBtn);
+        hdrRow2.appendChild(delBtn);
+        hdr.appendChild(hdrRow1);
+        hdr.appendChild(hdrRow2);
         card.appendChild(hdr);
         var list = document.createElement("div");
         list.style.cssText = "display:" + (isCollapsed ? "none" : "flex") + ";flex-direction:column;";
@@ -26812,17 +27387,49 @@ This won't delete the actual file.`)) return;
             hdr.title = "Click to expand";
           }
         });
+        var checked = new Set(gmGet(INV_CHECKED_PREFIX + run.runId) || []);
+        function saveChecked() {
+          gmSet(INV_CHECKED_PREFIX + run.runId, Array.from(checked));
+        }
         run.flows.forEach(function(flow, fi) {
-          var row2 = document.createElement("a");
-          row2.href = flow.ideUrl;
-          row2.target = "_blank";
-          row2.rel = "noopener noreferrer";
-          row2.style.cssText = "display:flex;align-items:center;gap:8px;padding:7px 10px;color:#cbd5e1;text-decoration:none;font-size:11px;" + (fi > 0 ? "border-top:1px solid #1e293b;" : "");
+          var isChecked = checked.has(flow.flowId);
+          var borderTop = fi > 0 ? "border-top:1px solid #1e293b;" : "";
+          var row2 = document.createElement("div");
+          row2.style.cssText = "display:flex;align-items:center;" + borderTop;
           row2.addEventListener("mouseenter", function() {
             row2.style.background = "#132030";
           });
           row2.addEventListener("mouseleave", function() {
             row2.style.background = "";
+          });
+          function setCheckedStyle(on) {
+            cb.style.border = "1px solid " + (on ? "#3b82f6" : "#334155");
+            cb.style.background = on ? "#3b82f6" : "none";
+            cb.textContent = on ? "\u2713" : "";
+            link.style.color = on ? "#475569" : "#cbd5e1";
+          }
+          var cb = document.createElement("span");
+          cb.style.cssText = "flex-shrink:0;width:12px;height:12px;border-radius:3px;border:1px solid " + (isChecked ? "#3b82f6" : "#334155") + ";background:" + (isChecked ? "#3b82f6" : "none") + ";display:flex;align-items:center;justify-content:center;font-size:9px;color:#fff;cursor:pointer;margin-left:10px;";
+          cb.textContent = isChecked ? "\u2713" : "";
+          cb.title = "Toggle opened";
+          cb.addEventListener("click", function() {
+            if (checked.has(flow.flowId)) {
+              checked.delete(flow.flowId);
+            } else {
+              checked.add(flow.flowId);
+            }
+            setCheckedStyle(checked.has(flow.flowId));
+            saveChecked();
+          });
+          var link = document.createElement("a");
+          link.href = flow.ideUrl;
+          link.target = "_blank";
+          link.rel = "noopener noreferrer";
+          link.style.cssText = "display:flex;align-items:center;gap:8px;flex:1;min-width:0;padding:7px 10px;color:" + (isChecked ? "#475569" : "#cbd5e1") + ";text-decoration:none;font-size:11px;";
+          link.addEventListener("click", function() {
+            checked.add(flow.flowId);
+            setCheckedStyle(true);
+            saveChecked();
           });
           var noteKey3 = findNoteKeyForFlow(run.client, run.envId, flow);
           var note2 = noteKey3 && state.store && state.store.notes && state.store.notes[noteKey3];
@@ -26837,16 +27444,18 @@ This won't delete the actual file.`)) return;
           };
           var dot = document.createElement("span");
           dot.style.cssText = "width:6px;height:6px;border-radius:50%;flex-shrink:0;background:" + (STATUS_COLORS[status] || "#334155") + ";";
-          dot.title = status ? "Note status: " + status : "No note found";
+          dot.title = status ? "Note status: " + status : "No note";
           var name = document.createElement("span");
           name.style.cssText = "flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
           name.textContent = flow.displayName || flow.basename || flow.flowId;
           var arrow = document.createElement("span");
           arrow.style.cssText = "flex-shrink:0;font-size:11px;color:#334155;";
           arrow.textContent = "\u2197";
-          row2.appendChild(dot);
-          row2.appendChild(name);
-          row2.appendChild(arrow);
+          link.appendChild(dot);
+          link.appendChild(name);
+          link.appendChild(arrow);
+          row2.appendChild(cb);
+          row2.appendChild(link);
           list.appendChild(row2);
         });
         card.appendChild(list);
@@ -26855,7 +27464,7 @@ This won't delete the actual file.`)) return;
     }
     render();
   }
-  var INV_RUN_KEY_PREFIX, INV_RUN_TTL_MS, INV_RUN_INDEX_KEY, INV_RESCRAPE_KEY, _activePollTimer, SAVE_BTN_ATTR;
+  var INV_RUN_KEY_PREFIX, INV_RUN_TTL_MS, INV_RUN_INDEX_KEY, INV_RESCRAPE_KEY, INV_CHECKED_PREFIX, _activePollTimer, SAVE_BTN_ATTR;
   var init_inv_run_hub = __esm({
     "src/notes/57-inv-run-hub.ts"() {
       "use strict";
@@ -26866,6 +27475,7 @@ This won't delete the actual file.`)) return;
       INV_RUN_TTL_MS = 7 * 24 * 60 * 60 * 1e3;
       INV_RUN_INDEX_KEY = "invRunIndex";
       INV_RESCRAPE_KEY = "invRescrape";
+      INV_CHECKED_PREFIX = "invRunChecked_";
       _activePollTimer = null;
       SAVE_BTN_ATTR = "data-qaw-inv-run-save";
     }
@@ -27982,13 +28592,15 @@ This won't delete the actual file.`)) return;
     if (panelEk && state.store.notes[panelEk]) renderPanelForKey(panelEk);
   }
   function tick() {
-    tryObserveFlowPassedPanel();
-    resumeBugsCollectJobIfNeeded();
-    injectSpeedDial();
-    ensureInvRunSaveButton();
-    ensureGutterMenuListener();
-    ensureWatchLineIndicators();
-    ensureSoftBreakpointObserver();
+    if (!document.hidden) {
+      tryObserveFlowPassedPanel();
+      resumeBugsCollectJobIfNeeded();
+      injectSpeedDial();
+      ensureInvRunSaveButton();
+      ensureGutterMenuListener();
+      ensureWatchLineIndicators();
+      ensureSoftBreakpointObserver();
+    }
     if (state.pendingBugScrape) {
       try {
         var bsRaw = localStorage.getItem(BUG_SCRAPE_LS_KEY);
@@ -29428,7 +30040,7 @@ This won't delete the actual file.`)) return;
       } catch (e) {
       }
       try {
-        if ("1.694") return "1.694";
+        if ("1.721") return "1.721";
       } catch (e2) {
       }
       return "unknown";
@@ -30955,6 +31567,7 @@ This won't delete the actual file.`)) return;
     }
   }
   function _ftTick() {
+    if (document.hidden) return;
     var ctx = parseContext();
     var fn = getActiveFileName();
     var client = ctx ? ctx.client : null;
@@ -32556,7 +33169,7 @@ This won't delete the actual file.`)) return;
     } catch (_) {
     }
     try {
-      if ("1.694") return "1.694";
+      if ("1.721") return "1.721";
     } catch (_) {
     }
     return "unknown";
@@ -33309,6 +33922,7 @@ This won't delete the actual file.`)) return;
   // src/notes/13-init.ts
   init_coverage_requests();
   init_coverage_page_info();
+  init_open_local();
   function isGlobalSafeModeEnabled() {
     try {
       return localStorage.getItem(GLOBAL_SAFE_MODE_KEY) === "1";
@@ -33413,6 +34027,7 @@ This won't delete the actual file.`)) return;
     ingestChimeMetricsIntoStore(readRunChimeMetrics());
     window.addEventListener("qaw-run-chime-metrics", onRunChimeMetrics);
     initCoverageRequestHelper();
+    initOpenLocal();
   }
   function onNotesResize() {
     if (state.panelEl) applyDrawerWidth2(state.panelEl);
