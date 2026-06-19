@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         QA Wolf Investigation Notes
 // @namespace    http://tampermonkey.net/
-// @version      1.721
+// @version      1.728
 // @description  Per-file investigation notes: quick links (new-tab opens, PoC textarea, client-wide notes), client/env chips, instant tooltips, run timing, shift sync, work mode, export, search. data-e2e investigation-* hooks.
 // @author       You
 // @match        https://app.qawolf.com/*
@@ -10473,6 +10473,48 @@
       return raw;
     }
   }
+  function readFlowUrlsFromFiber(el) {
+    var result = { ideUrl: "", runResultUrl: "" };
+    function search(obj, depth) {
+      if (result.ideUrl && result.runResultUrl) return;
+      if (depth > 5 || !obj || typeof obj !== "object") return;
+      if (Array.isArray(obj)) {
+        obj.forEach(function(x) {
+          search(x, depth + 1);
+        });
+        return;
+      }
+      Object.keys(obj).forEach(function(k) {
+        var v = obj[k];
+        if (typeof v === "string" && v.includes("/flows/")) {
+          if (!result.ideUrl && v.includes("/automate/ide")) result.ideUrl = v;
+          if (!result.runResultUrl && v.includes("/runs/") && v.includes("/attempt/")) result.runResultUrl = v;
+        } else if (v && typeof v === "object") {
+          search(v, depth + 1);
+        }
+      });
+    }
+    try {
+      var fk = Object.keys(el).find(function(k) {
+        return k.startsWith("__reactFiber") || k.startsWith("__reactInternalInstance");
+      });
+      if (!fk) return result;
+      var fiber = el[fk];
+      for (var i = 0; i < 30 && fiber; i++, fiber = fiber.return) {
+        if (fiber.memoizedProps) search(fiber.memoizedProps, 0);
+        if (result.ideUrl && result.runResultUrl) break;
+      }
+    } catch (_) {
+    }
+    return result;
+  }
+  function buildIdeUrlFromRunResult(runResultUrl) {
+    var flowIdM = runResultUrl.match(/\/flows\/([^/?#]+)/);
+    var envIdM = runResultUrl.match(/\/environments\/([^/?#]+)/);
+    var clientM = runResultUrl.match(/\/([^/]+)\/environments\//);
+    if (!flowIdM || !envIdM || !clientM) return "";
+    return absUrl("/" + clientM[1] + "/environments/" + envIdM[1] + "/automate/ide?flowId=" + flowIdM[1]);
+  }
   function parseBugReportId(url) {
     var m = url.match(/\/bug-reports\/([0-9a-f-]{36})/i);
     return m ? m[1] : url;
@@ -10728,18 +10770,29 @@
         flowName = truncated ? (truncated.textContent || "").trim() : "";
       }
       if (!flowName) return;
-      var links = Array.from(el.querySelectorAll("a"));
-      var lastSeenLink = links.find(function(a) {
-        return /last seen/i.test(textOf(a));
-      }) || null;
-      var flowLink = links.find(function(a) {
-        var t = textOf(a);
-        return !/last seen/i.test(t) && !/first passed/i.test(t);
-      }) || null;
+      var fiberUrls = readFlowUrlsFromFiber(el);
+      var lastSeenUrl = fiberUrls.runResultUrl ? absUrl(fiberUrls.runResultUrl) : "";
+      var ideUrl = fiberUrls.ideUrl ? absUrl(fiberUrls.ideUrl) : fiberUrls.runResultUrl ? buildIdeUrlFromRunResult(fiberUrls.runResultUrl) : "";
+      if (!ideUrl) {
+        var links = Array.from(el.querySelectorAll("a"));
+        var lastSeenLink = links.find(function(a) {
+          return /last seen/i.test(textOf(a));
+        }) || null;
+        var flowLink = links.find(function(a) {
+          var t = textOf(a);
+          return !/last seen/i.test(t) && !/first passed/i.test(t);
+        }) || null;
+        if (flowLink) {
+          ideUrl = absUrl(flowLink.getAttribute("href") || "");
+        }
+        if (lastSeenLink && !lastSeenUrl) {
+          lastSeenUrl = absUrl(lastSeenLink.getAttribute("href") || "");
+        }
+      }
       flows.push({
         flowName,
-        flowUrl: flowLink ? absUrl(flowLink.getAttribute("href") || "") : "",
-        lastSeenUrl: lastSeenLink ? absUrl(lastSeenLink.getAttribute("href") || "") : ""
+        flowUrl: ideUrl,
+        lastSeenUrl
       });
     });
     return {
@@ -11317,13 +11370,11 @@
           entry.flows.forEach(function(f) {
             var row2 = document.createElement("div");
             row2.style.cssText = "display:flex;flex-direction:column;gap:5px;border-top:1px dashed #1e293b;padding-top:6px;";
-            var flowHref = f.flowUrl || f.lastSeenUrl;
-            var name = document.createElement(flowHref ? "a" : "span");
-            if (flowHref) {
-              name.href = flowHref;
-              name.target = "_blank";
-              name.rel = "noopener";
-            }
+            var flowHref = f.flowUrl || f.lastSeenUrl || entry.reportUrl;
+            var name = document.createElement("a");
+            name.href = flowHref;
+            name.target = "_blank";
+            name.rel = "noopener";
             name.textContent = f.flowName;
             name.style.cssText = "font-size:11px;color:#bfdbfe;text-decoration:none;display:block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
             row2.appendChild(name);
@@ -25453,6 +25504,48 @@ This won't delete the actual file.`)) return;
       return raw;
     }
   }
+  function readFlowUrlsFromFiber2(el) {
+    var result = { ideUrl: "", runResultUrl: "" };
+    function search(obj, depth) {
+      if (result.ideUrl && result.runResultUrl) return;
+      if (depth > 5 || !obj || typeof obj !== "object") return;
+      if (Array.isArray(obj)) {
+        obj.forEach(function(x) {
+          search(x, depth + 1);
+        });
+        return;
+      }
+      Object.keys(obj).forEach(function(k) {
+        var v = obj[k];
+        if (typeof v === "string" && v.includes("/flows/")) {
+          if (!result.ideUrl && v.includes("/automate/ide")) result.ideUrl = v;
+          if (!result.runResultUrl && v.includes("/runs/") && v.includes("/attempt/")) result.runResultUrl = v;
+        } else if (v && typeof v === "object") {
+          search(v, depth + 1);
+        }
+      });
+    }
+    try {
+      var fk = Object.keys(el).find(function(k) {
+        return k.startsWith("__reactFiber") || k.startsWith("__reactInternalInstance");
+      });
+      if (!fk) return result;
+      var fiber = el[fk];
+      for (var i = 0; i < 30 && fiber; i++, fiber = fiber.return) {
+        if (fiber.memoizedProps) search(fiber.memoizedProps, 0);
+        if (result.ideUrl && result.runResultUrl) break;
+      }
+    } catch (_) {
+    }
+    return result;
+  }
+  function buildIdeUrlFromRunResult2(runResultUrl) {
+    var flowIdM = runResultUrl.match(/\/flows\/([^/?#]+)/);
+    var envIdM = runResultUrl.match(/\/environments\/([^/?#]+)/);
+    var clientM = runResultUrl.match(/\/([^/]+)\/environments\//);
+    if (!flowIdM || !envIdM || !clientM) return "";
+    return absUrl2("/" + clientM[1] + "/environments/" + envIdM[1] + "/automate/ide?flowId=" + flowIdM[1]);
+  }
   function textOf2(el) {
     return (el && el.textContent ? el.textContent : "").trim();
   }
@@ -25540,22 +25633,33 @@ This won't delete the actual file.`)) return;
         flowName = truncated ? (truncated.textContent || "").trim() : "";
       }
       if (!flowName) return;
-      var links = Array.from(el.querySelectorAll("a"));
-      var lastSeenLink = links.find(function(a) {
-        return /last seen/i.test(textOf2(a));
-      }) || null;
-      var flowLink = links.find(function(a) {
-        var t = textOf2(a);
-        return !/last seen/i.test(t) && !/first passed/i.test(t);
-      }) || null;
+      var fiberUrls = readFlowUrlsFromFiber2(el);
+      var lastSeenUrl = fiberUrls.runResultUrl ? absUrl2(fiberUrls.runResultUrl) : "";
+      var ideUrl = fiberUrls.ideUrl ? absUrl2(fiberUrls.ideUrl) : fiberUrls.runResultUrl ? buildIdeUrlFromRunResult2(fiberUrls.runResultUrl) : "";
+      if (!ideUrl) {
+        var links = Array.from(el.querySelectorAll("a"));
+        var lastSeenLink = links.find(function(a) {
+          return /last seen/i.test(textOf2(a));
+        }) || null;
+        var flowLink = links.find(function(a) {
+          var t = textOf2(a);
+          return !/last seen/i.test(t) && !/first passed/i.test(t);
+        }) || null;
+        if (flowLink) {
+          ideUrl = absUrl2(flowLink.getAttribute("href") || "");
+        }
+        if (lastSeenLink && !lastSeenUrl) {
+          lastSeenUrl = absUrl2(lastSeenLink.getAttribute("href") || "");
+        }
+      }
       flows.push({
         fileName: flowName,
         envId: "",
         closed: false,
         bulletText: "",
         flowName,
-        flowUrl: flowLink ? absUrl2(flowLink.getAttribute("href") || "") : "",
-        lastSeenUrl: lastSeenLink ? absUrl2(lastSeenLink.getAttribute("href") || "") : ""
+        flowUrl: ideUrl,
+        lastSeenUrl
       });
     });
     return {
@@ -27252,6 +27356,7 @@ This won't delete the actual file.`)) return;
     container.innerHTML = "";
     container.style.cssText = "display:flex;flex-direction:column;gap:10px;padding:8px;font-family:monospace;font-size:11px;color:#e2e8f0;";
     var collapsed = null;
+    var othersVisible = false;
     function render() {
       container.innerHTML = "";
       var runs = getSavedInvRuns();
@@ -27276,7 +27381,14 @@ This won't delete the actual file.`)) return;
       runs.sort(function(a, b) {
         return a.displayName.localeCompare(b.displayName);
       });
-      runs.forEach(function(run) {
+      var currentRuns = runs.filter(function(r) {
+        return r.client === currentClient;
+      });
+      var otherRuns = runs.filter(function(r) {
+        return r.client !== currentClient;
+      });
+      var visibleRuns = othersVisible ? runs : currentRuns;
+      visibleRuns.forEach(function(run) {
         var isCurrent = run.client === currentClient;
         var card = document.createElement("div");
         card.style.cssText = "border:1px solid " + (isCurrent ? "#1d4ed8" : "#334155") + ";border-radius:8px;background:" + (isCurrent ? "#0d1f3c" : "#0f172a") + ";overflow:hidden;";
@@ -27461,6 +27573,23 @@ This won't delete the actual file.`)) return;
         card.appendChild(list);
         container.appendChild(card);
       });
+      if (otherRuns.length > 0) {
+        var toggleBtn = document.createElement("button");
+        toggleBtn.type = "button";
+        toggleBtn.textContent = othersVisible ? "Hide others (" + otherRuns.length + ")" : "Show others (" + otherRuns.length + ")";
+        toggleBtn.style.cssText = "margin-top:8px;width:100%;background:none;border:1px dashed #334155;border-radius:6px;color:#475569;cursor:pointer;font-size:10px;padding:5px;";
+        toggleBtn.addEventListener("mouseenter", function() {
+          toggleBtn.style.color = "#94a3b8";
+        });
+        toggleBtn.addEventListener("mouseleave", function() {
+          toggleBtn.style.color = "#475569";
+        });
+        toggleBtn.addEventListener("click", function() {
+          othersVisible = !othersVisible;
+          render();
+        });
+        container.appendChild(toggleBtn);
+      }
     }
     render();
   }
@@ -30040,7 +30169,7 @@ This won't delete the actual file.`)) return;
       } catch (e) {
       }
       try {
-        if ("1.721") return "1.721";
+        if ("1.728") return "1.728";
       } catch (e2) {
       }
       return "unknown";
@@ -33169,7 +33298,7 @@ This won't delete the actual file.`)) return;
     } catch (_) {
     }
     try {
-      if ("1.721") return "1.721";
+      if ("1.728") return "1.728";
     } catch (_) {
     }
     return "unknown";
