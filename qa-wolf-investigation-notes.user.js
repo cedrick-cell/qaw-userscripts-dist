@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         QA Wolf Investigation Notes
 // @namespace    http://tampermonkey.net/
-// @version      1.728
+// @version      1.761
 // @description  Per-file investigation notes: quick links (new-tab opens, PoC textarea, client-wide notes), client/env chips, instant tooltips, run timing, shift sync, work mode, export, search. data-e2e investigation-* hooks.
 // @author       You
 // @match        https://app.qawolf.com/*
@@ -6898,6 +6898,102 @@
     });
     document.body.appendChild(overlay);
   }
+  function parseImportableFlows(notes, existingRows) {
+    var found = [];
+    var re = /[\w./-]+\.flow\.ts/g;
+    var m;
+    while ((m = re.exec(notes)) !== null) {
+      var path = m[0];
+      if (found.indexOf(path) === -1) found.push(path);
+    }
+    var existingNames = existingRows.map(function(r) {
+      return (r.name || "").toLowerCase();
+    });
+    return found.filter(function(p) {
+      return existingNames.indexOf(p.toLowerCase()) === -1;
+    });
+  }
+  function showImportFlowsModal(ctx, ws, rows, importable, persist) {
+    var backdrop = document.createElement("div");
+    backdrop.style.cssText = "position:fixed;inset:0;background:rgba(2,6,23,0.5);z-index:2147483600;display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box;";
+    var modal = document.createElement("div");
+    modal.style.cssText = "background:#fff;border:1px solid #e2e8f0;border-radius:10px;width:100%;max-width:420px;max-height:80vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 8px 32px rgba(0,0,0,0.15);font-family:system-ui,sans-serif;font-size:12px;color:#0f172a;";
+    var mHdr = document.createElement("div");
+    mHdr.style.cssText = "display:flex;align-items:center;justify-content:space-between;padding:12px 14px;border-bottom:1px solid #e2e8f0;";
+    var mTitle = document.createElement("strong");
+    mTitle.textContent = "Import " + importable.length + " flow" + (importable.length !== 1 ? "s" : "") + " from plan";
+    mTitle.style.cssText = "font-size:13px;";
+    var mClose = document.createElement("button");
+    mClose.type = "button";
+    mClose.textContent = "\u2715";
+    mClose.style.cssText = "background:none;border:none;color:#64748b;cursor:pointer;font-size:14px;line-height:1;";
+    mClose.addEventListener("click", function() {
+      backdrop.remove();
+    });
+    mHdr.appendChild(mTitle);
+    mHdr.appendChild(mClose);
+    modal.appendChild(mHdr);
+    var mBody = document.createElement("div");
+    mBody.style.cssText = "padding:12px 14px;overflow-y:auto;display:flex;flex-direction:column;gap:4px;";
+    importable.forEach(function(path) {
+      var slashIdx = path.lastIndexOf("/");
+      var dir = slashIdx >= 0 ? path.slice(0, slashIdx + 1) : "";
+      var base = slashIdx >= 0 ? path.slice(slashIdx + 1) : path;
+      var row2 = document.createElement("div");
+      row2.style.cssText = "padding:5px 8px;border-radius:5px;background:#f8fafc;border:1px solid #e2e8f0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
+      if (dir) {
+        var dirSpan = document.createElement("span");
+        dirSpan.textContent = dir;
+        dirSpan.style.cssText = "color:#94a3b8;font-size:10px;";
+        row2.appendChild(dirSpan);
+      }
+      var baseSpan = document.createElement("span");
+      baseSpan.textContent = base;
+      baseSpan.style.cssText = "color:#334155;font-weight:600;";
+      row2.appendChild(baseSpan);
+      mBody.appendChild(row2);
+    });
+    modal.appendChild(mBody);
+    var mFoot = document.createElement("div");
+    mFoot.style.cssText = "display:flex;justify-content:flex-end;gap:8px;padding:10px 14px;border-top:1px solid #e2e8f0;";
+    var cancelBtn = document.createElement("button");
+    cancelBtn.type = "button";
+    cancelBtn.textContent = "Cancel";
+    cancelBtn.style.cssText = "background:none;border:1px solid #e2e8f0;border-radius:6px;color:#64748b;cursor:pointer;padding:5px 14px;font-size:12px;font-family:inherit;";
+    cancelBtn.addEventListener("click", function() {
+      backdrop.remove();
+    });
+    var confirmBtn = document.createElement("button");
+    confirmBtn.type = "button";
+    confirmBtn.textContent = "Add " + importable.length + " row" + (importable.length !== 1 ? "s" : "");
+    confirmBtn.style.cssText = "background:#2563eb;border:none;border-radius:6px;color:#fff;cursor:pointer;padding:5px 14px;font-size:12px;font-family:inherit;font-weight:600;";
+    confirmBtn.addEventListener("click", function() {
+      importable.forEach(function(path) {
+        rows.push({
+          id: newCoveragePlanRowId(),
+          name: path,
+          addedToTracker: false,
+          loomRecorded: false,
+          attachedToCr: false,
+          selected: false,
+          clarificationNote: "",
+          needsClarification: false
+        });
+      });
+      ws.coveragePlan = rows;
+      persist();
+      backdrop.remove();
+      renderCard(ctx);
+    });
+    mFoot.appendChild(cancelBtn);
+    mFoot.appendChild(confirmBtn);
+    modal.appendChild(mFoot);
+    backdrop.appendChild(modal);
+    backdrop.addEventListener("click", function(e) {
+      if (e.target === backdrop) backdrop.remove();
+    });
+    document.body.appendChild(backdrop);
+  }
   function coveragePlanSection(ctx, ws) {
     var rows = normalizeCoveragePlan(ws);
     ws.coveragePlan = rows;
@@ -6938,6 +7034,61 @@
       saveWorkspace(ws);
       renderCard(ctx);
     }
+    var ICON_COLS = [
+      {
+        key: "addedToTracker",
+        title: "Added to tracker",
+        color: "#16a34a",
+        svg: '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="2" y="2" width="12" height="12" rx="1.5" stroke="currentColor" stroke-width="1.5"/><path d="M2 6.5h12M6.5 6.5V14" stroke="currentColor" stroke-width="1.5"/></svg>'
+      },
+      {
+        key: "loomRecorded",
+        title: "Loom recorded",
+        color: "#7c3aed",
+        svg: '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="1" y="4" width="9" height="8" rx="1.5" stroke="currentColor" stroke-width="1.5"/><path d="M10 7.5l4.5-2.5v5.5L10 8V7.5z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>'
+      },
+      {
+        key: "attachedToCr",
+        title: "Attached to CR",
+        color: "#2563eb",
+        svg: '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12.5 7l-5 5a3 3 0 0 1-4.243-4.243L8 3a1.5 1.5 0 0 1 2.121 2.121L5.879 9.364a.75.75 0 0 1-1.06-1.06L9.06 4.06" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>'
+      }
+    ];
+    function actionsHeaderCell(_trackerUrl) {
+      var cell = document.createElement("div");
+      cell.style.cssText = "display:flex;align-items:center;justify-content:center;border-left:1px solid #e2e8f0;";
+      cell.textContent = "Status";
+      return cell;
+    }
+    function actionsCell(row2) {
+      var cell = document.createElement("div");
+      cell.style.cssText = "display:flex;align-items:center;justify-content:center;gap:4px;border-left:1px solid #e2e8f0;";
+      ICON_COLS.forEach(function(col) {
+        var active = !!row2[col.key];
+        var b = document.createElement("button");
+        b.type = "button";
+        b.innerHTML = col.svg;
+        b.title = col.title + (active ? " \u2713" : " \u2014 click to mark done");
+        b.style.cssText = "background:none;border:none;padding:2px;cursor:pointer;line-height:0;border-radius:3px;color:" + (active ? col.color : "#cbd5e1") + ";";
+        b.addEventListener("click", function() {
+          rows = applyCoveragePlanColumnToggle(rows, row2.id, col.key, !active);
+          persist();
+          renderCard(ctx);
+        });
+        cell.appendChild(b);
+      });
+      var hasNote = !!(row2.clarificationNote || "").trim();
+      var noteBtn = document.createElement("button");
+      noteBtn.type = "button";
+      noteBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="2" y="2" width="12" height="12" rx="1.5" stroke="currentColor" stroke-width="1.5"/><path d="M5 5.5h6M5 8h6M5 10.5h3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>';
+      noteBtn.title = hasNote ? row2.clarificationNote : "Add clarification note";
+      noteBtn.style.cssText = "background:none;border:none;padding:2px;cursor:pointer;line-height:0;border-radius:3px;color:" + (hasNote ? "#d97706" : "#cbd5e1") + ";";
+      noteBtn.addEventListener("click", function() {
+        showCoverageClarificationModal(ctx, row2, persist);
+      });
+      cell.appendChild(noteBtn);
+      return cell;
+    }
     function planCheckCell(row2, key) {
       var cell = document.createElement("div");
       cell.style.cssText = "display:flex;align-items:center;justify-content:center;border-left:1px solid #e2e8f0;";
@@ -6954,25 +7105,50 @@
       cell.appendChild(inp);
       return cell;
     }
-    function flowNameCell(row2, rowIdx) {
+    function flowNameCell(row2, rowIdx, lsKeys) {
       var cell = document.createElement("div");
-      cell.style.cssText = "min-width:0;width:100%;box-sizing:border-box;color:#475569;padding:2px 0 2px 6px;font-size:11px;font-weight:650;line-height:1.3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
+      cell.style.cssText = "min-width:0;width:100%;box-sizing:border-box;color:#475569;padding:2px 0 2px 6px;font-size:11px;font-weight:650;line-height:1.3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;position:relative;";
+      var fullName = row2.name || defaultCoveragePlanRowName(rowIdx);
+      var slashIdx = fullName.lastIndexOf("/");
+      var basename = slashIdx >= 0 ? fullName.slice(slashIdx + 1) : fullName;
+      var hasDir = slashIdx >= 0;
+      var fileKnown = false;
+      var ideHref = "";
+      var scanPrefix = NOTE_LS_KEY_PREFIX + ctx.client + "";
+      var scanSuffix = "" + basename;
+      for (var ki = 0; ki < lsKeys.length; ki++) {
+        var lk = lsKeys[ki];
+        if (lk.startsWith(scanPrefix) && lk.endsWith(scanSuffix)) {
+          var lkParts = lk.slice(NOTE_LS_KEY_PREFIX.length).split("");
+          if (lkParts.length >= 3) {
+            var foundEnvId = lkParts[1];
+            var ref = resolveIndexedFileReference(ctx.client, foundEnvId, basename);
+            if (ref) {
+              fileKnown = true;
+              ideHref = fileUrl(ctx.client, foundEnvId, ref.fullPath);
+              break;
+            }
+          }
+        }
+      }
+      if (hasDir) cell.title = fullName;
       function label() {
         var span = document.createElement("span");
-        span.textContent = row2.name || defaultCoveragePlanRowName(rowIdx);
-        span.title = "Click to edit";
-        span.style.cssText = "cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
-        span.addEventListener("click", function(e) {
-          e.preventDefault();
-          e.stopPropagation();
-          edit(span);
-        });
+        span.textContent = basename;
+        span.style.cssText = "cursor:" + (fileKnown ? "pointer" : "default") + ";" + (fileKnown ? "color:#2563eb;text-decoration:underline;text-underline-offset:2px;" : "");
+        if (fileKnown) {
+          span.addEventListener("click", function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            window.open(ideHref, "_blank", "noopener,noreferrer");
+          });
+        }
         return span;
       }
-      function edit(target) {
+      function edit() {
         var input = document.createElement("input");
         input.type = "text";
-        input.value = row2.name || defaultCoveragePlanRowName(rowIdx);
+        input.value = fullName;
         input.style.cssText = "width:100%;min-width:0;box-sizing:border-box;border:1px solid #93c5fd;border-radius:3px;padding:1px 4px;font-size:11px;font-weight:650;line-height:1.3;font-family:inherit;color:#334155;";
         function saveName() {
           var next = input.value.trim();
@@ -6980,7 +7156,8 @@
             row2.name = next;
             persist();
           }
-          input.replaceWith(label());
+          coverageEditingRowIds.delete(row2.id);
+          renderCard(ctx);
         }
         input.addEventListener("blur", saveName);
         input.addEventListener("keydown", function(e) {
@@ -6990,15 +7167,22 @@
           }
           if (e.key === "Escape") {
             e.preventDefault();
-            input.value = row2.name || defaultCoveragePlanRowName(rowIdx);
+            input.value = fullName;
             input.blur();
           }
         });
-        target.replaceWith(input);
-        input.focus();
-        input.select();
+        return input;
       }
-      cell.appendChild(label());
+      if (coverageEditingRowIds.has(row2.id)) {
+        var inp = edit();
+        cell.appendChild(inp);
+        requestAnimationFrame(function() {
+          inp.focus();
+          inp.select();
+        });
+      } else {
+        cell.appendChild(label());
+      }
       return cell;
     }
     function headerButton(label, title2, onClick, muted) {
@@ -7031,7 +7215,7 @@
     table.style.cssText = "display:flex;flex-direction:column;gap:0;min-height:108px;border:1px solid #e2e8f0;border-radius:7px;overflow:hidden;background:#fff;";
     var trackerUrl = getTrackerUrl(ctx.client);
     var header = document.createElement("div");
-    header.style.cssText = "display:grid;grid-template-columns:18px minmax(105px,1fr) 52px 42px 48px 38px;gap:3px;align-items:center;font-size:9px;font-weight:800;color:#334155;text-transform:uppercase;letter-spacing:.015em;padding:5px 6px;border-bottom:1px solid #e2e8f0;background:#f8fafc;";
+    header.style.cssText = "display:grid;grid-template-columns:18px minmax(105px,1fr) 84px;gap:3px;align-items:center;font-size:9px;font-weight:800;color:#334155;text-transform:uppercase;letter-spacing:.015em;padding:5px 6px;border-bottom:1px solid #e2e8f0;background:#f8fafc;";
     var allSelected = rows.length > 0 && rows.every(function(r) {
       return r.selected !== false;
     });
@@ -7060,19 +7244,7 @@
     flowHead.textContent = "Flow";
     flowHead.style.cssText = "border-left:1px solid #e2e8f0;padding-left:6px;";
     header.appendChild(flowHead);
-    header.appendChild(headerButton("Tracker", "Open or edit tracker link", function() {
-      showTrackerUrlModal(ctx.client, function() {
-        renderCard(ctx);
-      });
-    }, !trackerUrl));
-    header.appendChild(headerButton("Loom", "Open Loom recorder", function() {
-      window.open("https://www.loom.com/looms/videos", "_blank", "noopener,noreferrer");
-    }));
-    header.appendChild(headerButton("Attach", "Jump to related flows", highlightRelatedFlows));
-    var noteHead = document.createElement("div");
-    noteHead.textContent = "Note";
-    noteHead.style.cssText = "text-align:center;border-left:1px solid #e2e8f0;";
-    header.appendChild(noteHead);
+    header.appendChild(actionsHeaderCell(trackerUrl));
     table.appendChild(header);
     if (!rows.length) {
       var emptyRow = document.createElement("div");
@@ -7080,9 +7252,10 @@
       emptyRow.textContent = "No existing flows.";
       table.appendChild(emptyRow);
     }
+    var lsKeysCache = Object.keys(localStorage);
     rows.forEach(function(row2, rowIdx) {
       var line = document.createElement("div");
-      line.style.cssText = "display:grid;grid-template-columns:18px minmax(105px,1fr) 52px 42px 48px 38px;gap:3px;align-items:center;padding:4px 6px;border-bottom:1px solid #e2e8f0;";
+      line.style.cssText = "display:grid;grid-template-columns:18px minmax(105px,1fr) 84px;gap:3px;align-items:center;padding:4px 6px;border-bottom:1px solid #e2e8f0;";
       var selectCell = document.createElement("div");
       selectCell.style.cssText = "display:flex;align-items:center;justify-content:center;";
       var selected = row2.selected !== false;
@@ -7098,27 +7271,12 @@
       });
       selectCell.appendChild(rowSelect);
       line.appendChild(selectCell);
-      line.appendChild(flowNameCell(row2, rowIdx));
-      line.appendChild(planCheckCell(row2, "addedToTracker"));
-      line.appendChild(planCheckCell(row2, "loomRecorded"));
-      line.appendChild(planCheckCell(row2, "attachedToCr"));
-      var clarifyCell = document.createElement("div");
-      clarifyCell.style.cssText = "display:flex;justify-content:center;border-left:1px solid #e2e8f0;";
-      var clarifyBtn = document.createElement("button");
-      clarifyBtn.type = "button";
-      var hasNote = !!(row2.clarificationNote || "").trim();
-      clarifyBtn.textContent = hasNote ? "note" : "--";
-      clarifyBtn.title = hasNote ? row2.clarificationNote : "Add optional clarification note";
-      clarifyBtn.style.cssText = "border:1px solid " + (hasNote ? "#fcd34d" : "#e2e8f0") + ";background:" + (hasNote ? "#fffbeb" : "#f8fafc") + ";color:" + (hasNote ? "#92400e" : "#64748b") + ";border-radius:6px;padding:1px 6px;font-size:10px;cursor:pointer;font-family:inherit;min-width:28px;";
-      clarifyBtn.addEventListener("click", function() {
-        showCoverageClarificationModal(ctx, row2, persist);
-      });
-      clarifyCell.appendChild(clarifyBtn);
-      line.appendChild(clarifyCell);
+      line.appendChild(flowNameCell(row2, rowIdx, lsKeysCache));
+      line.appendChild(actionsCell(row2));
       table.appendChild(line);
     });
     var addFlowRow = document.createElement("div");
-    addFlowRow.style.cssText = "display:grid;grid-template-columns:18px minmax(105px,1fr) 52px 42px 48px 38px;gap:3px;align-items:center;padding:4px 6px;border-bottom:1px solid #e2e8f0;";
+    addFlowRow.style.cssText = "display:grid;grid-template-columns:18px minmax(105px,1fr) 84px;gap:3px;align-items:center;padding:4px 6px;border-bottom:1px solid #e2e8f0;";
     addFlowRow.appendChild(document.createElement("div"));
     var addFlowCell = document.createElement("div");
     addFlowCell.style.cssText = "border-left:1px solid #e2e8f0;padding-left:6px;";
@@ -7131,14 +7289,23 @@
         }
       })
     );
+    var importable = parseImportableFlows(ws.privateNotes || "", rows);
+    if (importable.length) {
+      var importBtn = btn("\u2193 Import " + importable.length + " from plan", {
+        variant: "link",
+        fullWidth: false,
+        onClick: function() {
+          showImportFlowsModal(ctx, ws, rows, importable, persist);
+        }
+      });
+      importBtn.style.marginLeft = "8px";
+      addFlowCell.appendChild(importBtn);
+    }
     addFlowRow.appendChild(addFlowCell);
-    addFlowRow.appendChild(document.createElement("div"));
-    addFlowRow.appendChild(document.createElement("div"));
-    addFlowRow.appendChild(document.createElement("div"));
     addFlowRow.appendChild(document.createElement("div"));
     table.appendChild(addFlowRow);
     var footerRow = document.createElement("div");
-    footerRow.style.cssText = "display:grid;grid-template-columns:18px minmax(105px,1fr) 52px 42px 48px 38px;gap:3px;align-items:center;padding:6px;";
+    footerRow.style.cssText = "display:grid;grid-template-columns:18px minmax(105px,1fr) 84px;gap:3px;align-items:center;padding:6px;";
     footerRow.appendChild(document.createElement("div"));
     var footerCell = document.createElement("div");
     footerCell.style.cssText = "grid-column:2 / -1;border-left:1px solid #e2e8f0;padding-left:6px;";
@@ -7159,6 +7326,18 @@
     if (rows.some(function(r) {
       return r.selected !== false;
     })) {
+      var pencilAction = document.createElement("button");
+      pencilAction.type = "button";
+      pencilAction.innerHTML = '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M11.5 1.5a2.121 2.121 0 0 1 3 3L5 14H2v-3L11.5 1.5Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg> Rename';
+      pencilAction.title = "Rename selected rows";
+      pencilAction.style.cssText = "display:inline-flex;align-items:center;gap:4px;background:none;border:1px solid #cbd5e1;border-radius:6px;color:#475569;cursor:pointer;padding:3px 8px;font-size:10px;font-family:inherit;line-height:1;";
+      pencilAction.addEventListener("click", function() {
+        rows.forEach(function(r) {
+          if (r.selected !== false) coverageEditingRowIds.add(r.id);
+        });
+        renderCard(ctx);
+      });
+      rightActions.appendChild(pencilAction);
       var deleteAction = btn("Delete selected", {
         variant: "danger",
         fullWidth: false,
@@ -7168,9 +7347,7 @@
       });
       deleteAction.style.color = "#b91c1c";
       deleteAction.style.fontWeight = "700";
-      rightActions.appendChild(
-        deleteAction
-      );
+      rightActions.appendChild(deleteAction);
     }
     rowActions.appendChild(rightActions);
     footerCell.appendChild(rowActions);
@@ -7419,6 +7596,11 @@
             return '<code style="background:#1e293b;color:#e2e8f0;border-radius:3px;padding:1px 5px;font-size:11px;font-family:monospace;">' + c + "</code>";
           }).replace(/\*\*([^\n]*?)\*\*/g, function(_, b) {
             return "<strong>" + b + "</strong>";
+          }).replace(/\[([^\]]+)\]\(([^)]+)\)/g, function(_, label, url) {
+            var href = url.replace(/&amp;/g, "&").trim();
+            if (!/^https?:/i.test(href)) return label;
+            var safeHref = href.replace(/"/g, "&quot;");
+            return '<a href="' + safeHref + '" target="_blank" rel="noopener noreferrer" style="color:#4f46e5;text-decoration:underline;text-underline-offset:2px;">' + label + "</a>";
           });
         }
         var lines = text.split("\n");
@@ -7462,9 +7644,24 @@
         return html;
       }, appendPrivateNotesEditor2 = function(focusImmediately) {
         card.appendChild(fieldLabel("Private notes"));
+        var previewWrap = document.createElement("div");
+        previewWrap.style.cssText = "position:relative;margin-bottom:6px;";
+        var pencilBtn = document.createElement("button");
+        pencilBtn.type = "button";
+        pencilBtn.title = "Edit notes";
+        pencilBtn.innerHTML = '<svg width="18" height="18" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M11.5 1.5a2.121 2.121 0 0 1 3 3L5 14H2v-3L11.5 1.5Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>';
+        pencilBtn.style.cssText = "position:absolute;top:5px;right:5px;z-index:1;display:none;background:#fff;border:1px solid #cbd5e1;padding:3px;cursor:pointer;color:#64748b;border-radius:4px;line-height:0;";
+        pencilBtn.addEventListener("mouseenter", function() {
+          pencilBtn.style.color = "#4f46e5";
+          pencilBtn.style.borderColor = "#a5b4fc";
+        });
+        pencilBtn.addEventListener("mouseleave", function() {
+          pencilBtn.style.color = "#64748b";
+          pencilBtn.style.borderColor = "#cbd5e1";
+        });
+        previewWrap.appendChild(pencilBtn);
         var preview = document.createElement("div");
-        preview.style.cssText = "width:100%;box-sizing:border-box;border:1px solid #cbd5e1;border-radius:7px;padding:8px;min-height:40px;cursor:text;margin-bottom:6px;";
-        preview.title = "Click to edit";
+        preview.style.cssText = "width:100%;box-sizing:border-box;border:1px solid #cbd5e1;border-radius:7px;padding:8px;min-height:40px;";
         var notes = document.createElement("textarea");
         notes.placeholder = "Only you see this \u2014 supports markdown: # heading, - bullet, `code`, **bold**";
         notes.value = ws.privateNotes || "";
@@ -7473,15 +7670,15 @@
           var content = (ws.privateNotes || "").trim();
           if (content) {
             preview.innerHTML = crMd2(content);
-            preview.style.display = "";
+            previewWrap.style.display = "";
           } else {
-            preview.style.display = "none";
+            previewWrap.style.display = "none";
           }
           notes.style.display = "none";
         }
         function showEditor() {
           notes.style.height = preview.offsetHeight + "px";
-          preview.style.display = "none";
+          previewWrap.style.display = "none";
           notes.style.display = "";
           var sy = window.scrollY;
           notes.style.height = "auto";
@@ -7489,7 +7686,13 @@
           window.scrollTo(window.scrollX, sy);
           notes.focus({ preventScroll: true });
         }
-        preview.addEventListener("click", showEditor);
+        previewWrap.addEventListener("mouseenter", function() {
+          pencilBtn.style.display = "";
+        });
+        previewWrap.addEventListener("mouseleave", function() {
+          pencilBtn.style.display = "none";
+        });
+        pencilBtn.addEventListener("click", showEditor);
         notes.addEventListener("input", function() {
           ws.privateNotes = notes.value;
           saveWorkspace(ws);
@@ -7542,7 +7745,8 @@
           }
         });
         notes.addEventListener("blur", showPreview);
-        card.appendChild(preview);
+        previewWrap.appendChild(preview);
+        card.appendChild(previewWrap);
         card.appendChild(notes);
         if (focusImmediately) {
           showEditor();
@@ -7647,26 +7851,32 @@
           if (document.querySelector("[data-qaw-coverage-helper]") && mountObserver) {
             mountObserver.disconnect();
             mountObserver = null;
-            setInterval(function() {
-              if (document.hidden) return;
-              if (!document.querySelector("[data-qaw-coverage-helper]")) syncCoverageHelper();
-            }, 3e3);
+            if (!pollInterval) {
+              pollInterval = setInterval(function() {
+                if (localStorage.getItem(GLOBAL_SAFE_MODE_KEY) === "1") return;
+                if (document.hidden) return;
+                if (!document.querySelector("[data-qaw-coverage-helper]")) syncCoverageHelper();
+              }, 3e3);
+            }
           }
         }, 350);
       });
       mountObserver.observe(document.body || document.documentElement, { childList: true, subtree: true });
     }
   }
-  var mountObserver, syncTimer, reopenedCompleteRequests, lastRenderedCoverageKey, COVERAGE_LOOM_LIBRARY_URL;
+  var mountObserver, syncTimer, pollInterval, reopenedCompleteRequests, lastRenderedCoverageKey, coverageEditingRowIds, COVERAGE_LOOM_LIBRARY_URL;
   var init_coverage_requests = __esm({
     "src/notes/53-coverage-requests.ts"() {
       "use strict";
       init_constants();
+      init_map_tab();
       init_outline_generator();
       mountObserver = null;
       syncTimer = null;
+      pollInterval = null;
       reopenedCompleteRequests = {};
       lastRenderedCoverageKey = "";
+      coverageEditingRowIds = /* @__PURE__ */ new Set();
       COVERAGE_LOOM_LIBRARY_URL = "https://www.loom.com/looms/videos";
     }
   });
@@ -9830,6 +10040,14 @@
     }
   });
 
+  // src/assets/icons/teams-logo.svg
+  var teams_logo_default;
+  var init_teams_logo = __esm({
+    "src/assets/icons/teams-logo.svg"() {
+      teams_logo_default = '<svg xmlns="http://www.w3.org/2000/svg" height="800" width="1200" viewBox="-334.32495 -518.3335 2897.4829 3110.001"><path d="M1554.637 777.5h575.713c54.391 0 98.483 44.092 98.483 98.483v524.398c0 199.901-162.051 361.952-361.952 361.952h-1.711c-199.901.028-361.975-162-362.004-361.901V828.971c.001-28.427 23.045-51.471 51.471-51.471z" fill="#5059C9"/><circle r="233.25" cy="440.583" cx="1943.75" fill="#5059C9"/><circle r="336.917" cy="336.917" cx="1218.083" fill="#7B83EB"/><path d="M1667.323 777.5H717.01c-53.743 1.33-96.257 45.931-95.01 99.676v598.105c-7.505 322.519 247.657 590.16 570.167 598.053 322.51-7.893 577.671-275.534 570.167-598.053V877.176c1.245-53.745-41.268-98.346-95.011-99.676z" fill="#7B83EB"/><path d="M1244 777.5v838.145c-.258 38.435-23.549 72.964-59.09 87.598a91.856 91.856 0 01-35.765 7.257H667.613c-6.738-17.105-12.958-34.21-18.142-51.833a631.287 631.287 0 01-27.472-183.49V877.02c-1.246-53.659 41.198-98.19 94.855-99.52z" opacity=".1"/><path d="M1192.167 777.5v889.978a91.802 91.802 0 01-7.257 35.765c-14.634 35.541-49.163 58.833-87.598 59.09H691.975c-8.812-17.105-17.105-34.21-24.362-51.833-7.257-17.623-12.958-34.21-18.142-51.833a631.282 631.282 0 01-27.472-183.49V877.02c-1.246-53.659 41.198-98.19 94.855-99.52z" opacity=".2"/><path d="M1192.167 777.5v786.312c-.395 52.223-42.632 94.46-94.855 94.855h-447.84A631.282 631.282 0 01622 1475.177V877.02c-1.246-53.659 41.198-98.19 94.855-99.52z" opacity=".2"/><path d="M1140.333 777.5v786.312c-.395 52.223-42.632 94.46-94.855 94.855H649.472A631.282 631.282 0 01622 1475.177V877.02c-1.246-53.659 41.198-98.19 94.855-99.52z" opacity=".2"/><path d="M1244 509.522v163.275c-8.812.518-17.105 1.037-25.917 1.037-8.812 0-17.105-.518-25.917-1.037a284.472 284.472 0 01-51.833-8.293c-104.963-24.857-191.679-98.469-233.25-198.003a288.02 288.02 0 01-16.587-51.833h258.648c52.305.198 94.657 42.549 94.856 94.854z" opacity=".1"/><path d="M1192.167 561.355v111.442a284.472 284.472 0 01-51.833-8.293c-104.963-24.857-191.679-98.469-233.25-198.003h190.228c52.304.198 94.656 42.55 94.855 94.854z" opacity=".2"/><path d="M1192.167 561.355v111.442a284.472 284.472 0 01-51.833-8.293c-104.963-24.857-191.679-98.469-233.25-198.003h190.228c52.304.198 94.656 42.55 94.855 94.854z" opacity=".2"/><path d="M1140.333 561.355v103.148c-104.963-24.857-191.679-98.469-233.25-198.003h138.395c52.305.199 94.656 42.551 94.855 94.855z" opacity=".2"/><linearGradient gradientTransform="matrix(1 0 0 -1 0 2075.333)" y2="394.261" x2="942.234" y1="1683.073" x1="198.099" gradientUnits="userSpaceOnUse" id="a"><stop offset="0" stop-color="#5a62c3"/><stop offset=".5" stop-color="#4d55bd"/><stop offset="1" stop-color="#3940ab"/></linearGradient><path d="M95.01 466.5h950.312c52.473 0 95.01 42.538 95.01 95.01v950.312c0 52.473-42.538 95.01-95.01 95.01H95.01c-52.473 0-95.01-42.538-95.01-95.01V561.51c0-52.472 42.538-95.01 95.01-95.01z" fill="url(#a)"/><path d="M820.211 828.193h-189.97v517.297h-121.03V828.193H320.123V727.844h500.088z" fill="#FFF"/></svg>';
+    }
+  });
+
   // src/notes/51-status-resolver.ts
   function reportLineNo(b) {
     var n = b && b.lineNo != null && b.lineNo !== "" ? Math.floor(Number(b.lineNo)) : 0;
@@ -10316,7 +10534,7 @@
       if (selectedQuestions) {
         var qs = selectedQuestions.get(r.reportId) || [];
         qs.forEach(function(q) {
-          body.push("\u2022 " + q);
+          body.push("    \u2022 " + q);
         });
       }
     });
@@ -10448,8 +10666,8 @@
         html += '<div style="font-weight:700;color:#e8e8e8;margin-top:4px;">' + renderInline(line) + "</div>";
       } else if (/^- /.test(line)) {
         html += '<div style="padding-left:12px;color:#d1d2d3;display:flex;gap:6px;"><span style="color:#94a3b8;flex-shrink:0;">-</span><span>' + renderInline(line.slice(2)) + "</span></div>";
-      } else if (/^• /.test(line)) {
-        html += '<div style="padding-left:24px;color:#b0b1b2;display:flex;gap:6px;"><span style="color:#64748b;flex-shrink:0;">\u2022</span><span>' + renderInline(line.slice(2)) + "</span></div>";
+      } else if (/^\s*• /.test(line)) {
+        html += '<div style="padding-left:24px;color:#b0b1b2;display:flex;gap:6px;"><span style="color:#64748b;flex-shrink:0;">\u2022</span><span>' + renderInline(line.replace(/^\s*• /, "")) + "</span></div>";
       } else {
         html += "<div>" + renderInline(line) + "</div>";
       }
@@ -16002,6 +16220,29 @@
         chipsRow1.appendChild(slackChip);
       })();
       (function() {
+        var teamsUrls = collectTeamsMessageUrls(String(b.text || ""));
+        if (!teamsUrls.length) return;
+        var teamsChip = document.createElement("button");
+        teamsChip.type = "button";
+        var teamsChipLabel = teamsUrls.length === 1 ? "View Teams message" : "View " + teamsUrls.length + " Teams messages";
+        teamsChip.title = teamsChipLabel;
+        teamsChip.setAttribute("aria-label", teamsChipLabel);
+        teamsChip.style.cssText = "display:inline-flex;align-items:center;padding:2px 5px;border-radius:999px;border:1px solid #334155;background:#0f172a;color:#9b9bd6;cursor:pointer;flex-shrink:0;transition:border-color .1s;";
+        teamsChip.innerHTML = teamsIconSvg(11);
+        teamsChip.addEventListener("mouseenter", function() {
+          teamsChip.style.borderColor = "#6264A7";
+        });
+        teamsChip.addEventListener("mouseleave", function() {
+          teamsChip.style.borderColor = "#334155";
+        });
+        teamsChip.addEventListener("click", function(e) {
+          e.preventDefault();
+          e.stopPropagation();
+          openTeamsChipDropdown(teamsChip, teamsUrls);
+        });
+        chipsRow1.appendChild(teamsChip);
+      })();
+      (function() {
         var qs = Array.isArray(b.questions) ? b.questions : [];
         var openCount = qs.filter(function(q) {
           return !q.resolved;
@@ -18756,6 +18997,138 @@
     }
     return card;
   }
+  function parseTeamsMessageUrl(url) {
+    try {
+      var u = new URL(url);
+      if (u.hostname.toLowerCase() !== "teams.microsoft.com") return null;
+      if (u.pathname.indexOf("/l/message/") !== 0) return null;
+      var teamName = (u.searchParams.get("teamName") || "").trim();
+      var channelName = (u.searchParams.get("channelName") || "").trim();
+      var ct = parseInt(u.searchParams.get("createdTime") || "0", 10);
+      return { teamName: teamName || "Teams", channelName, createdTime: ct };
+    } catch (_e) {
+      return null;
+    }
+  }
+  function collectTeamsMessageUrls(text) {
+    var out = [];
+    var re = /https?:\/\/[^\s<>"]+/g;
+    var m;
+    while ((m = re.exec(text)) !== null) {
+      var url = m[0].replace(/[.,;:!?)"'\]]+$/, "");
+      if (parseTeamsMessageUrl(url)) out.push(url);
+    }
+    return out;
+  }
+  function openTeamsChipDropdown(anchor, urls) {
+    document.querySelectorAll("[" + TEAMS_CHIP_DROPDOWN_ATTR + "]").forEach(function(el) {
+      el.remove();
+    });
+    var drop = document.createElement("div");
+    drop.setAttribute(TEAMS_CHIP_DROPDOWN_ATTR, "1");
+    drop.style.cssText = "position:fixed;z-index:2147483020;background:#0f172a;border:1px solid #334155;border-radius:8px;padding:6px;display:flex;flex-direction:column;gap:6px;max-width:340px;max-height:60vh;overflow-y:auto;box-shadow:0 10px 32px rgba(0,0,0,0.55);";
+    urls.forEach(function(url) {
+      var card = makeTeamsMessagePreview(url);
+      if (card) drop.appendChild(card);
+    });
+    if (!drop.children.length) return;
+    document.body.appendChild(drop);
+    var rect = anchor.getBoundingClientRect();
+    var x = Math.min(rect.left, window.innerWidth - 356);
+    var y = rect.bottom + 4;
+    if (y + Math.min(drop.scrollHeight, window.innerHeight * 0.6) > window.innerHeight - 8) {
+      y = Math.max(8, rect.top - Math.min(drop.scrollHeight + 12, window.innerHeight * 0.6));
+    }
+    drop.style.left = Math.max(8, x) + "px";
+    drop.style.top = y + "px";
+    setTimeout(function() {
+      document.addEventListener("mousedown", function onOut(ev) {
+        if (drop.contains(ev.target)) return;
+        drop.remove();
+        document.removeEventListener("mousedown", onOut, true);
+      }, true);
+    }, 0);
+  }
+  function teamsIconSvg(size) {
+    return String(teams_logo_default || "").replace(/width="[^"]*"/, 'width="' + size + '"').replace(/height="[^"]*"/, 'height="' + size + '"').replace(/<\?xml[^>]*>\s*/i, "");
+  }
+  function makeTeamsMessagePreview(url) {
+    var p = parseTeamsMessageUrl(url);
+    if (!p) return null;
+    var card = document.createElement("div");
+    card.setAttribute("data-qaw-no-edit", "1");
+    card.addEventListener("click", function(e) {
+      e.stopPropagation();
+    });
+    card.style.cssText = [
+      "display:block",
+      "margin:5px 0",
+      "padding:10px 12px",
+      "border-radius:10px",
+      "border:1px solid rgba(98,100,167,0.4)",
+      "background:linear-gradient(145deg,#111827 0%,#0f172a 50%,#0c1220 100%)",
+      "box-shadow:inset 0 1px 0 rgba(255,255,255,0.04)",
+      "color:#e2e8f0",
+      "min-width:280px",
+      "max-width:100%",
+      "box-sizing:border-box",
+      "font-size:13px",
+      "font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif",
+      "cursor:default"
+    ].join(";");
+    var headerRow = document.createElement("div");
+    headerRow.style.cssText = "display:flex;gap:8px;align-items:center;";
+    var iconWrap = document.createElement("span");
+    iconWrap.style.cssText = [
+      "display:inline-flex",
+      "align-items:center",
+      "justify-content:center",
+      "width:32px",
+      "height:32px",
+      "border-radius:6px",
+      "flex-shrink:0",
+      "overflow:hidden",
+      "border:1px solid rgba(98,100,167,0.5)"
+    ].join(";");
+    iconWrap.innerHTML = teamsIconSvg(32);
+    var client = p.channelName.replace(/^QA\s*Wolf\s*[-–]\s*/i, "").trim() || p.channelName;
+    var nameTimeCol = document.createElement("span");
+    nameTimeCol.style.cssText = "flex:1;min-width:0;display:flex;align-items:baseline;gap:6px;flex-wrap:wrap;padding-top:3px;";
+    var nameEl = document.createElement("span");
+    nameEl.style.cssText = "font-weight:600;font-size:13px;color:#f8fafc;letter-spacing:-0.02em;line-height:1.2;";
+    nameEl.textContent = client;
+    var timeEl = document.createElement("span");
+    timeEl.style.cssText = "font-size:10px;color:#64748b;line-height:1.2;white-space:nowrap;";
+    if (p.createdTime) {
+      var d = new Date(p.createdTime);
+      timeEl.textContent = d.toLocaleString(void 0, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+    }
+    nameTimeCol.appendChild(nameEl);
+    if (p.createdTime) nameTimeCol.appendChild(timeEl);
+    headerRow.appendChild(iconWrap);
+    headerRow.appendChild(nameTimeCol);
+    card.appendChild(headerRow);
+    var footerRow = document.createElement("div");
+    footerRow.style.cssText = "display:flex;justify-content:flex-end;margin-top:8px;";
+    var viewLink = document.createElement("a");
+    viewLink.href = url;
+    viewLink.target = "_blank";
+    viewLink.rel = "noopener noreferrer";
+    viewLink.textContent = "View in Teams \u2197";
+    viewLink.style.cssText = "font-size:11px;color:#9b9bd6;text-decoration:none;white-space:nowrap;";
+    viewLink.addEventListener("mouseenter", function() {
+      viewLink.style.textDecoration = "underline";
+    });
+    viewLink.addEventListener("mouseleave", function() {
+      viewLink.style.textDecoration = "none";
+    });
+    viewLink.addEventListener("click", function(e) {
+      e.stopPropagation();
+    });
+    footerRow.appendChild(viewLink);
+    card.appendChild(footerRow);
+    return card;
+  }
   function renderTextSegmentWithLineRefs(container, text, knownFacets) {
     if (!text) return;
     INLINE_LINE_REF_RE.lastIndex = 0;
@@ -18910,7 +19283,9 @@
         e.stopPropagation();
       });
       var slackCard = makeSlackMessagePreview(url);
+      var teamsCard = !slackCard ? makeTeamsMessagePreview(url) : null;
       if (slackCard) container.appendChild(slackCard);
+      else if (teamsCard) container.appendChild(teamsCard);
       else container.appendChild(a);
       lastIdx = match.index + url.length;
       urlRe.lastIndex = match.index + match[0].length;
@@ -19441,11 +19816,12 @@
       container.appendChild(chip);
     });
   }
-  var CASE_STATUS_OPTIONS, lineContextCloseTimer, lineContextOutsideHandler, QUESTION_DROP_ATTR, SLACK_CHIP_DROPDOWN_ATTR, SLACK_ICON_SVG, _slackPreviewCache, _slackRenderGroups, INLINE_LINE_REF_RE, PARSER_BADGE_RE;
+  var CASE_STATUS_OPTIONS, lineContextCloseTimer, lineContextOutsideHandler, QUESTION_DROP_ATTR, SLACK_CHIP_DROPDOWN_ATTR, SLACK_ICON_SVG, _slackPreviewCache, _slackRenderGroups, TEAMS_CHIP_DROPDOWN_ATTR, INLINE_LINE_REF_RE, PARSER_BADGE_RE;
   var init_cards = __esm({
     "src/notes/05-cards.ts"() {
       "use strict";
       init_state();
+      init_teams_logo();
       init_constants();
       init_bug_logic();
       init_slack_self_dm();
@@ -19477,6 +19853,7 @@
       SLACK_ICON_SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" style="color:#f472b6"><path d="M5.042 15.165a2.528 2.528 0 0 1-2.52 2.523A2.528 2.528 0 0 1 0 15.165a2.527 2.527 0 0 1 2.522-2.52h2.52v2.52zM6.313 15.165a2.527 2.527 0 0 1 2.521-2.52 2.527 2.527 0 0 1 2.521 2.52v6.313A2.528 2.528 0 0 1 8.834 24a2.528 2.528 0 0 1-2.521-2.522v-6.313zM8.834 5.042a2.528 2.528 0 0 1-2.521-2.52A2.528 2.528 0 0 1 8.834 0a2.528 2.528 0 0 1 2.521 2.522v2.52H8.834zM8.834 6.313a2.528 2.528 0 0 1 2.521 2.521 2.528 2.528 0 0 1-2.521 2.521H2.522A2.528 2.528 0 0 1 0 8.834a2.528 2.528 0 0 1 2.522-2.521h6.312zM18.956 8.834a2.528 2.528 0 0 1 2.522-2.521A2.528 2.528 0 0 1 24 8.834a2.528 2.528 0 0 1-2.522 2.521h-2.522V8.834zM17.688 8.834a2.528 2.528 0 0 1-2.523 2.521 2.527 2.527 0 0 1-2.52-2.521V2.522A2.527 2.527 0 0 1 15.165 0a2.528 2.528 0 0 1 2.523 2.522v6.312zM15.165 18.956a2.528 2.528 0 0 1 2.523 2.522A2.528 2.528 0 0 1 15.165 24a2.527 2.527 0 0 1-2.52-2.522v-2.522h2.52zM15.165 17.688a2.527 2.527 0 0 1-2.52-2.523 2.526 2.526 0 0 1 2.52-2.52h6.313A2.527 2.527 0 0 1 24 15.165a2.528 2.528 0 0 1-2.522 2.523h-6.313z"/></svg>';
       _slackPreviewCache = /* @__PURE__ */ new Map();
       _slackRenderGroups = {};
+      TEAMS_CHIP_DROPDOWN_ATTR = "data-qaw-teams-chip-dropdown";
       INLINE_LINE_REF_RE = /\bline(\d{1,7})\b/gi;
       PARSER_BADGE_RE = /\[(click|dblclick|hover|fill|check|uncheck|textContent|waitFor|scrollIntoViewIfNeeded|goto|reload|waitForLoadState|toHaveText|toContainText|visible|strict|Matches|load|domcontentloaded|networkidle|commit)(?:\s+[^\]\n]+)?\]/g;
     }
@@ -27279,19 +27656,20 @@ This won't delete the actual file.`)) return;
   }
   function ensureInvRunSaveButton() {
     var ctx = parseRunDetailsPage();
-    if (!ctx) return;
-    if (document.querySelector("[" + SAVE_BTN_ATTR + "]")) {
+    var saveBtn = document.querySelector("[" + SAVE_BTN_ATTR + "]");
+    if (!ctx) {
+      if (saveBtn) saveBtn.remove();
+      return;
+    }
+    if (saveBtn) {
       if (consumePendingRescrapeForRun(ctx.runId)) {
-        var existingBtn = document.querySelector("[" + SAVE_BTN_ATTR + "]");
-        if (existingBtn) {
-          existingBtn.textContent = "\u21BB Rescraping\u2026";
-          existingBtn.style.color = "#38bdf8";
-        }
-        waitAndAutoRescrape(ctx.runId, 20, existingBtn);
+        saveBtn.textContent = "\u21BB Rescraping\u2026";
+        saveBtn.style.color = "#38bdf8";
+        waitAndAutoRescrape(ctx.runId, 20, saveBtn);
       }
       return;
     }
-    var anchor = document.querySelector('[data-qaw-overlay="1"]');
+    var anchor = document.querySelector('[data-qaw-overlay="1"][data-qaw-toggle-host]');
     if (!anchor || !anchor.parentElement) return;
     var btn3 = document.createElement("button");
     btn3.type = "button";
@@ -27381,12 +27759,12 @@ This won't delete the actual file.`)) return;
       runs.sort(function(a, b) {
         return a.displayName.localeCompare(b.displayName);
       });
-      var currentRuns = runs.filter(function(r) {
+      var currentRuns = currentClient ? runs.filter(function(r) {
         return r.client === currentClient;
-      });
-      var otherRuns = runs.filter(function(r) {
+      }) : runs;
+      var otherRuns = currentClient ? runs.filter(function(r) {
         return r.client !== currentClient;
-      });
+      }) : [];
       var visibleRuns = othersVisible ? runs : currentRuns;
       visibleRuns.forEach(function(run) {
         var isCurrent = run.client === currentClient;
@@ -30169,7 +30547,7 @@ This won't delete the actual file.`)) return;
       } catch (e) {
       }
       try {
-        if ("1.728") return "1.728";
+        if ("1.761") return "1.761";
       } catch (e2) {
       }
       return "unknown";
@@ -32289,6 +32667,7 @@ This won't delete the actual file.`)) return;
 
   // src/notes/28-commit-context.ts
   init_store();
+  init_context();
   init_state();
   init_github_feedback();
   init_llm_models();
@@ -32386,6 +32765,10 @@ This won't delete the actual file.`)) return;
     var model = editor.getModel();
     var orig = model.original;
     var mod = model.modified;
+    if (!orig || orig.getLineCount() === 0) {
+      console.warn(CCX_LOG, "original model empty for", path, "\u2014 diff not ready");
+      return { path, hunks: [], fullContent: "" };
+    }
     var changes = (_b = editor.getLineChanges()) != null ? _b : [];
     var hunks = changes.map(function(c) {
       var oS = Math.max(1, c.originalStartLineNumber - CCX_CONTEXT_LINES);
@@ -32479,8 +32862,24 @@ This won't delete the actual file.`)) return;
       var note2 = notes[key];
       var bs = Array.isArray(note2.bullets) ? note2.bullets : [];
       bs.forEach(function(b) {
-        var t = String(b.text || "").trim();
-        if (t) bullets.push(t);
+        var raw = String(b.text || "");
+        var comps = Array.isArray(b.comparisons) ? b.comparisons : [];
+        var compMap = {};
+        comps.forEach(function(c) {
+          if (c && c.id) compMap[c.id] = c;
+        });
+        var t = raw.replace(/\[\[cmp:([^\]]+)\]\]/g, function(_, id) {
+          var c = compMap[id];
+          if (!c) return "";
+          var exp = String(c.expected && c.expected.text || "").trim();
+          var act = String(c.actual && c.actual.text || "").trim();
+          if (!exp && !act) return "";
+          return "(expected: " + (exp || "\u2014") + " | actual: " + (act || "\u2014") + ")";
+        }).replace(/\[\[(?:img|loc|src):[^\]]*\]\]/g, "").replace(/\[\w[^\]]*\d+s\]/g, "").replace(/#\w+/g, "").trim();
+        if (!t) return;
+        var tag = String(b.tag || "").trim();
+        var lineNo = b.lineNo != null ? " (line " + b.lineNo + ")" : "";
+        bullets.push((tag ? "[" + tag + "]" + lineNo + " " : "") + t);
       });
     });
     return bullets;
@@ -32489,24 +32888,23 @@ This won't delete the actual file.`)) return;
     var out = [];
     out.push("Generate a concise, single-message git commit message based on the diffs below.");
     out.push("");
+    var ctx = parseContext();
+    if (ctx) {
+      out.push("Context: " + ctx.client + " (env " + ctx.envId + ")");
+      out.push("");
+    }
     out.push("Constraints:");
     out.push("- Output only the message itself.");
     out.push('- Do NOT separate the output into a "Subject" and "Body". It must be a single, continuous message (only use a second line immediately following the first if the change is highly complex).');
-    out.push('- Focus strictly on what changed and why (e.g., "Added X for Y").');
+    out.push("- The diff is the ground truth of what changed. Investigation notes provide context for why. Describe what the diff shows \u2014 if the diff is trivial or unclear, say so rather than inferring from notes.");
+    out.push('- Include a reason only if clearly evident from the diff or notes \u2014 do NOT guess vague reasons like "for clarity" or "for reliability". If uncertain, omit it.');
+    out.push("- Do not name the file or flow in the message.");
     out.push("- Keep it under 72 characters unless complexity demands a bit more.");
     out.push("");
     out.push("Changed files:");
     files.forEach(function(f) {
       out.push("## " + f.path);
       out.push("");
-      var noteBullets = ccxNotesForFile(f.path);
-      if (noteBullets.length) {
-        out.push("### Investigation notes");
-        noteBullets.forEach(function(b) {
-          out.push("- " + b);
-        });
-        out.push("");
-      }
       if (f.hunks.length) {
         f.hunks.forEach(function(h, idx) {
           out.push("### Hunk " + (idx + 1));
@@ -32526,21 +32924,13 @@ This won't delete the actual file.`)) return;
           out.push("```");
           out.push("");
         });
-      } else {
-        out.push("*(no diff detected \u2014 file may be new or binary)*");
-        out.push("");
       }
-      if (f.fullContent && !f.hunks.length) {
-        var fcLines = f.fullContent.split("\n");
-        var MAX_FC_LINES = 150;
-        var truncated = fcLines.length > MAX_FC_LINES;
-        out.push("### Full file" + (truncated ? " (first " + MAX_FC_LINES + " of " + fcLines.length + " lines)" : ""));
-        out.push("```");
-        (truncated ? fcLines.slice(0, MAX_FC_LINES) : fcLines).forEach(function(l) {
-          out.push(l);
+      var noteBullets = ccxNotesForFile(f.path);
+      if (noteBullets.length) {
+        out.push("### Investigation notes");
+        noteBullets.forEach(function(b) {
+          out.push("- " + b);
         });
-        if (truncated) out.push("\u2026");
-        out.push("```");
         out.push("");
       }
       out.push("---");
@@ -32754,12 +33144,21 @@ This won't delete the actual file.`)) return;
       thumbBtn.textContent = "\u{1F44E}";
       ccxLastContext = { prompt: "", message: "" };
       ccxScrapeAll().then(function(files) {
+        var anyHunks = files.some(function(f) {
+          return f.hunks.length > 0;
+        });
+        if (!anyHunks) {
+          ccxSetBtnState(genBtn, "\u26A0 No diff \u2014 close & reopen modal, then retry", false);
+          ccxIsGenerating = false;
+          return Promise.resolve("");
+        }
         ccxSetBtnState(genBtn, "Asking LLM\u2026", true);
         var prompt2 = ccxFormat(files);
         ccxLastContext.prompt = prompt2;
         console.info(CCX_LOG, "sending", files.length, "file(s) to LLM \u2014 prompt:\n\n" + prompt2 + "\n");
         return ccxCallLlm(prompt2);
       }).then(function(message) {
+        if (!message) return;
         var ta = document.querySelector(CCX_TEXTAREA_SEL);
         if (!ta) {
           console.warn(CCX_LOG, "commit textarea not found after generation");
@@ -33298,7 +33697,7 @@ This won't delete the actual file.`)) return;
     } catch (_) {
     }
     try {
-      if ("1.728") return "1.728";
+      if ("1.761") return "1.761";
     } catch (_) {
     }
     return "unknown";
@@ -34208,6 +34607,18 @@ This won't delete the actual file.`)) return;
     wireGlobalSafeModeListeners();
     if (isGlobalSafeModeEnabled()) return;
     startNotes();
+    setInterval(function() {
+      var m = performance.memory;
+      if (!m) return;
+      console.info(
+        "[QAW mem] heap:",
+        Math.round(m.usedJSHeapSize / 1e6) + "MB",
+        "/ total:",
+        Math.round(m.totalJSHeapSize / 1e6) + "MB",
+        "/ limit:",
+        Math.round(m.jsHeapSizeLimit / 1e6) + "MB"
+      );
+    }, 2 * 60 * 1e3);
   }
   init();
 })();
