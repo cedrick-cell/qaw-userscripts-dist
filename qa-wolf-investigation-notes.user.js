@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         QA Wolf Investigation Notes
 // @namespace    http://tampermonkey.net/
-// @version      1.761
+// @version      1.762
 // @description  Per-file investigation notes: quick links (new-tab opens, PoC textarea, client-wide notes), client/env chips, instant tooltips, run timing, shift sync, work mode, export, search. data-e2e investigation-* hooks.
 // @author       You
 // @match        https://app.qawolf.com/*
@@ -14452,6 +14452,7 @@
       c.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
       markCaseRecent(c.id);
       persist();
+      saveStoreImmediate();
       if (prevCaseId !== c.id) {
         recordHistoryEvent(editKey, {
           type: "case_link",
@@ -30547,7 +30548,7 @@ This won't delete the actual file.`)) return;
       } catch (e) {
       }
       try {
-        if ("1.761") return "1.761";
+        if ("1.762") return "1.762";
       } catch (e2) {
       }
       return "unknown";
@@ -33697,7 +33698,7 @@ This won't delete the actual file.`)) return;
     } catch (_) {
     }
     try {
-      if ("1.761") return "1.761";
+      if ("1.762") return "1.762";
     } catch (_) {
     }
     return "unknown";
