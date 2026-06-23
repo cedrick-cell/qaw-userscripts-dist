@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         QA Wolf Investigation Notes
 // @namespace    http://tampermonkey.net/
-// @version      1.762
+// @version      1.770
 // @description  Per-file investigation notes: quick links (new-tab opens, PoC textarea, client-wide notes), client/env chips, instant tooltips, run timing, shift sync, work mode, export, search. data-e2e investigation-* hooks.
 // @author       You
 // @match        https://app.qawolf.com/*
@@ -6378,8 +6378,20 @@
     });
     return rows;
   }
-  function coverageTrackerChecksSatisfied(ws) {
+  function newFlowRows(ws) {
     var rows = normalizeCoveragePlan(ws);
+    var plan = parsePlanStructure(ws.privateNotes || "");
+    if (!plan.length) return rows;
+    var newPaths = new Set(plan.map(function(f) {
+      return f.path.toLowerCase();
+    }));
+    var newOnly = rows.filter(function(r) {
+      return newPaths.has((r.name || "").toLowerCase());
+    });
+    return newOnly.length ? newOnly : rows;
+  }
+  function coverageTrackerChecksSatisfied(ws) {
+    var rows = newFlowRows(ws);
     if (coverageUsesCoveragePlan(ws)) {
       return rows.length > 0 && rows.every(function(r) {
         return r.addedToTracker;
@@ -6388,7 +6400,7 @@
     return !!(ws.checks && ws.checks.addedToCoverageTracker);
   }
   function coverageLoomsChecksSatisfied(ws) {
-    var rows = normalizeCoveragePlan(ws);
+    var rows = newFlowRows(ws);
     if (coverageUsesCoveragePlan(ws)) {
       return rows.length > 0 && rows.every(function(r) {
         return r.loomRecorded;
@@ -6397,7 +6409,7 @@
     return !!(ws.checks && ws.checks.loomsRecorded);
   }
   function coverageAttachedChecksSatisfied(ws) {
-    var rows = normalizeCoveragePlan(ws);
+    var rows = newFlowRows(ws);
     if (coverageUsesCoveragePlan(ws)) {
       return rows.length > 0 && rows.every(function(r) {
         return r.attachedToCr;
@@ -6898,6 +6910,40 @@
     });
     document.body.appendChild(overlay);
   }
+  function slugToTitleCase(slug) {
+    return slug.replace(/-/g, " ").replace(/\b\w/g, function(c) {
+      return c.toUpperCase();
+    });
+  }
+  function parsePlanStructure(notes) {
+    var flows = [];
+    var current = null;
+    var inExisting = false;
+    var lines = notes.split("\n");
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i];
+      if (/Existing Flows to Update/i.test(line)) {
+        inExisting = true;
+        current = null;
+        continue;
+      }
+      if (inExisting) continue;
+      var flowM = line.match(/^\s*-\s+\*\*([^*]+\.flow\.ts)\*\*\s+[—\-]+\s+"([^"]+)"/);
+      if (flowM) {
+        current = { path: flowM[1], displayName: flowM[2], group: "", steps: [] };
+        var folder = flowM[1].split("/")[0] || "";
+        current.group = folder ? slugToTitleCase(folder) : "";
+        flows.push(current);
+        continue;
+      }
+      if (current && /^\s{2,}-\s+/.test(line)) {
+        var stepText = line.replace(/^\s*-\s+/, "").trim();
+        if (stepText) current.steps.push(stepText);
+        continue;
+      }
+    }
+    return flows;
+  }
   function parseImportableFlows(notes, existingRows) {
     var found = [];
     var re = /[\w./-]+\.flow\.ts/g;
@@ -7338,6 +7384,53 @@
         renderCard(ctx);
       });
       rightActions.appendChild(pencilAction);
+      var copyTrackerBtn = document.createElement("button");
+      copyTrackerBtn.type = "button";
+      copyTrackerBtn.textContent = "Copy for Tracker";
+      copyTrackerBtn.title = "Copy selected rows as TSV for Google Sheets tracker";
+      copyTrackerBtn.style.cssText = "display:inline-flex;align-items:center;gap:4px;background:none;border:1px solid #cbd5e1;border-radius:6px;color:#475569;cursor:pointer;padding:3px 8px;font-size:10px;font-family:inherit;line-height:1;";
+      copyTrackerBtn.addEventListener("click", function() {
+        var plan = parsePlanStructure(ws.privateNotes || "");
+        var planByPath = {};
+        plan.forEach(function(f) {
+          planByPath[f.path.toLowerCase()] = f;
+        });
+        var selectedRows = rows.filter(function(r) {
+          return r.selected !== false;
+        });
+        var tsvLines = [];
+        var skipped = 0;
+        selectedRows.forEach(function(r) {
+          var name = (r.name || "").toLowerCase();
+          var flow = planByPath[name];
+          if (!flow || !flow.steps.length) {
+            skipped++;
+            return;
+          }
+          flow.steps.forEach(function(step) {
+            tsvLines.push([flow.group, flow.displayName, step].join("	"));
+          });
+        });
+        if (!tsvLines.length) {
+          copyTrackerBtn.textContent = skipped ? "No plan data for selected" : "Nothing to copy";
+          setTimeout(function() {
+            copyTrackerBtn.textContent = "Copy for Tracker";
+          }, 2500);
+          return;
+        }
+        navigator.clipboard.writeText(tsvLines.join("\n")).then(function() {
+          copyTrackerBtn.textContent = "Copied " + tsvLines.length + " row" + (tsvLines.length === 1 ? "" : "s") + (skipped ? " (" + skipped + " skipped)" : "") + " \u2713";
+          setTimeout(function() {
+            copyTrackerBtn.textContent = "Copy for Tracker";
+          }, 2500);
+        }).catch(function() {
+          copyTrackerBtn.textContent = "Clipboard failed";
+          setTimeout(function() {
+            copyTrackerBtn.textContent = "Copy for Tracker";
+          }, 2500);
+        });
+      });
+      rightActions.appendChild(copyTrackerBtn);
       var deleteAction = btn("Delete selected", {
         variant: "danger",
         fullWidth: false,
@@ -7596,9 +7689,11 @@
             return '<code style="background:#1e293b;color:#e2e8f0;border-radius:3px;padding:1px 5px;font-size:11px;font-family:monospace;">' + c + "</code>";
           }).replace(/\*\*([^\n]*?)\*\*/g, function(_, b) {
             return "<strong>" + b + "</strong>";
+          }).replace(/\*([^*\n]+)\*/g, function(_, t) {
+            return "<em>" + t + "</em>";
           }).replace(/\[([^\]]+)\]\(([^)]+)\)/g, function(_, label, url) {
             var href = url.replace(/&amp;/g, "&").trim();
-            if (!/^https?:/i.test(href)) return label;
+            if (!/^https?:|^antigravity-ide:/i.test(href)) return label;
             var safeHref = href.replace(/"/g, "&quot;");
             return '<a href="' + safeHref + '" target="_blank" rel="noopener noreferrer" style="color:#4f46e5;text-decoration:underline;text-underline-offset:2px;">' + label + "</a>";
           });
@@ -7637,7 +7732,9 @@
             html += '<div style="height:5px;"></div>';
           } else {
             closeTo(0);
-            html += '<div style="font-size:12px;color:#374151;line-height:1.45;margin-bottom:1px;">' + inl(esc5(raw)) + "</div>";
+            var leadSpaces = (raw.match(/^(\s*)/) || ["", ""])[1].length;
+            var indentStyle = leadSpaces > 0 ? "padding-left:" + leadSpaces * 6 + "px;" : "";
+            html += '<div style="font-size:12px;color:#374151;line-height:1.45;margin-bottom:1px;' + indentStyle + '">' + inl(esc5(raw.trimStart ? raw.trimStart() : raw.replace(/^\s+/, ""))) + "</div>";
           }
         }
         closeTo(0);
@@ -18403,10 +18500,72 @@
     if (!raw || raw === "Slack") return "Slack";
     return raw.charAt(0).toUpperCase() + raw.slice(1);
   }
+  function qResponse(q) {
+    if (typeof q.response === "string") return q.response;
+    if (Array.isArray(q.answers) && q.answers.length) {
+      q.response = q.answers.join("\n");
+      delete q.answers;
+      return q.response;
+    }
+    if (q.answer) {
+      q.response = q.answer;
+      delete q.answer;
+      return q.response;
+    }
+    return "";
+  }
   function dismissQuestionDropdown() {
     document.querySelectorAll("[" + QUESTION_DROP_ATTR + "]").forEach(function(el) {
       el.remove();
     });
+  }
+  function isSlackUrl(url) {
+    return /^https?:\/\/[^/]*\.slack\.com\//i.test(url);
+  }
+  function renderResponseView(response) {
+    var wrap = document.createElement("div");
+    wrap.style.cssText = "padding-left:8px;margin-top:3px;";
+    var lines = response.split("\n").map(function(l) {
+      return l.trim();
+    }).filter(Boolean);
+    lines.forEach(function(line) {
+      var row2 = document.createElement("div");
+      row2.style.cssText = "display:flex;align-items:center;gap:5px;margin-top:2px;";
+      var dot = document.createElement("span");
+      dot.style.cssText = "color:#475569;font-size:10px;flex-shrink:0;";
+      dot.textContent = "\xB7";
+      row2.appendChild(dot);
+      if (isSlackUrl(line)) {
+        var chip = document.createElement("a");
+        chip.href = line;
+        chip.target = "_blank";
+        chip.rel = "noopener noreferrer";
+        chip.style.cssText = "display:inline-flex;align-items:center;gap:4px;padding:1px 6px;border-radius:999px;border:1px solid #334155;background:#0f172a;color:#f472b6;font-size:10px;text-decoration:none;cursor:pointer;";
+        chip.innerHTML = '<svg viewBox="0 0 24 24" width="9" height="9" fill="currentColor" aria-hidden="true"><path d="M5.042 15.165a2.528 2.528 0 0 1-2.52 2.523A2.528 2.528 0 0 1 0 15.165a2.527 2.527 0 0 1 2.522-2.52h2.52v2.52zM6.313 15.165a2.527 2.527 0 0 1 2.521-2.52 2.527 2.527 0 0 1 2.521 2.52v6.313A2.528 2.528 0 0 1 8.834 24a2.528 2.528 0 0 1-2.521-2.522v-6.313zM8.834 5.042a2.528 2.528 0 0 1-2.521-2.52A2.528 2.528 0 0 1 8.834 0a2.528 2.528 0 0 1 2.521 2.522v2.52H8.834zM8.834 6.313a2.528 2.528 0 0 1 2.521 2.521 2.528 2.528 0 0 1-2.521 2.521H2.522A2.528 2.528 0 0 1 0 8.834a2.528 2.528 0 0 1 2.522-2.521h6.312zM18.956 8.834a2.528 2.528 0 0 1 2.522-2.521A2.528 2.528 0 0 1 24 8.834a2.528 2.528 0 0 1-2.522 2.521h-2.522V8.834zM17.688 8.834a2.528 2.528 0 0 1-2.523 2.521 2.527 2.527 0 0 1-2.52-2.521V2.522A2.527 2.527 0 0 1 15.165 0a2.528 2.528 0 0 1 2.523 2.522v6.312zM15.165 18.956a2.528 2.528 0 0 1 2.523 2.522A2.528 2.528 0 0 1 15.165 24a2.527 2.527 0 0 1-2.52-2.522v-2.522h2.52zM15.165 17.688a2.527 2.527 0 0 1-2.52-2.523 2.526 2.526 0 0 1 2.52-2.52h6.313A2.527 2.527 0 0 1 24 15.165a2.528 2.528 0 0 1-2.522 2.523h-6.313z"/></svg>';
+        chip.appendChild(document.createTextNode("Slack Message \u2192"));
+        chip.addEventListener("click", function(e) {
+          e.stopPropagation();
+          window.open(line, "_blank");
+        });
+        row2.appendChild(chip);
+      } else if (/^https?:\/\//i.test(line)) {
+        var link = document.createElement("a");
+        link.href = line;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        link.style.cssText = "color:#38bdf8;font-size:10px;text-decoration:underline;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:inline-block;vertical-align:bottom;";
+        link.textContent = line;
+        link.title = line;
+        row2.appendChild(link);
+      } else {
+        var txt = document.createElement("span");
+        txt.style.cssText = "color:#94a3b8;font-size:10px;word-break:break-word;";
+        txt.textContent = line;
+        row2.appendChild(txt);
+      }
+      wrap.appendChild(row2);
+    });
+    return wrap;
   }
   function openQuestionPopover(anchor, b, persist, redraw) {
     dismissQuestionDropdown();
@@ -18414,167 +18573,281 @@
     var questions = b.questions;
     var drop = document.createElement("div");
     drop.setAttribute(QUESTION_DROP_ATTR, "1");
-    drop.style.cssText = "position:fixed;z-index:2147483020;background:#0f172a;border:1px solid #334155;border-radius:8px;padding:6px;min-width:260px;max-width:340px;box-shadow:0 8px 24px rgba(0,0,0,0.6);font-family:monospace;font-size:11px;";
-    var showResolved = false;
-    var resolvedCount = questions.filter(function(q) {
-      return q.resolved;
-    }).length;
+    drop.style.cssText = "position:fixed;z-index:2147483020;background:#0f172a;border:1px solid #334155;border-radius:8px;padding:6px;min-width:280px;max-width:360px;box-shadow:0 8px 24px rgba(0,0,0,0.6);font-family:monospace;font-size:11px;";
     function renderDrop() {
       drop.innerHTML = "";
       var hdr = document.createElement("div");
-      hdr.style.cssText = "display:flex;align-items:center;justify-content:space-between;padding:3px 4px 6px;border-bottom:1px solid #1e293b;margin-bottom:4px;";
+      hdr.style.cssText = "padding:3px 4px 6px;border-bottom:1px solid #1e293b;margin-bottom:4px;";
       var hdrLabel = document.createElement("span");
       hdrLabel.style.cssText = "font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.04em;";
-      hdrLabel.textContent = "Open questions";
+      hdrLabel.textContent = "Questions";
       hdr.appendChild(hdrLabel);
-      if (resolvedCount > 0) {
-        var toggleResolved = document.createElement("button");
-        toggleResolved.type = "button";
-        toggleResolved.style.cssText = "background:none;border:none;color:#475569;font-size:10px;cursor:pointer;font-family:monospace;";
-        toggleResolved.textContent = showResolved ? "Hide resolved" : "Show " + resolvedCount + " resolved";
-        toggleResolved.addEventListener("click", function(e) {
-          e.stopPropagation();
-          showResolved = !showResolved;
-          renderDrop();
-        });
-        hdr.appendChild(toggleResolved);
-      }
       drop.appendChild(hdr);
-      var visibleQs = questions.filter(function(q) {
-        return !q.resolved || showResolved;
-      });
-      if (!visibleQs.length) {
+      if (!questions.length) {
         var empty = document.createElement("div");
         empty.style.cssText = "color:#475569;font-size:10px;padding:6px 4px;";
-        empty.textContent = questions.length === 0 ? "No questions yet." : "All questions resolved.";
+        empty.textContent = "No questions yet.";
         drop.appendChild(empty);
       }
-      visibleQs.forEach(function(q) {
-        var row2 = document.createElement("div");
-        row2.style.cssText = "display:flex;align-items:flex-start;gap:6px;padding:5px 4px;border-radius:4px;" + (q.resolved ? "opacity:0.5;" : "");
-        var resolveBtn = document.createElement("button");
-        resolveBtn.type = "button";
-        resolveBtn.title = q.resolved ? "Mark as open" : "Mark as resolved";
-        resolveBtn.style.cssText = "flex-shrink:0;width:14px;height:14px;border-radius:3px;border:1px solid " + (q.resolved ? "#22c55e" : "#475569") + ";background:" + (q.resolved ? "#052e16" : "transparent") + ";cursor:pointer;font-size:9px;color:" + (q.resolved ? "#22c55e" : "#475569") + ";display:flex;align-items:center;justify-content:center;margin-top:1px;";
-        resolveBtn.textContent = q.resolved ? "\u2713" : "";
-        resolveBtn.addEventListener("click", function(e) {
-          e.stopPropagation();
-          q.resolved = !q.resolved;
-          resolvedCount = questions.filter(function(x2) {
-            return x2.resolved;
-          }).length;
-          persist();
-          redraw({});
-          renderDrop();
-        });
+      questions.forEach(function(q) {
+        var qRow = document.createElement("div");
+        qRow.style.cssText = "padding:5px 4px;border-radius:4px;" + (q.resolved ? "opacity:0.45;" : "");
+        var topLine = document.createElement("div");
+        topLine.style.cssText = "display:flex;align-items:flex-start;gap:6px;";
         var textWrap = document.createElement("div");
         textWrap.style.cssText = "flex:1;min-width:0;";
         var textEl = document.createElement("div");
-        textEl.style.cssText = "color:#cbd5e1;line-height:1.4;word-break:break-word;" + (q.resolved ? "text-decoration:line-through;" : "");
+        textEl.style.cssText = "color:#cbd5e1;line-height:1.4;word-break:break-word;" + (q.resolved ? "text-decoration:line-through;color:#64748b;" : "");
         textEl.textContent = q.text;
         textWrap.appendChild(textEl);
-        if (q.answer) {
-          var ansEl = document.createElement("div");
-          ansEl.style.cssText = "color:#64748b;font-size:10px;margin-top:2px;font-style:italic;";
-          ansEl.textContent = "\u2192 " + q.answer;
-          textWrap.appendChild(ansEl);
-        }
-        textEl.style.cursor = "text";
-        textEl.title = "Click to edit";
-        textEl.addEventListener("click", function(e) {
-          e.stopPropagation();
-          var inp = document.createElement("input");
-          inp.type = "text";
-          inp.value = q.text;
-          inp.style.cssText = "width:100%;background:#1e293b;color:#e2e8f0;border:1px solid #334155;border-radius:4px;padding:3px 6px;font-family:monospace;font-size:10px;";
-          inp.addEventListener("keydown", function(ev) {
-            if (ev.key === "Enter") {
+        var moreBtn = document.createElement("button");
+        moreBtn.type = "button";
+        moreBtn.title = "Question actions";
+        moreBtn.style.cssText = "flex-shrink:0;background:none;border:none;color:#475569;cursor:pointer;font-size:13px;padding:0 2px;line-height:1;letter-spacing:1px;";
+        moreBtn.textContent = "\xB7\xB7\xB7";
+        moreBtn.addEventListener("mouseenter", function() {
+          moreBtn.style.color = "#94a3b8";
+        });
+        moreBtn.addEventListener("mouseleave", function() {
+          moreBtn.style.color = "#475569";
+        });
+        function openQMenu() {
+          var existing = document.querySelector("[data-qaw-q-menu]");
+          if (existing) {
+            existing.remove();
+            return;
+          }
+          var menu = document.createElement("div");
+          menu.setAttribute("data-qaw-q-menu", "1");
+          menu.style.cssText = "position:fixed;background:#1e293b;border:1px solid #334155;border-radius:6px;padding:3px;min-width:165px;z-index:2147483022;box-shadow:0 4px 12px rgba(0,0,0,0.5);font-family:monospace;font-size:11px;";
+          var btnBase = "display:block;width:100%;text-align:left;padding:5px 9px;border:none;background:transparent;cursor:pointer;font-size:11px;font-family:monospace;border-radius:3px;color:#cbd5e1;";
+          var editQItem = document.createElement("button");
+          editQItem.type = "button";
+          editQItem.style.cssText = btnBase;
+          editQItem.textContent = "Edit question";
+          editQItem.addEventListener("mouseenter", function() {
+            editQItem.style.background = "#334155";
+          });
+          editQItem.addEventListener("mouseleave", function() {
+            editQItem.style.background = "transparent";
+          });
+          editQItem.addEventListener("click", function(ev) {
+            ev.stopPropagation();
+            menu.remove();
+            var editWrap = document.createElement("div");
+            editWrap.style.cssText = "display:flex;flex-direction:column;gap:4px;";
+            var inp = document.createElement("textarea");
+            inp.value = q.text;
+            inp.rows = 3;
+            inp.style.cssText = "width:100%;box-sizing:border-box;background:#1e293b;color:#e2e8f0;border:1px solid #4f46e5;border-radius:4px;padding:4px 7px;font-family:monospace;font-size:11px;resize:vertical;line-height:1.5;";
+            var editBtns = document.createElement("div");
+            editBtns.style.cssText = "display:flex;gap:5px;";
+            var saveBtn = document.createElement("button");
+            saveBtn.type = "button";
+            saveBtn.textContent = "Save";
+            saveBtn.style.cssText = "background:#1e3a5f;color:#38bdf8;border:1px solid #1d4ed8;border-radius:4px;padding:2px 10px;cursor:pointer;font-size:10px;font-family:monospace;";
+            var cancelBtn = document.createElement("button");
+            cancelBtn.type = "button";
+            cancelBtn.textContent = "Cancel";
+            cancelBtn.style.cssText = "background:none;color:#64748b;border:1px solid #334155;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:10px;font-family:monospace;";
+            function doSaveQ() {
               var t = inp.value.trim();
-              if (t) {
+              if (t && t !== q.text) {
                 q.text = t;
                 persist();
                 redraw({});
               }
               renderDrop();
-            } else if (ev.key === "Escape") {
+            }
+            inp.addEventListener("keydown", function(kev) {
+              if (kev.key === "Escape") {
+                renderDrop();
+              } else if (kev.key === "Enter" && kev.metaKey) {
+                kev.preventDefault();
+                doSaveQ();
+              }
+            });
+            saveBtn.addEventListener("click", function(sev) {
+              sev.stopPropagation();
+              doSaveQ();
+            });
+            cancelBtn.addEventListener("click", function(sev) {
+              sev.stopPropagation();
+              renderDrop();
+            });
+            editBtns.appendChild(saveBtn);
+            editBtns.appendChild(cancelBtn);
+            editWrap.appendChild(inp);
+            editWrap.appendChild(editBtns);
+            textWrap.replaceChild(editWrap, textEl);
+            inp.focus();
+            inp.select();
+          });
+          menu.appendChild(editQItem);
+          var editRItem = document.createElement("button");
+          editRItem.type = "button";
+          editRItem.style.cssText = btnBase;
+          editRItem.textContent = "Edit response";
+          editRItem.addEventListener("mouseenter", function() {
+            editRItem.style.background = "#334155";
+          });
+          editRItem.addEventListener("mouseleave", function() {
+            editRItem.style.background = "transparent";
+          });
+          editRItem.addEventListener("click", function(ev) {
+            ev.stopPropagation();
+            menu.remove();
+            var respArea = qRow.querySelector("[data-qaw-resp-view]");
+            var editWrap = document.createElement("div");
+            editWrap.style.cssText = "padding-left:8px;margin-top:3px;";
+            var ta = document.createElement("textarea");
+            ta.value = qResponse(q);
+            ta.placeholder = "One line per bullet. Paste Slack links directly.";
+            ta.rows = 3;
+            ta.style.cssText = "width:100%;box-sizing:border-box;background:#1e293b;color:#e2e8f0;border:1px solid #4f46e5;border-radius:4px;padding:4px 7px;font-family:monospace;font-size:10px;resize:vertical;line-height:1.5;";
+            var editBtns2 = document.createElement("div");
+            editBtns2.style.cssText = "display:flex;gap:5px;margin-top:4px;";
+            var saveBtn2 = document.createElement("button");
+            saveBtn2.type = "button";
+            saveBtn2.textContent = "Save";
+            saveBtn2.style.cssText = "background:#1e3a5f;color:#38bdf8;border:1px solid #1d4ed8;border-radius:4px;padding:2px 10px;cursor:pointer;font-size:10px;font-family:monospace;";
+            var cancelBtn2 = document.createElement("button");
+            cancelBtn2.type = "button";
+            cancelBtn2.textContent = "Cancel";
+            cancelBtn2.style.cssText = "background:none;color:#64748b;border:1px solid #334155;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:10px;font-family:monospace;";
+            function doSaveR() {
+              q.response = ta.value.trim() || void 0;
+              persist();
+              redraw({});
               renderDrop();
             }
-          });
-          inp.addEventListener("blur", function() {
-            var t = inp.value.trim();
-            if (t && t !== q.text) {
-              q.text = t;
-              persist();
-              redraw({});
-            }
-            setTimeout(renderDrop, 0);
-          });
-          textWrap.replaceChild(inp, textEl);
-          inp.focus();
-          inp.select();
-        });
-        var ansBtn = document.createElement("button");
-        ansBtn.type = "button";
-        ansBtn.title = q.answer ? "Edit answer" : "Add answer";
-        ansBtn.style.cssText = "flex-shrink:0;background:none;border:none;color:#334155;cursor:pointer;font-size:11px;padding:0;line-height:1;";
-        ansBtn.textContent = "\u270E";
-        ansBtn.addEventListener("click", function(e) {
-          e.stopPropagation();
-          var inp = document.createElement("input");
-          inp.type = "text";
-          inp.value = q.answer || "";
-          inp.placeholder = "Write answer\u2026";
-          inp.style.cssText = "width:100%;background:#1e293b;color:#e2e8f0;border:1px solid #334155;border-radius:4px;padding:3px 6px;font-family:monospace;font-size:10px;margin-top:4px;";
-          inp.addEventListener("keydown", function(ev) {
-            if (ev.key === "Enter") {
-              q.answer = inp.value.trim() || void 0;
-              persist();
-              redraw({});
+            saveBtn2.addEventListener("click", function(sev) {
+              sev.stopPropagation();
+              doSaveR();
+            });
+            cancelBtn2.addEventListener("click", function(sev) {
+              sev.stopPropagation();
               renderDrop();
-            } else if (ev.key === "Escape") {
-              inp.remove();
-            }
+            });
+            editBtns2.appendChild(saveBtn2);
+            editBtns2.appendChild(cancelBtn2);
+            editWrap.appendChild(ta);
+            editWrap.appendChild(editBtns2);
+            if (respArea) qRow.replaceChild(editWrap, respArea);
+            else qRow.insertBefore(editWrap, qRow.querySelector("[data-qaw-resp-add]"));
+            ta.focus();
           });
-          inp.addEventListener("blur", function() {
-            if (inp.value.trim() !== (q.answer || "")) {
-              q.answer = inp.value.trim() || void 0;
-              persist();
-              redraw({});
-            }
-            setTimeout(function() {
-              inp.remove();
-            }, 0);
+          menu.appendChild(editRItem);
+          var resolveItem = document.createElement("button");
+          resolveItem.type = "button";
+          resolveItem.style.cssText = btnBase;
+          resolveItem.textContent = q.resolved ? "Mark as open" : "Mark as resolved";
+          resolveItem.addEventListener("mouseenter", function() {
+            resolveItem.style.background = "#334155";
           });
-          textWrap.appendChild(inp);
-          inp.focus();
-        });
-        var delBtn = document.createElement("button");
-        delBtn.type = "button";
-        delBtn.title = "Delete question";
-        delBtn.style.cssText = "flex-shrink:0;background:none;border:none;color:#334155;cursor:pointer;font-size:12px;padding:0;line-height:1;";
-        delBtn.textContent = "\xD7";
-        delBtn.addEventListener("mouseenter", function() {
-          delBtn.style.color = "#f87171";
-        });
-        delBtn.addEventListener("mouseleave", function() {
-          delBtn.style.color = "#334155";
-        });
-        delBtn.addEventListener("click", function(e) {
+          resolveItem.addEventListener("mouseleave", function() {
+            resolveItem.style.background = "transparent";
+          });
+          resolveItem.addEventListener("click", function(ev) {
+            ev.stopPropagation();
+            menu.remove();
+            q.resolved = !q.resolved;
+            persist();
+            redraw({});
+            renderDrop();
+          });
+          menu.appendChild(resolveItem);
+          var sep = document.createElement("div");
+          sep.style.cssText = "border-top:1px solid #334155;margin:3px 0;";
+          menu.appendChild(sep);
+          var delItem = document.createElement("button");
+          delItem.type = "button";
+          delItem.style.cssText = btnBase + "color:#fca5a5;";
+          delItem.textContent = "Delete";
+          var confirming = false;
+          var confirmTimer = null;
+          delItem.addEventListener("mouseenter", function() {
+            delItem.style.background = "#334155";
+          });
+          delItem.addEventListener("mouseleave", function() {
+            delItem.style.background = "transparent";
+          });
+          delItem.addEventListener("click", function(ev) {
+            ev.stopPropagation();
+            if (!confirming) {
+              confirming = true;
+              delItem.textContent = "Sure? Click again";
+              delItem.style.color = "#f87171";
+              confirmTimer = setTimeout(function() {
+                confirming = false;
+                delItem.textContent = "Delete";
+                delItem.style.color = "#fca5a5";
+              }, 3e3);
+              return;
+            }
+            if (confirmTimer) clearTimeout(confirmTimer);
+            menu.remove();
+            var idx = questions.indexOf(q);
+            if (idx !== -1) questions.splice(idx, 1);
+            persist();
+            redraw({});
+            renderDrop();
+          });
+          menu.appendChild(delItem);
+          document.body.appendChild(menu);
+          var mr = moreBtn.getBoundingClientRect();
+          var menuW = menu.offsetWidth;
+          var menuH = menu.offsetHeight;
+          var left = Math.max(8, Math.min(mr.right - menuW, window.innerWidth - menuW - 8));
+          var top = mr.bottom + 4;
+          if (top + menuH > window.innerHeight - 8) top = Math.max(8, mr.top - menuH - 4);
+          menu.style.left = left + "px";
+          menu.style.top = top + "px";
+          setTimeout(function() {
+            document.addEventListener("mousedown", function onMenuOut(mev) {
+              if (menu.contains(mev.target)) return;
+              menu.remove();
+              document.removeEventListener("mousedown", onMenuOut, true);
+            }, true);
+          }, 0);
+        }
+        moreBtn.addEventListener("click", function(e) {
           e.stopPropagation();
-          var idx = questions.indexOf(q);
-          if (idx !== -1) questions.splice(idx, 1);
-          resolvedCount = questions.filter(function(x2) {
-            return x2.resolved;
-          }).length;
-          persist();
-          redraw({});
-          renderDrop();
+          openQMenu();
         });
-        row2.appendChild(resolveBtn);
-        row2.appendChild(textWrap);
-        row2.appendChild(ansBtn);
-        row2.appendChild(delBtn);
-        drop.appendChild(row2);
+        topLine.appendChild(textWrap);
+        topLine.appendChild(moreBtn);
+        qRow.appendChild(topLine);
+        var response = qResponse(q);
+        if (response) {
+          var respView = renderResponseView(response);
+          respView.setAttribute("data-qaw-resp-view", "1");
+          qRow.appendChild(respView);
+        }
+        var addRespEl = document.createElement("div");
+        addRespEl.setAttribute("data-qaw-resp-add", "1");
+        addRespEl.style.cssText = "padding-left:8px;margin-top:2px;" + (response ? "display:none;" : "");
+        var addRespBtn = document.createElement("button");
+        addRespBtn.type = "button";
+        addRespBtn.style.cssText = "background:none;border:none;color:#475569;font-size:10px;cursor:pointer;font-family:monospace;padding:0;";
+        addRespBtn.textContent = "+ response";
+        addRespBtn.addEventListener("mouseenter", function() {
+          addRespBtn.style.color = "#94a3b8";
+        });
+        addRespBtn.addEventListener("mouseleave", function() {
+          addRespBtn.style.color = "#475569";
+        });
+        addRespBtn.addEventListener("click", function(e) {
+          e.stopPropagation();
+          moreBtn.click();
+          setTimeout(function() {
+            var editRBtn = document.querySelector("[data-qaw-q-menu] button:nth-child(2)");
+            if (editRBtn) editRBtn.click();
+          }, 10);
+        });
+        addRespEl.appendChild(addRespBtn);
+        qRow.appendChild(addRespEl);
+        drop.appendChild(qRow);
       });
       var addRow = document.createElement("div");
       addRow.style.cssText = "display:flex;gap:6px;margin-top:6px;padding-top:6px;border-top:1px solid #1e293b;";
@@ -18589,13 +18862,10 @@
       function doAdd() {
         var text = addInput.value.trim();
         if (!text) return;
-        questions.push({ id: uid(), text, resolved: false, createdAt: (/* @__PURE__ */ new Date()).toISOString() });
+        questions.push({ id: uid(), text, answers: [], resolved: false, createdAt: (/* @__PURE__ */ new Date()).toISOString() });
         addInput.value = "";
         persist();
         redraw({});
-        resolvedCount = questions.filter(function(q) {
-          return q.resolved;
-        }).length;
         renderDrop();
       }
       addInput.addEventListener("keydown", function(e) {
@@ -18612,13 +18882,14 @@
       addRow.appendChild(addBtn);
       drop.appendChild(addRow);
     }
+    document.body.appendChild(drop);
     renderDrop();
+    drop.style.width = drop.offsetWidth + "px";
     drop.style.maxHeight = Math.floor(window.innerHeight * 0.6) + "px";
     drop.style.overflowY = "auto";
-    document.body.appendChild(drop);
     var rect = anchor.getBoundingClientRect();
     var dropH = drop.offsetHeight;
-    var x = Math.min(rect.left, window.innerWidth - 356);
+    var x = Math.min(rect.left, window.innerWidth - 376);
     var y = rect.bottom + 4;
     if (y + dropH > window.innerHeight - 8) y = Math.max(8, rect.top - dropH - 4);
     drop.style.left = Math.max(8, x) + "px";
@@ -18626,6 +18897,8 @@
     setTimeout(function() {
       document.addEventListener("mousedown", function onOut(ev) {
         if (drop.contains(ev.target)) return;
+        var t = ev.target;
+        if (t.closest && (t.closest("[data-qaw-q-menu]") || t.closest("[data-qaw-resp-menu]"))) return;
         drop.remove();
         document.removeEventListener("mousedown", onOut, true);
       }, true);
@@ -30548,7 +30821,7 @@ This won't delete the actual file.`)) return;
       } catch (e) {
       }
       try {
-        if ("1.762") return "1.762";
+        if ("1.770") return "1.770";
       } catch (e2) {
       }
       return "unknown";
@@ -33698,7 +33971,7 @@ This won't delete the actual file.`)) return;
     } catch (_) {
     }
     try {
-      if ("1.762") return "1.762";
+      if ("1.770") return "1.770";
     } catch (_) {
     }
     return "unknown";
