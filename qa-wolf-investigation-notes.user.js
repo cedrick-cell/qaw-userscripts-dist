@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         QA Wolf Investigation Notes
 // @namespace    http://tampermonkey.net/
-// @version      1.770
+// @version      1.778
 // @description  Per-file investigation notes: quick links (new-tab opens, PoC textarea, client-wide notes), client/env chips, instant tooltips, run timing, shift sync, work mode, export, search. data-e2e investigation-* hooks.
 // @author       You
 // @match        https://app.qawolf.com/*
@@ -24110,6 +24110,584 @@
     }
   });
 
+  // src/notes/55-ai-search.ts
+  function aisLoadHistory() {
+    try {
+      var raw = localStorage.getItem(HISTORY_KEY);
+      return raw ? JSON.parse(raw) : {};
+    } catch (_) {
+      return {};
+    }
+  }
+  function aisHistorySummary(events) {
+    var lines = [];
+    var recent = events.slice(-30);
+    recent.forEach(function(ev) {
+      if (ev.type === "commit" && ev.commitMessage) lines.push("Commit: " + ev.commitMessage.slice(0, 120));
+      else if ((ev.type === "bug_add" || ev.type === "bug_change") && ev.bugTitle) lines.push("Bug: " + ev.bugTitle.slice(0, 100));
+      else if (ev.type === "status_change" && ev.fromStatus && ev.toStatus) lines.push("Status: " + ev.fromStatus + " \u2192 " + ev.toStatus);
+      else if (ev.type === "maintenance_add") lines.push("Maintenance added");
+    });
+    return lines.slice(-8).join(" | ");
+  }
+  function aisEnrichBulletText(b) {
+    var text = String(b.text || "");
+    var locators = b.locators || [];
+    text = text.replace(/\[\[loc:([^\]]+)\]\]/g, function(_, id) {
+      var loc = locators.find(function(l) {
+        return l.id === id;
+      });
+      if (!loc) return "";
+      var label = loc.shorthand || loc.text || id;
+      var suffix = (loc.detail ? " (" + loc.detail + ")" : "") + (loc.matches != null ? " [" + loc.matches + " match" + (loc.matches === 1 ? "" : "es") + "]" : "");
+      return "locator:" + label + suffix;
+    });
+    var comparisons = b.comparisons || [];
+    text = text.replace(/\[\[cmp:([^\]]+)\]\]/g, function(_, id) {
+      var cmp = comparisons.find(function(c) {
+        return c.id === id;
+      });
+      if (!cmp) return "";
+      var exp = cmp.expected && cmp.expected.text ? cmp.expected.text.slice(0, 100) : "";
+      var act = cmp.actual && cmp.actual.text ? cmp.actual.text.slice(0, 100) : "";
+      return exp || act ? "expected:" + exp + " / actual:" + act : "";
+    });
+    text = text.replace(/\[\[img:[^\]]+\]\]/g, "");
+    return text.trim();
+  }
+  function aisSerializeContext(hits) {
+    var history2 = aisLoadHistory();
+    var byKey = {};
+    hits.forEach(function(hit) {
+      if (!byKey[hit.editKey]) {
+        var meta = parseNoteKey(hit.editKey);
+        var evts = history2[hit.editKey] || [];
+        byKey[hit.editKey] = { meta, bullets: [], histSummary: aisHistorySummary(evts) };
+      }
+      byKey[hit.editKey].bullets.push(hit);
+    });
+    var out = [];
+    Object.keys(byKey).forEach(function(key) {
+      var entry = byKey[key];
+      var meta = entry.meta;
+      var client = meta ? getClientDisplayName(meta.client) : key;
+      var env = meta ? getEnvDisplayName(meta.envId) : "";
+      var file = meta ? displayNoteFileLabel(meta) : key;
+      var status = entry.bullets[0] && entry.bullets[0].note && entry.bullets[0].note.status || "";
+      out.push("FILE: " + client + " | " + env + " | " + file + (status ? " [" + status + "]" : ""));
+      entry.bullets.forEach(function(hit) {
+        var b = hit.bullet;
+        var text = aisEnrichBulletText(b);
+        var logged = hit.loggedAt ? new Date(hit.loggedAt).toLocaleDateString() : "";
+        var tag = b.tag && b.tag !== "unknown" ? "[" + b.tag + "] " : "";
+        var occ = b.occurrences && b.occurrences > 1 ? " (\xD7" + b.occurrences + ")" : "";
+        out.push("  BULLET" + (logged ? " [" + logged + "]" : "") + ": " + tag + text + occ);
+        if (b.bugReport && b.bugReport.title) {
+          out.push('    bug: "' + String(b.bugReport.title).slice(0, 100) + '"' + (b.bugReport.closed ? " [closed]" : ""));
+        }
+      });
+      if (entry.histSummary) out.push("  HISTORY: " + entry.histSummary);
+    });
+    return out.join("\n");
+  }
+  function aisSystemPrompt(context, filterSummary) {
+    return "You are an assistant helping a QA engineer search their investigation notes.\nNotes from: " + filterSummary + ".\n\nContext:\n" + context + "\n\n---\nFor each user query, return the most relevant matches (up to 6) in this exact format:\n\nMATCH\nFILE: {client} | {env} | {filename}\nBULLET: {bullet text snippet}\nREASON: {one sentence why this matches}\n\nSeparate multiple matches with a blank line.\nIf nothing is relevant, respond with exactly: NO_MATCHES\nDo not include any other text outside this format.";
+  }
+  function aisParseResults(text) {
+    if (/NO_MATCHES/i.test(text.trim())) return [];
+    var results = [];
+    var blocks = text.split(/\n\s*\n/);
+    blocks.forEach(function(block) {
+      if (!/MATCH/i.test(block)) return;
+      var fileM = block.match(/FILE:\s*(.+)/i);
+      var bulletM = block.match(/BULLET:\s*(.+)/i);
+      var reasonM = block.match(/REASON:\s*(.+)/i);
+      if (!fileM) return;
+      var parts = fileM[1].split("|").map(function(s) {
+        return s.trim();
+      });
+      results.push({
+        client: parts[0] || "",
+        env: parts[1] || "",
+        filename: parts[2] || "",
+        fileLabel: parts[2] || parts[0] || "",
+        bullet: bulletM ? bulletM[1].trim() : "",
+        reason: reasonM ? reasonM[1].trim() : ""
+      });
+    });
+    return results;
+  }
+  function aisGroupResults(results) {
+    var map = {};
+    var order = [];
+    results.forEach(function(r) {
+      var key = r.client + "|||" + r.env;
+      if (!map[key]) {
+        map[key] = { client: r.client, env: r.env, matches: [] };
+        order.push(key);
+      }
+      map[key].matches.push(r);
+    });
+    return order.map(function(k) {
+      return map[k];
+    });
+  }
+  function aisFindHit(hits, filename, client) {
+    var fn = filename.toLowerCase().replace(/\s+/g, "");
+    var cl = client.toLowerCase().replace(/\s+/g, "");
+    for (var i = 0; i < hits.length; i++) {
+      var meta = parseNoteKey(hits[i].editKey);
+      if (!meta) continue;
+      var metaFile = displayNoteFileLabel(meta).toLowerCase().replace(/\s+/g, "");
+      var metaClient = getClientDisplayName(meta.client).toLowerCase().replace(/\s+/g, "");
+      if (metaFile.indexOf(fn) !== -1 || fn.indexOf(metaFile) !== -1) {
+        if (!cl || metaClient.indexOf(cl) !== -1 || cl.indexOf(metaClient) !== -1) return hits[i];
+      }
+    }
+    return void 0;
+  }
+  function aisRenderRichBullet(hit) {
+    var b = hit.bullet;
+    var wrap = document.createElement("div");
+    wrap.style.cssText = "display:flex;flex-direction:column;gap:3px;margin-top:3px;";
+    var topRow = document.createElement("div");
+    topRow.style.cssText = "display:flex;align-items:center;gap:5px;flex-wrap:wrap;";
+    if (b.tag && b.tag !== "unknown") {
+      var tagEl = document.createElement("span");
+      tagEl.style.cssText = "font-size:7px;padding:1px 5px;border-radius:3px;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;background:" + (AIS_TAG_BG[b.tag] || "#334155") + ";color:" + (AIS_TAG_FG[b.tag] || "#f1f5f9") + ";flex-shrink:0;";
+      tagEl.textContent = b.tag;
+      topRow.appendChild(tagEl);
+    }
+    if (hit.loggedAt) {
+      var dateEl = document.createElement("span");
+      dateEl.style.cssText = "font-size:8px;color:#475569;";
+      dateEl.textContent = new Date(hit.loggedAt).toLocaleDateString();
+      topRow.appendChild(dateEl);
+    }
+    if (b.occurrences && b.occurrences > 1) {
+      var occEl = document.createElement("span");
+      occEl.style.cssText = "font-size:8px;color:#64748b;";
+      occEl.textContent = "\xD7" + b.occurrences;
+      topRow.appendChild(occEl);
+    }
+    if (b.lineNo) {
+      var lineEl = document.createElement("span");
+      lineEl.style.cssText = "font-size:8px;color:#334155;margin-left:auto;font-family:monospace;";
+      lineEl.textContent = "L" + b.lineNo;
+      topRow.appendChild(lineEl);
+    }
+    if (topRow.childNodes.length) wrap.appendChild(topRow);
+    var textEl = document.createElement("div");
+    textEl.style.cssText = "font-size:9px;color:#cbd5e1;line-height:1.6;word-break:break-word;border-left:2px solid #334155;padding-left:5px;";
+    var cmpMap = {};
+    (b.comparisons || []).forEach(function(c) {
+      cmpMap[c.id] = c;
+    });
+    var locMap = {};
+    (b.locators || []).forEach(function(l) {
+      locMap[l.id] = l;
+    });
+    var meta = parseNoteKey(hit.editKey);
+    renderBodyWithLinksAndImages(
+      textEl,
+      String(b.text || ""),
+      function() {
+      },
+      function() {
+      },
+      { map: cmpMap, locMap },
+      b.facets || [],
+      meta ? meta.client : void 0
+    );
+    wrap.appendChild(textEl);
+    if (b.bugReport && b.bugReport.title) {
+      var bugEl = document.createElement("div");
+      bugEl.style.cssText = "font-size:8px;margin-top:1px;";
+      if (b.bugReport.url) {
+        var bugLink = document.createElement("a");
+        bugLink.href = b.bugReport.url;
+        bugLink.target = "_blank";
+        bugLink.rel = "noopener";
+        bugLink.textContent = "\u26A0 " + b.bugReport.title + (b.bugReport.closed ? " [closed]" : "");
+        bugLink.style.cssText = "color:#fca5a5;text-decoration:none;word-break:break-word;";
+        bugEl.appendChild(bugLink);
+      } else {
+        bugEl.style.color = "#fca5a5";
+        bugEl.textContent = "\u26A0 " + b.bugReport.title + (b.bugReport.closed ? " [closed]" : "");
+      }
+      wrap.appendChild(bugEl);
+    }
+    return wrap;
+  }
+  function aisRenderGroupedResults(results, hits) {
+    var frag = document.createDocumentFragment();
+    var groups = aisGroupResults(results);
+    groups.forEach(function(group) {
+      var outerCard = document.createElement("div");
+      outerCard.style.cssText = "border:1px solid #334155;border-radius:6px;margin:0 8px 8px;";
+      var hdr = document.createElement("div");
+      hdr.style.cssText = "background:#172554;padding:4px 8px;display:flex;align-items:center;gap:6px;border-bottom:1px solid #1e3a5f;border-radius:6px 6px 0 0;";
+      var clientEl = document.createElement("span");
+      clientEl.style.cssText = "font-size:10px;color:#93c5fd;font-weight:700;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
+      clientEl.textContent = group.client || "\u2014";
+      hdr.appendChild(clientEl);
+      if (group.env) {
+        var envEl = document.createElement("span");
+        envEl.style.cssText = "font-size:8px;padding:1px 5px;background:#0b223f;border:1px solid #1d4ed8;color:#93c5fd;border-radius:3px;flex-shrink:0;";
+        envEl.textContent = group.env;
+        hdr.appendChild(envEl);
+      }
+      outerCard.appendChild(hdr);
+      var body = document.createElement("div");
+      body.style.cssText = "background:#0a1628;padding:5px 7px;display:flex;flex-direction:column;gap:6px;border-radius:0 0 6px 6px;";
+      group.matches.forEach(function(r, idx) {
+        if (idx > 0) {
+          var divider = document.createElement("div");
+          divider.style.cssText = "height:1px;background:#1e293b;margin:0 -7px;";
+          body.appendChild(divider);
+        }
+        var matchEl = document.createElement("div");
+        matchEl.style.cssText = "display:flex;flex-direction:column;gap:3px;";
+        if (r.reason) {
+          var reasonEl = document.createElement("div");
+          reasonEl.style.cssText = "font-size:9px;color:#4ade80;font-style:italic;padding-left:1px;word-break:break-word;";
+          reasonEl.textContent = r.reason;
+          matchEl.appendChild(reasonEl);
+        }
+        var fileCard = document.createElement("div");
+        fileCard.style.cssText = "align-self:flex-end;width:91%;background:#0f172a;border:1px solid #1e3a5f;border-radius:5px;padding:5px 7px;overflow:hidden;";
+        var fileNameRow = document.createElement("div");
+        fileNameRow.style.cssText = "display:flex;align-items:center;gap:5px;margin-bottom:2px;";
+        var fileName = document.createElement("span");
+        fileName.style.cssText = "font-size:9px;color:#f1f5f9;font-weight:600;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
+        fileName.textContent = r.filename || r.fileLabel;
+        fileNameRow.appendChild(fileName);
+        var matchHit = aisFindHit(hits, r.filename, r.client);
+        var openBtn = document.createElement("button");
+        openBtn.type = "button";
+        openBtn.textContent = "Open \u2192";
+        openBtn.style.cssText = "font-size:8px;color:#38bdf8;background:none;border:none;cursor:pointer;padding:0;flex-shrink:0;font-family:monospace;";
+        (function(mh, ek) {
+          openBtn.addEventListener("click", function() {
+            if (mh) {
+              openBulletInNewTab(mh);
+            } else if (ek) {
+              window.open(ideFileUrlForNoteKey(ek), "_blank", "noopener");
+            }
+          });
+        })(matchHit, matchHit ? matchHit.editKey : void 0);
+        fileNameRow.appendChild(openBtn);
+        fileCard.appendChild(fileNameRow);
+        if (matchHit) {
+          fileCard.appendChild(aisRenderRichBullet(matchHit));
+        } else if (r.bullet) {
+          var bulletEl = document.createElement("div");
+          bulletEl.style.cssText = "font-size:8px;color:#94a3b8;line-height:1.5;border-left:2px solid #334155;padding-left:5px;word-break:break-word;";
+          bulletEl.textContent = r.bullet;
+          fileCard.appendChild(bulletEl);
+        }
+        matchEl.appendChild(fileCard);
+        body.appendChild(matchEl);
+      });
+      outerCard.appendChild(body);
+      frag.appendChild(outerCard);
+    });
+    return frag;
+  }
+  function aisRenderUserMsg(text) {
+    var el = document.createElement("div");
+    el.style.cssText = "margin:8px 8px 4px;background:#1e3a5f;border-radius:5px;padding:5px 8px;font-size:10px;color:#cbd5e1;word-break:break-word;";
+    el.textContent = text;
+    return el;
+  }
+  function aisRenderThinking() {
+    var el = document.createElement("div");
+    el.style.cssText = "margin:3px 10px;font-size:9px;color:#475569;font-style:italic;";
+    el.textContent = "Searching\u2026";
+    return el;
+  }
+  function aisRenderCountLine(n) {
+    var el = document.createElement("div");
+    el.style.cssText = "margin:2px 10px 6px;font-size:9px;color:#64748b;";
+    el.textContent = n === 0 ? "No matches found." : n + " match" + (n === 1 ? "" : "es") + " \xB7 ask a follow-up to refine";
+    return el;
+  }
+  function aisFilterSummary(dayRange, statuses) {
+    var dayLabel = { today: "today", yesterday: "yesterday", "7d": "last 7 days", all: "all time" };
+    return (dayLabel[dayRange] || dayRange) + (statuses.length ? " \xB7 " + statuses.join(", ") : "");
+  }
+  function openAiSearchModal(initialHits, initialDayRange, initialStatuses, currentClient, initialEnvIds) {
+    if (restoreFloatingPanel("ai-search")) return;
+    var settings = loadSettings();
+    if (!settings.llmProvider || !settings.llmApiKey) {
+      alert("Configure an LLM provider in Settings \u2192 LLM before using AI search.");
+      return;
+    }
+    var shell = createFloatingPanel({
+      id: "ai-search",
+      title: "\u2726 AI search",
+      width: 300,
+      height: Math.min(640, Math.max(400, window.innerHeight - 96)),
+      minWidth: 240,
+      minHeight: 320
+    });
+    var discoverHandle = getFloatingPanel("discover");
+    if (discoverHandle) {
+      var dRect = discoverHandle.panel.getBoundingClientRect();
+      var leftPos = dRect.right + 8;
+      if (leftPos + 308 > window.innerWidth - 8) leftPos = Math.max(8, dRect.left - 308);
+      shell.panel.style.left = leftPos + "px";
+      shell.panel.style.top = dRect.top + "px";
+    }
+    var providerLabel = document.createElement("span");
+    providerLabel.style.cssText = "font-size:9px;color:#475569;margin-right:4px;font-family:monospace;";
+    providerLabel.textContent = String(settings.llmProvider || "");
+    shell.header.insertBefore(providerLabel, shell.header.lastChild);
+    var body = shell.body;
+    body.style.cssText = "display:flex;flex-direction:column;min-height:0;flex:1;font-family:monospace;color:#e2e8f0;";
+    var aisDay = initialDayRange;
+    var aisStatuses = initialStatuses.slice();
+    var currentHits = initialHits.slice();
+    function recomputeHits() {
+      var rawHits = collectDiscoverHits("", aisDay);
+      currentHits = buildClientGroups(rawHits, aisStatuses, currentClient, initialEnvIds).flatMap(function(g) {
+        return g.files.flatMap(function(f) {
+          return f.bullets;
+        });
+      });
+    }
+    var filtersEl = document.createElement("div");
+    filtersEl.style.cssText = "padding:6px 8px;border-bottom:1px solid #1e293b;display:flex;flex-direction:column;gap:4px;flex-shrink:0;";
+    function paintChip(btn3, on, onColor) {
+      if (on) {
+        btn3.style.background = "#1e3a5f";
+        btn3.style.color = onColor;
+        btn3.style.borderColor = "#1d4ed8";
+      } else {
+        btn3.style.background = "none";
+        btn3.style.color = "#475569";
+        btn3.style.borderColor = "#334155";
+      }
+    }
+    var countSpan = document.createElement("span");
+    countSpan.style.cssText = "font-size:8px;color:#475569;margin-left:auto;";
+    function updateCountSpan() {
+      var over = currentHits.length > AIS_BULLET_LIMIT;
+      countSpan.style.color = over ? "#fbbf24" : "#475569";
+      countSpan.textContent = (over ? "\u26A0 " : "") + currentHits.length + " bullets";
+    }
+    updateCountSpan();
+    var dayRow = document.createElement("div");
+    dayRow.style.cssText = "display:flex;align-items:center;gap:4px;flex-wrap:wrap;";
+    var dayLabel = document.createElement("span");
+    dayLabel.style.cssText = "font-size:8px;color:#64748b;text-transform:uppercase;letter-spacing:0.05em;width:40px;flex-shrink:0;";
+    dayLabel.textContent = "Range";
+    dayRow.appendChild(dayLabel);
+    var dayBtns = [];
+    AIS_DAY_RANGES.forEach(function(d) {
+      var btn3 = document.createElement("button");
+      btn3.type = "button";
+      btn3.textContent = d.label;
+      btn3.style.cssText = "font-size:8px;padding:1px 7px;border-radius:10px;cursor:pointer;border:1px solid transparent;background:none;color:#475569;border-color:#334155;font-family:monospace;";
+      paintChip(btn3, aisDay === d.id, "#38bdf8");
+      btn3.addEventListener("click", function() {
+        aisDay = d.id;
+        dayBtns.forEach(function(x) {
+          paintChip(x.btn, aisDay === x.id, "#38bdf8");
+        });
+        recomputeHits();
+        updateCountSpan();
+        updateInputState();
+      });
+      dayRow.appendChild(btn3);
+      dayBtns.push({ id: d.id, btn: btn3 });
+    });
+    dayRow.appendChild(countSpan);
+    filtersEl.appendChild(dayRow);
+    var statusRow = document.createElement("div");
+    statusRow.style.cssText = "display:flex;align-items:center;gap:4px;flex-wrap:wrap;";
+    var statusLabel = document.createElement("span");
+    statusLabel.style.cssText = "font-size:8px;color:#64748b;text-transform:uppercase;letter-spacing:0.05em;width:40px;flex-shrink:0;";
+    statusLabel.textContent = "Status";
+    statusRow.appendChild(statusLabel);
+    var statusBtns = [];
+    AIS_STATUS_FILTERS.forEach(function(s) {
+      var btn3 = document.createElement("button");
+      btn3.type = "button";
+      btn3.textContent = s;
+      btn3.style.cssText = "font-size:8px;padding:1px 7px;border-radius:10px;cursor:pointer;border:1px solid transparent;background:none;color:#475569;border-color:#334155;font-family:monospace;";
+      var on = aisStatuses.indexOf(s) !== -1;
+      var onColor = s === "bugged" ? "#fca5a5" : "#38bdf8";
+      paintChip(btn3, on, onColor);
+      btn3.addEventListener("click", function() {
+        var ix = aisStatuses.indexOf(s);
+        if (ix === -1) aisStatuses.push(s);
+        else aisStatuses.splice(ix, 1);
+        paintChip(btn3, aisStatuses.indexOf(s) !== -1, onColor);
+        recomputeHits();
+        updateCountSpan();
+        updateInputState();
+      });
+      statusRow.appendChild(btn3);
+      statusBtns.push({ id: s, btn: btn3 });
+    });
+    filtersEl.appendChild(statusRow);
+    body.appendChild(filtersEl);
+    var chatArea = document.createElement("div");
+    chatArea.style.cssText = "flex:1;overflow-y:auto;padding:6px 0;display:flex;flex-direction:column;";
+    var hintEl = document.createElement("div");
+    hintEl.setAttribute("data-ais-hint", "1");
+    hintEl.style.cssText = "padding:16px 10px;font-size:9px;color:#475569;text-align:center;line-height:1.7;";
+    hintEl.innerHTML = 'Ask anything about your notes.<br><span style="color:#334155;">Commit messages, bug events &amp; status changes<br>are included as context.</span>';
+    chatArea.appendChild(hintEl);
+    body.appendChild(chatArea);
+    var sendHint = document.createElement("div");
+    sendHint.style.cssText = "font-size:7px;color:#334155;text-align:right;padding:1px 10px 0;flex-shrink:0;";
+    sendHint.textContent = "shift+enter to send";
+    body.appendChild(sendHint);
+    var inputRow = document.createElement("div");
+    inputRow.style.cssText = "display:flex;gap:4px;align-items:flex-end;padding:5px 8px 7px;border-top:1px solid #1e293b;flex-shrink:0;";
+    var inp = document.createElement("textarea");
+    inp.placeholder = "what are you looking for?";
+    inp.rows = 1;
+    inp.style.cssText = "flex:1;background:#1e293b;border:1px solid #475569;border-radius:4px;color:#e2e8f0;font-size:10px;padding:4px 6px;font-family:monospace;resize:none;line-height:1.4;overflow:hidden;max-height:120px;";
+    var sendBtn = document.createElement("button");
+    sendBtn.type = "button";
+    sendBtn.textContent = "\u2191";
+    sendBtn.style.cssText = "background:#4f46e5;color:#fff;border:none;border-radius:4px;padding:4px 8px;font-size:12px;cursor:pointer;flex-shrink:0;";
+    inputRow.appendChild(inp);
+    inputRow.appendChild(sendBtn);
+    body.appendChild(inputRow);
+    function updateInputState() {
+      var over = currentHits.length > AIS_BULLET_LIMIT;
+      inp.disabled = over;
+      sendBtn.disabled = over;
+      inp.style.opacity = over ? "0.4" : "1";
+      sendBtn.style.opacity = over ? "0.4" : "1";
+      if (over && !filtersEl.querySelector("[data-ais-warn]")) {
+        var warnEl = document.createElement("div");
+        warnEl.setAttribute("data-ais-warn", "1");
+        warnEl.style.cssText = "font-size:9px;color:#fbbf24;margin-top:2px;";
+        warnEl.textContent = "Over " + AIS_BULLET_LIMIT + " limit \u2014 refine filters to continue.";
+        filtersEl.appendChild(warnEl);
+      } else if (!over) {
+        var warn = filtersEl.querySelector("[data-ais-warn]");
+        if (warn) warn.remove();
+      }
+    }
+    updateInputState();
+    inp.addEventListener("input", function() {
+      inp.style.height = "auto";
+      inp.style.height = inp.scrollHeight + "px";
+    });
+    var msgs = [];
+    var inFlight = false;
+    function scrollBottom() {
+      chatArea.scrollTop = chatArea.scrollHeight;
+    }
+    function doSend() {
+      var _a;
+      var text = inp.value.trim();
+      if (!text || inFlight || inp.disabled) return;
+      inp.value = "";
+      inp.style.height = "auto";
+      inFlight = true;
+      sendBtn.disabled = true;
+      sendBtn.textContent = "\u2026";
+      (_a = chatArea.querySelector("[data-ais-hint]")) == null ? void 0 : _a.remove();
+      chatArea.appendChild(aisRenderUserMsg(text));
+      var thinkingEl = aisRenderThinking();
+      chatArea.appendChild(thinkingEl);
+      scrollBottom();
+      var contextStr = aisSerializeContext(currentHits);
+      var summary = aisFilterSummary(aisDay, aisStatuses);
+      var systemPrompt = aisSystemPrompt(contextStr, summary);
+      var userContent = msgs.length === 0 ? systemPrompt + "\n\n---\nUser query: " + text : text;
+      msgs.push({ role: "user", text: userContent });
+      nlcCallLlm(msgs.slice()).then(function(reply) {
+        msgs.push({ role: "assistant", text: reply });
+        thinkingEl.remove();
+        var results = aisParseResults(reply);
+        if (results.length === 0 && !/NO_MATCHES/i.test(reply.trim())) {
+          var rawEl = document.createElement("div");
+          rawEl.style.cssText = "margin:4px 10px;font-size:9px;color:#94a3b8;white-space:pre-wrap;word-break:break-word;";
+          rawEl.textContent = reply.trim();
+          chatArea.appendChild(rawEl);
+        } else {
+          var frag = aisRenderGroupedResults(results, currentHits);
+          chatArea.appendChild(frag);
+          chatArea.appendChild(aisRenderCountLine(results.length));
+        }
+        scrollBottom();
+      }).catch(function(err) {
+        thinkingEl.remove();
+        msgs.pop();
+        var errEl = document.createElement("div");
+        errEl.style.cssText = "margin:4px 10px;font-size:9px;color:#f87171;";
+        errEl.textContent = "Error: " + String(err && err.message ? err.message : err);
+        chatArea.appendChild(errEl);
+        scrollBottom();
+      }).then(function() {
+        inFlight = false;
+        sendBtn.disabled = inp.disabled;
+        sendBtn.textContent = "\u2191";
+        inp.focus();
+      });
+    }
+    sendBtn.addEventListener("click", doSend);
+    inp.addEventListener("keydown", function(e) {
+      if (e.key === "Enter" && e.shiftKey) {
+        e.preventDefault();
+        doSend();
+      }
+    });
+    console.info(AIS_LOG, "opened with", currentHits.length, "hits,", aisFilterSummary(aisDay, aisStatuses));
+    if (!inp.disabled) inp.focus();
+  }
+  var AIS_LOG, AIS_BULLET_LIMIT, AIS_DAY_RANGES, AIS_STATUS_FILTERS, AIS_TAG_BG, AIS_TAG_FG;
+  var init_ai_search = __esm({
+    "src/notes/55-ai-search.ts"() {
+      "use strict";
+      init_store();
+      init_cards();
+      init_context();
+      init_floating_panel();
+      init_note_llm_chat();
+      init_history();
+      init_discover();
+      init_constants();
+      AIS_LOG = "[QAW AISearch]";
+      AIS_BULLET_LIMIT = 500;
+      AIS_DAY_RANGES = [
+        { id: "today", label: "Today" },
+        { id: "yesterday", label: "Yesterday" },
+        { id: "7d", label: "7d" },
+        { id: "all", label: "All" }
+      ];
+      AIS_STATUS_FILTERS = STATUS_OPTIONS.filter(function(s) {
+        return s !== "empty";
+      }).concat(["helper"]);
+      AIS_TAG_BG = {
+        flake: "#9a3412",
+        locator: "#1e40af",
+        helper: "#166534",
+        unknown: "#6b21a8",
+        note: "#a16207",
+        bug: "#991b1b",
+        maintenance: "#164e63"
+      };
+      AIS_TAG_FG = {
+        flake: "#fed7aa",
+        locator: "#dbeafe",
+        helper: "#dcfce7",
+        unknown: "#ede9fe",
+        note: "#fde68a",
+        bug: "#fecaca",
+        maintenance: "#cffafe"
+      };
+    }
+  });
+
   // src/notes/36-discover.ts
   function esc2(s) {
     return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -24865,7 +25443,7 @@
     var modal = shell.body;
     modal.setAttribute("data-e2e", "investigation-discover-modal");
     modal.style.cssText = "display:flex;flex-direction:column;color:#e2e8f0;font-family:monospace;min-height:0;flex:1;";
-    modal.innerHTML = '<div style="padding:8px 14px 6px;border-bottom:1px solid #334155;"><input type="search" data-e2e="investigation-discover-input" placeholder="Narrow by note text, facets, cases, reports\u2026" style="width:100%;box-sizing:border-box;background:#0f172a;color:#f1f5f9;border:1px solid #64748b;border-radius:5px;padding:6px 8px;font-family:monospace;font-size:11px;" /><div data-qaw-discover-day-row style="display:flex;flex-wrap:wrap;gap:5px;margin-top:6px;"></div><div data-qaw-discover-env-wrap style="display:none;position:relative;"><div style="font-size:9px;color:#64748b;margin-top:6px;margin-bottom:3px;letter-spacing:0.04em;text-transform:uppercase;">Environment</div><div data-qaw-discover-env-row style="display:flex;align-items:center;gap:5px;"></div></div><div style="font-size:9px;color:#64748b;margin-top:6px;margin-bottom:3px;letter-spacing:0.04em;text-transform:uppercase;">File status</div><div data-qaw-discover-status-row style="display:flex;flex-wrap:wrap;gap:5px;"></div></div><div data-qaw-discover-list data-e2e="investigation-discover-results" style="overflow-y:auto;flex:1;min-height:160px;padding:4px 0;"></div><details data-qaw-discover-advanced style="border-top:1px solid #334155;padding:0 14px;"><summary style="cursor:pointer;padding:6px 0;color:#94a3b8;font-size:10px;user-select:none;">Advanced: open / merge by file name</summary><div style="padding:0 0 8px;font-size:10px;color:#94a3b8;line-height:1.4;margin-bottom:6px;">Open the current note under another file name for this client/environment.</div><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;"><input type="text" data-e2e="investigation-discover-filename" placeholder="Editor tab file name" style="flex:1;min-width:140px;box-sizing:border-box;background:#0f172a;color:#f1f5f9;border:1px solid #64748b;border-radius:4px;padding:6px;font-family:monospace;font-size:11px;" /><button type="button" data-qaw-discover-open-merge data-e2e="investigation-discover-open-merge" style="background:#1e40af;color:#bfdbfe;border:none;border-radius:4px;padding:6px 10px;cursor:pointer;font-family:monospace;font-size:10px;">Open / merge</button></div></details><div style="padding:8px 14px;border-top:1px solid #334155;"><button type="button" data-qaw-discover-close data-e2e="investigation-discover-close" style="background:#334155;color:#e2e8f0;border:none;border-radius:4px;padding:5px 11px;cursor:pointer;font-family:monospace;font-size:11px;">Close</button></div>';
+    modal.innerHTML = '<div style="padding:8px 14px 6px;border-bottom:1px solid #334155;"><input type="search" data-e2e="investigation-discover-input" placeholder="Narrow by note text, facets, cases, reports\u2026" style="width:100%;box-sizing:border-box;background:#0f172a;color:#f1f5f9;border:1px solid #64748b;border-radius:5px;padding:6px 8px;font-family:monospace;font-size:11px;" /><div data-qaw-discover-day-row style="display:flex;flex-wrap:wrap;gap:5px;margin-top:6px;"></div><div data-qaw-discover-env-wrap style="display:none;position:relative;"><div style="font-size:9px;color:#64748b;margin-top:6px;margin-bottom:3px;letter-spacing:0.04em;text-transform:uppercase;">Environment</div><div data-qaw-discover-env-row style="display:flex;align-items:center;gap:5px;"></div></div><div style="font-size:9px;color:#64748b;margin-top:6px;margin-bottom:3px;letter-spacing:0.04em;text-transform:uppercase;">File status</div><div data-qaw-discover-status-row style="display:flex;flex-wrap:wrap;gap:5px;"></div></div><div data-qaw-discover-list data-e2e="investigation-discover-results" style="overflow-y:auto;flex:1;min-height:160px;padding:4px 0;"></div><details data-qaw-discover-advanced style="border-top:1px solid #334155;padding:0 14px;"><summary style="cursor:pointer;padding:6px 0;color:#94a3b8;font-size:10px;user-select:none;">Advanced: open / merge by file name</summary><div style="padding:0 0 8px;font-size:10px;color:#94a3b8;line-height:1.4;margin-bottom:6px;">Open the current note under another file name for this client/environment.</div><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;"><input type="text" data-e2e="investigation-discover-filename" placeholder="Editor tab file name" style="flex:1;min-width:140px;box-sizing:border-box;background:#0f172a;color:#f1f5f9;border:1px solid #64748b;border-radius:4px;padding:6px;font-family:monospace;font-size:11px;" /><button type="button" data-qaw-discover-open-merge data-e2e="investigation-discover-open-merge" style="background:#1e40af;color:#bfdbfe;border:none;border-radius:4px;padding:6px 10px;cursor:pointer;font-family:monospace;font-size:10px;">Open / merge</button></div></details><div style="padding:8px 14px;border-top:1px solid #334155;display:flex;align-items:center;justify-content:space-between;"><button type="button" data-qaw-discover-close data-e2e="investigation-discover-close" style="background:#334155;color:#e2e8f0;border:none;border-radius:4px;padding:5px 11px;cursor:pointer;font-family:monospace;font-size:11px;">Close</button><button type="button" data-qaw-discover-ai-search style="background:none;color:#818cf8;border:1px solid #4f46e5;border-radius:4px;padding:5px 11px;cursor:pointer;font-family:monospace;font-size:11px;">\u2726 AI search</button></div>';
     var inp = modal.querySelector('[data-e2e="investigation-discover-input"]');
     var dayRow = modal.querySelector("[data-qaw-discover-day-row]");
     var envWrap = modal.querySelector("[data-qaw-discover-env-wrap]");
@@ -25115,6 +25693,13 @@
     if (closeBtn) closeBtn.addEventListener("click", function() {
       shell.close();
     });
+    var aiSearchBtn = modal.querySelector("[data-qaw-discover-ai-search]");
+    if (aiSearchBtn) {
+      aiSearchBtn.addEventListener("click", function() {
+        var currentHits = collectDiscoverHits(query, dayRange);
+        openAiSearchModal(currentHits, dayRange, selectedStatuses.slice(), currentClient, selectedEnvIds.slice());
+      });
+    }
     if (inp) inp.focus();
   }
   function processPendingDiscoverOpen() {
@@ -25183,6 +25768,7 @@
       init_floating_panel();
       init_client_note_refs();
       init_helper_file_panel();
+      init_ai_search();
       HASHTAG_TOKEN_RE2 = /(^|[\s(])#([a-z][a-z0-9-]*)\b/gi;
       DISCOVER_PENDING_OPEN_KEY = "_qawDiscoverPendingOpen_v1";
       DISCOVER_FILTERS_STORAGE_KEY = "_qawDiscoverFiltersByClient_v1";
@@ -30821,7 +31407,7 @@ This won't delete the actual file.`)) return;
       } catch (e) {
       }
       try {
-        if ("1.770") return "1.770";
+        if ("1.778") return "1.778";
       } catch (e2) {
       }
       return "unknown";
@@ -33971,7 +34557,7 @@ This won't delete the actual file.`)) return;
     } catch (_) {
     }
     try {
-      if ("1.770") return "1.770";
+      if ("1.778") return "1.778";
     } catch (_) {
     }
     return "unknown";
